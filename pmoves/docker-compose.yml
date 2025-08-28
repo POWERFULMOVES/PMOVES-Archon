@@ -33,7 +33,7 @@ services:
       - minio-data:/data
     profiles: ["data"]
   hi-rag-gateway:
-    build: ./services/hi-rag-gateway
+    build: ./pmoves-v5/services/hi-rag-gateway
     restart: unless-stopped
     env_file: [.env]
     environment:
