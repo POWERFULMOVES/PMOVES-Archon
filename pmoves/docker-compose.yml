@@ -1,0 +1,76 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.10.0
+    restart: unless-stopped
+    ports: ["6333:6333"]
+    profiles: ["data"]
+  meilisearch:
+    image: getmeili/meilisearch:v1.8
+    restart: unless-stopped
+    environment:
+      - MEILI_ENV=production
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-master_key}
+    ports: ["7700:7700"]
+    profiles: ["data"]
+  neo4j:
+    image: neo4j:5.22
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+    ports: ["7474:7474","7687:7687"]
+    volumes:
+      - neo4j-data:/data
+      - ./neo4j/cypher:/cypher:ro
+    profiles: ["data"]
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports: ["9000:9000","9001:9001"]
+    volumes:
+      - minio-data:/data
+    profiles: ["data"]
+  hi-rag-gateway:
+    build: ./pmoves-v5/services/hi-rag-gateway
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - SENTENCE_MODEL=all-MiniLM-L6-v2
+      - HIRAG_HTTP_PORT=${HIRAG_HTTP_PORT}
+      - NEO4J_URL=${NEO4J_URL}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - GRAPH_BOOST=${GRAPH_BOOST}
+      - ENTITY_CACHE_TTL=${ENTITY_CACHE_TTL}
+      - ENTITY_CACHE_MAX=${ENTITY_CACHE_MAX}
+      - USE_MEILI=${USE_MEILI}
+      - MEILI_URL=http://meilisearch:7700
+      - MEILI_API_KEY=${MEILI_MASTER_KEY}
+      - NEO4J_DICT_REFRESH_SEC=${NEO4J_DICT_REFRESH_SEC}
+      - NEO4J_DICT_LIMIT=${NEO4J_DICT_LIMIT}
+      - TAILSCALE_ONLY=${TAILSCALE_ONLY}
+      - TAILSCALE_ADMIN_ONLY=${TAILSCALE_ADMIN_ONLY}
+      - TAILSCALE_CIDRS=${TAILSCALE_CIDRS}
+    ports: ["8086:8086"]
+    profiles: ["workers"]
+    depends_on: [qdrant, neo4j]
+  retrieval-eval:
+    build: ./services/retrieval-eval
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      - HIRAG_URL=http://hi-rag-gateway:8086
+      - EVAL_HTTP_PORT=${EVAL_HTTP_PORT}
+    depends_on: [hi-rag-gateway]
+    ports: ["8090:8090"]
+    volumes:
+      - ./services/retrieval-eval:/app:rw
+      - ./datasets:/app/data:rw
+    profiles: ["workers"]
+volumes:
+  neo4j-data: {}
+  minio-data: {}

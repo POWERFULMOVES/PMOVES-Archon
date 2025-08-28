@@ -1,0 +1,3 @@
+name: pmoves-ci
+on: {push: {branches: [main, dev]}, pull_request: {}}
+jobs: {noop: {runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v4}]}}
