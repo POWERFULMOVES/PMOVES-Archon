@@ -1,6 +1,6 @@
 services:
   gotrue:
-    image: supabase/gotrue:v2.150.7
+    image: supabase/gotrue:v2.151.0
     restart: unless-stopped
     environment:
       GOTRUE_SITE_URL: ${GOTRUE_SITE_URL:-http://localhost:3000}

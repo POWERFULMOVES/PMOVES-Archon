@@ -105,6 +105,8 @@ services:
       - ./datasets:/app/data:rw
     profiles: ["workers"]
     networks: [pmoves]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   presign:
     build: ./services/presign
@@ -134,6 +136,8 @@ services:
     ports: ["8085:8085"]
     profiles: ["orchestration","workers"]
     networks: [pmoves]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   extract-worker:
     build: ./services/extract-worker
@@ -149,6 +153,8 @@ services:
     ports: ["8083:8083"]
     profiles: ["workers","orchestration"]
     networks: [pmoves]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   langextract:
     build: ./services/langextract
     restart: unless-stopped
@@ -190,6 +196,38 @@ services:
       - TAILSCALE_CIDRS=${TAILSCALE_CIDRS:-100.64.0.0/10}
     ports: ["8087:8086"]
     profiles: ["workers"]
+    networks: [pmoves]
+
+  # Agents profile (opt-in): NATS broker + Agent Zero + Archon
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    ports: ["4222:4222"]
+    profiles: ["agents"]
+    networks: [pmoves]
+
+  agent-zero:
+    build: ./services/agent-zero
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      - PORT=8080
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on: [nats]
+    ports: ["8080:8080"]
+    profiles: ["agents"]
+    networks: [pmoves]
+
+  archon:
+    build: ./services/archon
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      - PORT=8091
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on: [nats]
+    ports: ["8091:8091"]
+    profiles: ["agents"]
     networks: [pmoves]
 volumes:
   neo4j-data: {}

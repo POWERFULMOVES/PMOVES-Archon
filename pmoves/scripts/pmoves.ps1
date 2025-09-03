@@ -18,7 +18,23 @@ switch ($Cmd) {
     Compose --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker
   }
   "up-fullsupabase" {
-    Compose -f docker-compose.yml -f docker-compose.supabase.yml --profile data --profile workers up -d
+    if (Get-Command supabase -ErrorAction SilentlyContinue) {
+      Write-Host "Detected Supabase CLI. Starting full Supabase via CLI..."
+      try { supabase status | Out-Null } catch {}
+      $running = $LASTEXITCODE -eq 0
+      if (-not $running) { supabase start }
+      # Point PMOVES to CLI endpoints reachable from inside containers via host.docker.internal
+      $hostBase = "http://host.docker.internal:54321"
+      if (-not $Env:SUPA_REST_URL) { $Env:SUPA_REST_URL = "$hostBase/rest/v1" }
+      if (-not $Env:SUPABASE_STORAGE_URL) { $Env:SUPABASE_STORAGE_URL = "$hostBase/storage/v1" }
+      if (-not $Env:SUPABASE_PUBLIC_STORAGE_BASE) { $Env:SUPABASE_PUBLIC_STORAGE_BASE = "$hostBase/storage/v1" }
+      # Start PMOVES services without local Postgres/PostgREST to avoid conflicts
+      Compose --profile data up -d qdrant neo4j minio meilisearch presign
+      Compose --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker
+    } else {
+      Write-Host "Supabase CLI not found. Falling back to compose-based full Supabase."
+      Compose -f docker-compose.yml -f docker-compose.supabase.yml --profile data --profile workers up -d
+    }
   }
   "down" { Compose down }
   "down-fullsupabase" { Compose -f docker-compose.yml -f docker-compose.supabase.yml down }

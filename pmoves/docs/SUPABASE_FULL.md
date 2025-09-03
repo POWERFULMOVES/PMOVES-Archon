@@ -2,20 +2,19 @@
 
 PMOVES ships a minimal stub (Postgres + PostgREST) for fast dev. For full features (Auth/GoTrue, Realtime, Storage/avatars, Studio), use one of:
 
-Option A — Supabase CLI (recommended)
+Option A — Supabase CLI (default via helper)
 - Install: https://supabase.com/docs/guides/cli
-- Start: `supabase start`
+- Start: `supabase start` (or use `./scripts/pmoves.ps1 up-fullsupabase` which calls the CLI if present)
 - Get REST URL: usually `http://localhost:54321/rest/v1` and anon key from CLI output.
 - Update PMOVES `.env`:
   - `SUPA_REST_URL=http://localhost:54321/rest/v1`
   - If enabling strict RLS: set headers in services (not necessary for local permissive dev).
 - Start PMOVES: `./scripts/pmoves.ps1 up`
 
-Option B — Compose (experimental)
+Option B — Compose (fallback)
 - A companion compose file is provided: `docker-compose.supabase.yml`.
-- Start full PMOVES + Supabase:
-  - PowerShell helper: `./scripts/pmoves.ps1 up-fullsupabase`
-  - Or direct: `docker compose -f docker-compose.yml -f docker-compose.supabase.yml --profile data --profile workers up -d`
+- Start full PMOVES + Supabase (only if CLI not installed):
+  - `docker compose -f docker-compose.yml -f docker-compose.supabase.yml --profile data --profile workers up -d`
 - Services (host ports):
   - GoTrue/Auth: 9999
   - Realtime: 4000

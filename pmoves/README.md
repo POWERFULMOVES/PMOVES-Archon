@@ -15,11 +15,16 @@ Services
 - `presign` (8088): MinIO presign API for ComfyUI uploads. See `docs/COMFYUI_MINIO_PRESIGN.md`.
 - `render-webhook` (8085): ComfyUI completion → Supabase Studio. See `docs/RENDER_COMPLETION_WEBHOOK.md`.
  - `langextract` (8084): Core extraction service (text/XML → chunks, errors). See `docs/LANGEXTRACT.md`.
- - `extract-worker` (8083): Ingests LangExtract output to Qdrant/Meili and Supabase.
+- `extract-worker` (8083): Ingests LangExtract output to Qdrant/Meili and Supabase.
+ - Agents (profile `agents`): `nats`, `agent-zero` (8080), `archon` (8091) — opt-in.
 
 Notes
 - Legacy `hi-rag-gateway` remains available. Use `make up-legacy` to start it with `retrieval-eval` targeting the legacy gateway.
 - Compose snippets for services are already merged in `docker-compose.yml` for ease-of-use.
+
+Agents Profile
+- Start: `docker compose --profile agents up -d nats agent-zero archon`
+- Defaults: both use `NATS_URL=nats://nats:4222`; change via `.env` if external broker is used.
 
 Supabase (Full)
 - Recommended: Supabase CLI (see `docs/SUPABASE_FULL.md`). Or use `docker-compose.supabase.yml` with `./scripts/pmoves.ps1 up-fullsupabase`.
