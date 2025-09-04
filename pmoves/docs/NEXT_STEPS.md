@@ -21,3 +21,13 @@ _Last updated: 2025-09-03_
 - [ ] OCR: image ingestion with text extraction + tagging
 - [ ] CI: retrieval‑eval in GH Actions with artifacts
 - [ ] Proxmox templates and cluster notes
+
+## Next Session Focus
+- [ ] media-video: insert `detections`/`segments` into Supabase and emit `analysis.entities.v1`
+- [ ] media-audio: insert `emotions` into Supabase and emit `analysis.audio.v1`
+- [ ] ffmpeg-whisper: switch to `faster-whisper` with GPU auto-detect (Jetson/desktop)
+- [ ] CLIP embeddings on keyframes (optional; desktop on by default, Jetson off)
+- [ ] n8n flows: end-to-end ingest → transcribe → extract → index → notify
+- [ ] Jellyfin refresh hook + Discord rich embeds (cover art, duration, link)
+- [ ] Supabase RLS hardening pass (non-dev)
+- [ ] Qwen2-Audio provider (desktop-only toggle) for advanced audio QA/summarization
