@@ -1,22 +1,46 @@
-# PMOVES v5 • NEXT_STEPS
-_Last updated: 2025-08-28_
+# PMOVES v5 — NEXT_STEPS
+Last updated: 2025-09-08
+
+## Integration Plan (Search, Embeddings, RAG, YT)
+- Embeddings
+  - Standardize on normalized cosine embeddings; choose model per profile.
+  - Defaults: MiniLM (`all-MiniLM-L6-v2`, 384d). Alt (opt‑in): HF 3584d.
+  - Expose envs: `SENTENCE_MODEL`, `EMBED_DIM` (optional), `USE_OLLAMA_EMBED`, `GRAPH_BOOST`.
+- Hybrid Search
+  - Qdrant path: distance=cosine; keep Meili alpha blend via `ALPHA`.
+  - Pgvector path (optional): ivfflat on `vector_cosine_ops` + GIN on text.
+- RAG Strategy
+  - Add pivot/band option from doc2structure; boost by band in rerank.
+  - Keep reranker fusion (BGE) with `RERANK_*` envs and ablation toggle.
+- YT Pipeline
+  - Optionally emit JSONL chunks; embed+index via gateway batch job.
+  - When `USE_MEILI=true`, index titles/snippets for lexical hybrid.
+
+## Milestones
+1) Model/Metric Alignment (M1)
+   - Decide default model (MiniLM‑384) and cosine normalization.
+   - Wire envs into gateway; confirm Qdrant/pgvector distance settings.
+   - Document migration notes for switching to 3584d later.
+2) Ingestion Adapters (M2)
+   - JSONL bulk embed endpoint; YT JSONL emission option.
+3) Hybrid + Rerank Tuning (M3)
+   - Sweep `ALPHA`, `RERANK_*`, band‑boost; record results in retrieval‑eval.
+4) Supabase Integration (M4)
+   - Migrations for pgvector + GIN; optional compose profile `orchestration`.
+5) Docs + Smoke (M5)
+   - E2E guides and scripts for doc → JSONL → embed → index flows.
 
 ## Immediate
-- [ ] **Run PR script** to open 5 feature PRs
-- [ ] **Apply docs patch** to add ROADMAP/NEXT_STEPS
-- [ ] **Set Discord webhook** in `.env` and activate n8n flows
-- [ ] **Configure Jellyfin** API key (+ optional user id)
-- [ ] **Test PDF + MinIO** ingestion with a sample object
+- [ ] Implement M1: align embedding defaults and envs
+- [ ] Add docs for switching between 384d and 3584d
+- [ ] Validate compose/env compatibility on Windows + Linux
 
 ## Short-term (this week)
-- [ ] Publisher: Jellyfin library refresh (cron/webhook)
-- [ ] Discord: rich embeds (cover art, duration, links)
-- [ ] ComfyUI ↔ MinIO presign endpoint + example notebook
-- [ ] Hi‑RAG: reranker toggle (bge-rerank-base) + eval sweep
-- [ ] Neo4j: seed brand alias dictionary (DARKXSIDE, POWERFULMOVES)
+- [ ] Retrieval‑eval sweep for alpha/fusion/band‑boost
+- [ ] Optional pgvector migrations and sample queries
 
 ## Later
-- [ ] Office docs conversion lane (libreoffice headless → PDF)
-- [ ] OCR: image ingestion with text extraction + tagging
-- [ ] CI: retrieval-eval in GH Actions with artifacts
-- [ ] Proxmox templates and cluster notes
+- [ ] Office docs conversion lane (headless → PDF)
+- [ ] OCR ingestion + tagging
+- [ ] CI: retrieval‑eval artifacts in GH Actions
+

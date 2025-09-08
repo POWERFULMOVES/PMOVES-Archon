@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Body, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue, SearchRequest
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, SearchRequest, Distance, VectorParams
 from sentence_transformers import SentenceTransformer
 from FlagEmbedding import FlagReranker
 from rapidfuzz import fuzz
@@ -49,12 +49,46 @@ logger = logging.getLogger("hirag.gateway.v2")
 qdrant = QdrantClient(url=QDRANT_URL, timeout=30.0)
 driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
+_embedder = None
+
+def _get_embedder():
+    global _embedder
+    if _embedder is None:
+        _embedder = SentenceTransformer(MODEL)
+    return _embedder
+
 def embed_query(text: str):
+    # Try provider chain first; fall back to local SentenceTransformer
     try:
-        return _embed_via_providers(text)
+        vec = _embed_via_providers(text)
+        # Ensure vector is a 1-D list/tuple
+        if hasattr(vec, 'tolist'):
+            vec = vec.tolist()
+        return vec
+    except Exception:
+        logger.info("Provider embedding failed; falling back to %s", MODEL)
+        try:
+            emb = _get_embedder().encode([text], normalize_embeddings=True)
+            return emb[0].tolist() if hasattr(emb, 'tolist') else emb[0]
+        except Exception as e:
+            logger.exception("Embedding fallback failed")
+            raise HTTPException(500, f"Embedding error: {e}")
+
+def ensure_qdrant_collection(vector_dim: int):
+    try:
+        qdrant.get_collection(COLL)
+        return
+    except Exception:
+        pass
+    try:
+        qdrant.recreate_collection(
+            collection_name=COLL,
+            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
+        )
+        logger.info("(re)created Qdrant collection %s [dim=%d, metric=cosine]", COLL, vector_dim)
     except Exception as e:
-        logger.exception("Embedding providers failed")
-        raise HTTPException(500, f"Embedding error: {e}")
+        logger.exception("ensure_qdrant_collection failed")
+        raise HTTPException(500, f"Qdrant collection error: {e}")
 
 def hybrid_score(vec_score: float, lex_score: float, alpha: float=ALPHA) -> float:
     return alpha*vec_score + (1.0-alpha)*lex_score
@@ -195,6 +229,12 @@ def stats(_=Depends(require_tailscale)):
 def hirag_query(req: QueryReq = Body(...)):
     try:
         vec = embed_query(req.query)
+        # Lazily ensure collection exists with cosine + correct dim
+        try:
+            dim = len(vec)
+            ensure_qdrant_collection(dim)
+        except Exception:
+            pass
         must = [FieldCondition(key="namespace", match=MatchValue(value=req.namespace))]
         sr = SearchRequest(
             vector=vec, limit=max(req.k, RERANK_TOPN),
