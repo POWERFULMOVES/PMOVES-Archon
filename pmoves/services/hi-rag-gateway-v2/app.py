@@ -242,7 +242,6 @@ def hirag_query(req: QueryReq = Body(...)):
             limit=max(req.k, RERANK_TOPN),
             query_filter=Filter(must=must),
             with_payload=True,
-            with_vectors=False,
         )
     except Exception as e:
         logger.exception("Qdrant search error")
