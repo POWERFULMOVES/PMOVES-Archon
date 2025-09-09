@@ -63,6 +63,14 @@ async function connect(){
         renderPeers();
         return;
       }
+      if(msg.type==='roster' && msg.peers){
+        // initialize unknown peers
+        for(const id of msg.peers){ if(id!==peerId && !peersMap.has(id)) peersMap.set(id, {rtt:null, lastSeen:null}); }
+        // prune peers not listed
+        for(const id of Array.from(peersMap.keys())){ if(!msg.peers.includes(id)) peersMap.delete(id); }
+        renderPeers();
+        return;
+      }
       if(msg.type==='ws-ping' && msg.to===peerId){
         sendSignal({type:'ws-pong', to: msg.from, from: peerId, ts: msg.ts});
         return;

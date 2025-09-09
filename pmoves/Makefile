@@ -140,6 +140,7 @@ help:
 	@echo "  mcp-archon       Run Archon MCP stdio shim (FORM=...)"
 	@echo "  mesh-up          Start NATS + mesh-agent"
 	@echo "  mesh-handshake   Publish a shape-capsule to the mesh (FILE=cgp.json)"
+	@echo "  web-geometry     Open geometry UI and seed a demo CGP"
 
 .PHONY: logs-core
 logs-core:
@@ -198,3 +199,13 @@ mesh-up:
 mesh-handshake:
 	@if [ -z "$(FILE)" ]; then echo "Usage: make mesh-handshake FILE=cgp.json"; exit 1; fi
 	@python tools/publish_handshake.py $(FILE)
+
+.PHONY: web-geometry
+web-geometry:
+	@echo "Opening http://localhost:8087/geometry/ ..."
+	@if [ "$(OS)" = "Windows_NT" ]; then \
+		start "" http://localhost:8087/geometry/ ; \
+	else \
+		xdg-open http://localhost:8087/geometry/ 2>/dev/null || open http://localhost:8087/geometry/ ; \
+	fi
+	@$(MAKE) smoke-geometry

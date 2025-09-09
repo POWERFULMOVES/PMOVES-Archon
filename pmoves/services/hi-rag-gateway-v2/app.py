@@ -64,17 +64,28 @@ def _get_embedder():
 
 # --- In-memory rooms for WebSocket signaling and geometry broadcast ---
 _rooms: Dict[str, List[WebSocket]] = {}
+_room_ws_id: Dict[str, Dict[WebSocket, str]] = {}
+_room_ids: Dict[str, List[str]] = {}
 
 def _room_get(name: str) -> List[WebSocket]:
     return _rooms.setdefault(name, [])
 
 async def _room_add(name: str, ws: WebSocket):
     _room_get(name).append(ws)
+    _room_ws_id.setdefault(name, {})[ws] = ""
+    _room_ids.setdefault(name, [])
 
 def _room_remove(name: str, ws: WebSocket):
     lst = _rooms.get(name, [])
     if ws in lst:
         lst.remove(ws)
+    if name in _room_ws_id and ws in _room_ws_id[name]:
+        pid = _room_ws_id[name].pop(ws, "")
+        if pid and name in _room_ids and pid in _room_ids[name]:
+            try:
+                _room_ids[name].remove(pid)
+            except ValueError:
+                pass
 
 async def _room_broadcast(name: str, msg: Dict[str, Any], skip: WebSocket | None = None):
     dead = []
@@ -87,6 +98,10 @@ async def _room_broadcast(name: str, msg: Dict[str, Any], skip: WebSocket | None
             dead.append(ws)
     for d in dead:
         _room_remove(name, d)
+
+async def _room_broadcast_roster(name: str):
+    peers = _room_ids.get(name, [])
+    await _room_broadcast(name, {"type":"roster", "room": name, "peers": peers})
 
 def embed_query(text: str):
     # Try provider chain first; fall back to local SentenceTransformer
@@ -701,14 +716,28 @@ async def ws_signaling(ws: WebSocket, room: str):
     try:
         while True:
             data = await ws.receive_json()
+            # Handle presence to maintain a server-side roster
+            if isinstance(data, dict) and data.get("type") == "presence":
+                pid = str(data.get("from") or "")
+                _room_ws_id.setdefault(room, {})[ws] = pid
+                ids = _room_ids.setdefault(room, [])
+                if pid and pid not in ids:
+                    ids.append(pid)
+                await _room_broadcast_roster(room)
+                continue
             # broadcast to room peers (simple relay)
             await _room_broadcast(room, {"room": room, "relay": data}, skip=ws)
     except WebSocketDisconnect:
         _room_remove(room, ws)
+        await _room_broadcast_roster(room)
     except Exception:
         _room_remove(room, ws)
         try:
             await ws.close()
+        except Exception:
+            pass
+        try:
+            await _room_broadcast_roster(room)
         except Exception:
             pass
 
