@@ -761,3 +761,33 @@ def mesh_handshake(body: Dict[str, Any]):
     except Exception as e:
         logger.exception("mesh publish failed")
         raise HTTPException(500, f"mesh publish failed: {e}")
+
+
+@app.post("/geometry/import_db")
+def import_db(body: Dict[str, Any]):
+    """Persist a CGP directly into Postgres (forces persistence), update ShapeStore, and broadcast.
+    Accepts either { data: <CGP> } or { capsule: { kind:'cgp', data: <CGP> } }.
+    """
+    payload = body.get("data")
+    if not isinstance(payload, dict):
+        cap = body.get("capsule") or {}
+        if isinstance(cap, dict) and isinstance(cap.get("data"), dict):
+            payload = cap.get("data")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "missing CGP data")
+    # echo into store and WS
+    shape_store.on_geometry_event({"type":"geometry.cgp.v1","data": payload})
+    try:
+        _persist_cgp_to_db(payload)
+    except Exception:
+        logger.exception("import_db persist failed")
+        raise HTTPException(500, "persist failed (check DB creds / RLS)")
+    # notify UI
+    try:
+        import anyio
+        async def _notify():
+            await _room_broadcast("geometry", {"type":"geometry.cgp.v1","data": payload})
+        anyio.from_thread.run(_notify)
+    except Exception:
+        pass
+    return {"ok": True}

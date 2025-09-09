@@ -143,21 +143,19 @@ document.getElementById('shareBtn').onclick = ()=>{
 };
 document.getElementById('sendCgpBtn').onclick = async ()=>{
   if(!lastCGP){ log('no CGP received yet'); return; }
-  if(!(dc && dc.readyState==='open')){ log('DataChannel not open'); return; }
   const pass = passInput.value || '';
   let cgp = JSON.parse(JSON.stringify(lastCGP));
   if(encryptChk.checked && pass){
     try{ cgp = await encryptAnchors(cgp, pass); }catch(e){ log('encrypt failed'); }
   }
-  let capsule = { kind:'cgp', data:cgp, ts: Date.now() };
+  let capsule = { kind:'cgp', data:cgp, ts: Date.now(), from: peerId };
   if(pass){
     try{
       const mac = await hmacSign(pass, canonicalize(cgp));
       capsule.sig = { alg:'HMAC-SHA256', hmac: mac };
     }catch(e){ log('sign failed'); }
   }
-  dc.send(JSON.stringify({type:'shape-capsule', capsule}));
-  log('sent shape-capsule');
+  showPreview(capsule);
 };
 document.getElementById('sendMeshBtn').onclick = async ()=>{
   if(!lastCGP){ log('no CGP received yet'); return; }
@@ -166,7 +164,7 @@ document.getElementById('sendMeshBtn').onclick = async ()=>{
   if(encryptChk.checked && pass){
     try{ cgp = await encryptAnchors(cgp, pass); }catch(e){ log('encrypt failed'); }
   }
-  let capsule = { kind:'cgp', data: cgp, ts: Date.now() };
+  let capsule = { kind:'cgp', data: cgp, ts: Date.now(), from: peerId };
   if(pass){
     try{
       const canon = canonicalize(cgp);
@@ -174,8 +172,7 @@ document.getElementById('sendMeshBtn').onclick = async ()=>{
       capsule.sig = { alg:'HMAC-SHA256', hmac: mac };
     }catch(e){ log('sign failed'); }
   }
-  const res = await fetch('/mesh/handshake', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({capsule}) });
-  if(res.ok){ log('published to mesh'); } else { log('mesh publish failed'); }
+  showPreview(capsule, true);
 };
 document.getElementById('saveCapsuleBtn').onclick = async ()=>{
   if(!lastCGP){ log('no CGP'); return; }
