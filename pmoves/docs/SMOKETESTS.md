@@ -133,6 +133,13 @@ Expected: 200s; locator shows `{ "modality":"video","ref_id":"yt123","t":12.5,"f
 2. In the UI, click “Send Signed CGP → Mesh”. This calls the gateway, which publishes to `mesh.shape.handshake.v1`.
 3. The mesh-agent receives the capsule, verifies HMAC if `MESH_PASSPHRASE` is set, and posts it to `/geometry/event` so your UI updates locally.
 4. Optional: set `MESH_PASSPHRASE` to enforce signature verification across nodes; use the same passphrase in the UI when signing.
+
+## 9) Import Capsule → DB (Offline Ingest)
+
+1. Use the provided example capsule: `datasets/example_capsule.json`
+2. From the UI, click “Load Capsule”, choose the file, set passphrase if signing was used, and click “Import DB”.
+3. Expected: UI updates; Supabase tables insert rows (anchors, constellations, shape_points). If Realtime is running, events stream to subscribers.
+
 4. Alternatively, publish via CLI: `make mesh-handshake FILE=cgp.json`.
    - Signaling goes through `/ws/signaling/public`. DataChannel is p2p.
 
