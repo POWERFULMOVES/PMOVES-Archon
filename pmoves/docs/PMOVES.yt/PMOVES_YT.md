@@ -34,6 +34,9 @@ Notes
 - Gemma providers:
   - `YT_SUMMARY_PROVIDER=ollama|hf`, `OLLAMA_URL`, `YT_GEMMA_MODEL` (default gemma2:9b-instruct)
   - `HF_GEMMA_MODEL`, `HF_USE_GPU`, `HF_TOKEN` (requires transformers+torch if using HF locally)
- - Segmentation heuristics:
-   - Flush when: accumulated duration ≥ 30s, silence gap > 1.2s, strong punctuation with ≥ 600 chars, or hard caps (60s or 1500 chars)
-   - Each chunk carries `payload.t_start`/`t_end`; CGP points mirror these for precise jumps
+- Segmentation heuristics:
+  - Flush when: accumulated duration ≥ 30s, silence gap > 1.2s, strong punctuation with ≥ 600 chars, or hard caps (60s or 1500 chars)
+  - Each chunk carries `payload.t_start`/`t_end`; CGP points mirror these for precise jumps
+  - Tunables (env): `YT_SEG_TARGET_DUR` (sec), `YT_SEG_GAP_THRESH` (sec), `YT_SEG_MIN_CHARS`, `YT_SEG_MAX_CHARS`, `YT_SEG_MAX_DUR` (sec)
+- Indexing:
+  - `YT_INDEX_LEXICAL=true|false` (default true). When true, `/yt/emit` asks Hi‑RAG v2 to also index in Meili via `index_lexical`.

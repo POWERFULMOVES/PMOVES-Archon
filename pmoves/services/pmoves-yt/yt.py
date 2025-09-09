@@ -50,6 +50,16 @@ YT_PLAYLIST_MAX = int(os.environ.get("YT_PLAYLIST_MAX", "50"))
 YT_CONCURRENCY = int(os.environ.get("YT_CONCURRENCY", "2"))
 YT_RATE_LIMIT = float(os.environ.get("YT_RATE_LIMIT", "0.0"))  # seconds between downloads
 
+# Segmentation thresholds (smart boundaries)
+YT_SEG_TARGET_DUR = float(os.environ.get("YT_SEG_TARGET_DUR", "30.0"))
+YT_SEG_GAP_THRESH = float(os.environ.get("YT_SEG_GAP_THRESH", "1.2"))
+YT_SEG_MIN_CHARS = int(os.environ.get("YT_SEG_MIN_CHARS", "600"))
+YT_SEG_MAX_CHARS = int(os.environ.get("YT_SEG_MAX_CHARS", "1500"))
+YT_SEG_MAX_DUR = float(os.environ.get("YT_SEG_MAX_DUR", "60.0"))
+
+# Always include lexical indexing on upsert (can be disabled)
+YT_INDEX_LEXICAL = os.environ.get("YT_INDEX_LEXICAL", "true").lower() == "true"
+
 _nc: Optional[NATS] = None
 
 def s3_client():
@@ -442,12 +452,20 @@ def _segment_transcript(text: str, doc_id: str, namespace: str) -> List[Dict[str
         chunks.append({'doc_id': doc_id, 'section_id': None, 'chunk_id': f"{doc_id}:0", 'text': text[:1200], 'namespace': namespace, 'payload': {'source': 'youtube'}})
     return chunks
 
-def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, namespace: str, target_dur: float = 30.0) -> List[Dict[str,Any]]:
+def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, namespace: str, target_dur: float = None) -> List[Dict[str,Any]]:
+    # Smart boundary grouping with tunable thresholds
+    tgt = float(target_dur) if target_dur is not None else YT_SEG_TARGET_DUR
+    gap_thresh = YT_SEG_GAP_THRESH
+    min_chars = YT_SEG_MIN_CHARS
+    max_chars = YT_SEG_MAX_CHARS
+    max_dur = YT_SEG_MAX_DUR
     chunks: List[Dict[str,Any]] = []
     cur: List[Dict[str,Any]] = []
     cur_dur = 0.0
+    cur_chars = 0
+    last_end = None
     def flush():
-        nonlocal cur, cur_dur
+        nonlocal cur, cur_dur, cur_chars
         if not cur:
             return
         start = float(cur[0].get('start') or 0.0)
@@ -464,12 +482,20 @@ def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, n
         })
         cur = []
         cur_dur = 0.0
+        cur_chars = 0
     for s in segments:
         st = float(s.get('start') or 0.0); en = float(s.get('end') or st)
         d = max(0.0, en - st)
-        cur.append({'start': st, 'end': en, 'text': s.get('text') or ''})
+        seg_text = s.get('text') or ''
+        cur.append({'start': st, 'end': en, 'text': seg_text})
         cur_dur += d
-        if cur_dur >= target_dur:
+        cur_chars += len(seg_text)
+        gap = (st - last_end) if last_end is not None else 0.0
+        last_end = en
+        strong_punct = seg_text.strip().endswith(('.', '!', '?', '…'))
+        # Adjust target for very short utterances (likely high-turn dialog)
+        adj_tgt = tgt * 0.75 if len(seg_text.split()) < 6 else tgt
+        if (cur_dur >= adj_tgt) or (gap > gap_thresh) or (strong_punct and cur_chars >= min_chars) or (cur_dur >= max_dur) or (cur_chars >= max_chars):
             flush()
     flush()
     if not chunks and segments:
@@ -519,9 +545,10 @@ def yt_emit(body: Dict[str,Any] = Body(...)):
     chunks = _segment_from_whisper_segments(segs, doc_id, ns) if segs else _segment_transcript(text, doc_id, ns)
     # upsert JSONL to hi-rag v2
     try:
-        payload = {'items': chunks, 'ensure_collection': True}
+        payload = {'items': chunks, 'ensure_collection': True, 'index_lexical': YT_INDEX_LEXICAL}
         r = requests.post(f"{HIRAG_URL}/hirag/upsert-batch", headers={'content-type':'application/json'}, data=json.dumps(payload), timeout=180)
         r.raise_for_status()
+        up = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
     except Exception as e:
         raise HTTPException(502, f"upsert-batch failed: {e}")
     # emit CGP
@@ -531,4 +558,4 @@ def yt_emit(body: Dict[str,Any] = Body(...)):
         r2.raise_for_status()
     except Exception as e:
         raise HTTPException(502, f"CGP emit failed: {e}")
-    return {'ok': True, 'video_id': vid, 'chunks': len(chunks)}
+    return {'ok': True, 'video_id': vid, 'chunks': len(chunks), 'upserted': (up or {}).get('upserted'), 'lexical_indexed': (up or {}).get('lexical_indexed')}
