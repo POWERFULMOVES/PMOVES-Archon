@@ -60,6 +60,9 @@ YT_SEG_MAX_DUR = float(os.environ.get("YT_SEG_MAX_DUR", "60.0"))
 # Always include lexical indexing on upsert (can be disabled)
 YT_INDEX_LEXICAL = os.environ.get("YT_INDEX_LEXICAL", "true").lower() == "true"
 
+# Auto-tune segmentation thresholds based on content profile
+YT_SEG_AUTOTUNE = os.environ.get("YT_SEG_AUTOTUNE", "true").lower() == "true"
+
 _nc: Optional[NATS] = None
 
 def s3_client():
@@ -452,13 +455,22 @@ def _segment_transcript(text: str, doc_id: str, namespace: str) -> List[Dict[str
         chunks.append({'doc_id': doc_id, 'section_id': None, 'chunk_id': f"{doc_id}:0", 'text': text[:1200], 'namespace': namespace, 'payload': {'source': 'youtube'}})
     return chunks
 
-def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, namespace: str, target_dur: float = None) -> List[Dict[str,Any]]:
+def _segment_from_whisper_segments(
+    segments: List[Dict[str,Any]],
+    doc_id: str,
+    namespace: str,
+    target_dur: float = None,
+    gap_thresh: float = None,
+    min_chars: int = None,
+    max_chars: int = None,
+    max_dur: float = None,
+) -> List[Dict[str,Any]]:
     # Smart boundary grouping with tunable thresholds
     tgt = float(target_dur) if target_dur is not None else YT_SEG_TARGET_DUR
-    gap_thresh = YT_SEG_GAP_THRESH
-    min_chars = YT_SEG_MIN_CHARS
-    max_chars = YT_SEG_MAX_CHARS
-    max_dur = YT_SEG_MAX_DUR
+    gap_thresh = gap_thresh if gap_thresh is not None else YT_SEG_GAP_THRESH
+    min_chars = min_chars if min_chars is not None else YT_SEG_MIN_CHARS
+    max_chars = max_chars if max_chars is not None else YT_SEG_MAX_CHARS
+    max_dur = max_dur if max_dur is not None else YT_SEG_MAX_DUR
     chunks: List[Dict[str,Any]] = []
     cur: List[Dict[str,Any]] = []
     cur_dur = 0.0
@@ -503,6 +515,65 @@ def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, n
         chunks.append({'doc_id': doc_id, 'section_id': None, 'chunk_id': f"{doc_id}:0", 'text': s0.get('text') or '', 'namespace': namespace, 'payload': {'source':'youtube','t_start': float(s0.get('start') or 0.0),'t_end': float(s0.get('end') or 0.0)}})
     return chunks
 
+def _auto_tune_segment_params(segments: List[Dict[str,Any]], text: str) -> Dict[str,Any]:
+    """Infer content profile (dialogue, talk, music/lyrics) and adjust thresholds.
+
+    Heuristics:
+    - words/sec (wps), avg seg duration, avg words/seg, avg gap
+    - lyrics/music cues: tags like [Music], repeated short lines, low punctuation
+    """
+    if not segments:
+        return {}
+    total_dur = 0.0
+    total_words = 0
+    gaps = []
+    prev_end = None
+    word_counts = []
+    durations = []
+    for s in segments:
+        st = float(s.get('start') or 0.0); en = float(s.get('end') or st)
+        d = max(0.0, en - st)
+        durations.append(d)
+        total_dur += d
+        wc = len((s.get('text') or '').split())
+        word_counts.append(wc)
+        total_words += wc
+        if prev_end is not None:
+            gaps.append(max(0.0, st - prev_end))
+        prev_end = en
+    avg_gap = (sum(gaps)/len(gaps)) if gaps else 0.0
+    avg_dur = (sum(durations)/len(durations)) if durations else 0.0
+    avg_words = (sum(word_counts)/len(word_counts)) if word_counts else 0.0
+    wps = (total_words/total_dur) if total_dur > 0 else 0.0
+    # simple repetition/lyrics signal: many short lines and duplicates
+    lines = [ (s.get('text') or '').strip().lower() for s in segments ]
+    short_lines = sum(1 for l in lines if 0 < len(l) <= 40)
+    unique_ratio = len(set(l for l in lines if l)) / max(1, len([l for l in lines if l]))
+    has_music_tag = ('[music]' in text.lower()) or ('♪' in text)
+
+    # Defaults (talk)
+    params = dict(
+        target_dur=YT_SEG_TARGET_DUR,
+        gap_thresh=YT_SEG_GAP_THRESH,
+        min_chars=YT_SEG_MIN_CHARS,
+        max_chars=YT_SEG_MAX_CHARS,
+        max_dur=YT_SEG_MAX_DUR,
+        profile='talk'
+    )
+    # Dialogue: rapid turns, short segments, small gaps
+    if avg_dur < 3.0 and avg_words < 12 and avg_gap < 0.8 and wps >= 2.0:
+        params.update(dict(target_dur=max(15.0, YT_SEG_TARGET_DUR*0.67), gap_thresh=0.8, min_chars=max(400, YT_SEG_MIN_CHARS-200), max_chars=min(1200, YT_SEG_MAX_CHARS), max_dur=min(45.0, YT_SEG_MAX_DUR), profile='dialogue'))
+        return params
+    # Music/Lyrics: many short lines, repeated phrases, music cues
+    if has_music_tag or (short_lines/ max(1,len(lines)) > 0.6 and unique_ratio < 0.9 and avg_words < 8):
+        params.update(dict(target_dur=15.0, gap_thresh=0.6, min_chars=350, max_chars=900, max_dur=30.0, profile='lyrics'))
+        return params
+    # Long-form talk / lecture: long segments, slower wps
+    if avg_dur >= 3.5 and avg_words >= 12 and wps <= 2.0:
+        params.update(dict(target_dur=min(50.0, YT_SEG_TARGET_DUR*1.33), gap_thresh=max(1.5, YT_SEG_GAP_THRESH), min_chars=max(700, YT_SEG_MIN_CHARS), max_chars=min(1800, YT_SEG_MAX_CHARS+300), max_dur=min(75.0, YT_SEG_MAX_DUR+15), profile='talk-long'))
+        return params
+    return params
+
 def _build_cgp(video_id: str, chunks: List[Dict[str,Any]], title: Optional[str]) -> Dict[str,Any]:
     nbins = 32
     spectrum = [0.0]*nbins
@@ -542,7 +613,22 @@ def yt_emit(body: Dict[str,Any] = Body(...)):
     segs = tr.get('segments') or []
     if not (text or segs): raise HTTPException(404, 'transcript not found; run /yt/transcript first')
     doc_id = f"yt:{vid}"
-    chunks = _segment_from_whisper_segments(segs, doc_id, ns) if segs else _segment_transcript(text, doc_id, ns)
+    if segs and YT_SEG_AUTOTUNE:
+        tuned = _auto_tune_segment_params(segs, text)
+        chunks = _segment_from_whisper_segments(
+            segs,
+            doc_id,
+            ns,
+            target_dur=tuned.get('target_dur'),
+            gap_thresh=tuned.get('gap_thresh'),
+            min_chars=tuned.get('min_chars'),
+            max_chars=tuned.get('max_chars'),
+            max_dur=tuned.get('max_dur'),
+        )
+    elif segs:
+        chunks = _segment_from_whisper_segments(segs, doc_id, ns)
+    else:
+        chunks = _segment_transcript(text, doc_id, ns)
     # upsert JSONL to hi-rag v2
     try:
         payload = {'items': chunks, 'ensure_collection': True, 'index_lexical': YT_INDEX_LEXICAL}
