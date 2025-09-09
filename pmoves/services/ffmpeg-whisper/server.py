@@ -62,9 +62,21 @@ def transcribe(body: Dict[str,Any] = Body(...)):
         device = _select_device()
         compute_type = 'float16' if device == 'cuda' else 'int8'
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        segments, info = model.transcribe(audio_path, language=lang)
-        text = ''.join(seg.text or '' for seg in segments)
-        return {'ok': True, 'text': text, 'language': info.language or lang, 's3_uri': s3_uri, 'device': device}
+        segments_iter, info = model.transcribe(audio_path, language=lang)
+        segs = []
+        text_parts = []
+        for seg in segments_iter:
+            try:
+                segs.append({
+                    'start': float(getattr(seg, 'start', 0.0) or 0.0),
+                    'end': float(getattr(seg, 'end', 0.0) or 0.0),
+                    'text': (getattr(seg, 'text', '') or '').strip()
+                })
+                text_parts.append((getattr(seg, 'text', '') or ''))
+            except Exception:
+                continue
+        text = ''.join(text_parts)
+        return {'ok': True, 'text': text, 'segments': segs, 'language': getattr(info, 'language', None) or lang, 's3_uri': s3_uri, 'device': device}
     except subprocess.CalledProcessError as e:
         raise HTTPException(500, f"ffmpeg error: {e}")
     except Exception as e:

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Body, HTTPException, Request, Depends, WebSocket, W
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Distance, VectorParams
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
 from FlagEmbedding import FlagReranker
 from rapidfuzz import fuzz
@@ -34,7 +34,7 @@ MEILI_API_KEY = os.environ.get("MEILI_API_KEY","master_key")
 from libs.providers.embedding import embed_text as _embed_via_providers
 
 GRAPH_BOOST = float(os.environ.get("GRAPH_BOOST","0.15"))
-NEO4J_URL = os.environ.get("NEO4J_URL","bolt://neo4j:7687")
+NEO4J_URL = (os.environ.get("NEO4J_URL","bolt://neo4j:7687") or "").strip()
 NEO4J_USER = os.environ.get("NEO4J_USER","neo4j")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD","neo4j")
 NEO4J_DICT_REFRESH_SEC = int(os.environ.get("NEO4J_DICT_REFRESH_SEC","60"))
@@ -52,7 +52,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hirag.gateway.v2")
 
 qdrant = QdrantClient(url=QDRANT_URL, timeout=30.0)
-driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+# Lazy/optional Neo4j: allow running without the neo4j service
+driver = None
+if NEO4J_URL:
+    try:
+        driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    except Exception:
+        logging.getLogger("hirag.gateway.v2").warning("Neo4j unavailable at %s; graph features disabled", NEO4J_URL)
+        driver = None
 
 _embedder = None
 
@@ -144,6 +152,10 @@ _warm_last = 0.0
 
 def refresh_warm_dictionary():
     global _warm_entities, _warm_last
+    if driver is None:
+        _warm_entities = {}
+        _warm_last = time.time()
+        return
     try:
         tmp: Dict[str, set] = {}
         with driver.session() as s:
@@ -167,7 +179,8 @@ def warm_loop():
         time.sleep(max(15, NEO4J_DICT_REFRESH_SEC))
 
 import threading as _t
-_t.Thread(target=warm_loop, daemon=True).start()
+if driver is not None:
+    _t.Thread(target=warm_loop, daemon=True).start()
 
 def graph_terms(query: str, limit: int = 8, entity_types: Optional[List[str]] = None):
     toks = [t.lower() for t in re.split(r"\W+", query) if t and len(t) > 2]
@@ -357,7 +370,7 @@ def hirag_query(req: QueryReq = Body(...)):
 
     # lexical scores
     meili_scores = meili_lexical(req.query, req.namespace, req.k) if USE_MEILI else {}
-    gterms = set([t.lower() for t in graph_terms(req.query, entity_types=req.entity_types)])
+    gterms = set([t.lower() for t in graph_terms(req.query, entity_types=req.entity_types)]) if driver is not None and GRAPH_BOOST > 0 else set()
 
     base = []
     for h in hits:
@@ -791,3 +804,104 @@ def import_db(body: Dict[str, Any]):
     except Exception:
         pass
     return {"ok": True}
+
+
+# ---------------- Batch upsert for JSONL/JSON chunks ----------------
+class UpsertItem(BaseModel):
+    doc_id: str
+    chunk_id: str
+    text: str
+    namespace: str = Field(default=NAMESPACE_DEFAULT)
+    section_id: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+
+class UpsertReq(BaseModel):
+    items: Optional[List[UpsertItem]] = None
+    jsonl: Optional[str] = None  # newline-separated JSON
+    ensure_collection: bool = True
+    index_lexical: bool = False
+
+@app.post("/hirag/upsert-batch")
+def hirag_upsert_batch(req: UpsertReq = Body(...)):
+    # Parse items from jsonl if provided
+    items: List[Dict[str, Any]] = []
+    if req.items:
+        items = [i.model_dump() for i in req.items]
+    elif req.jsonl:
+        for line in req.jsonl.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except Exception:
+                continue
+    else:
+        raise HTTPException(400, "Either items or jsonl must be provided")
+
+    if not items:
+        return {"ok": True, "upserted": 0}
+
+    vectors = []
+    for it in items:
+        txt = it.get("text", "")
+        vectors.append(embed_query(txt))
+
+    if req.ensure_collection and vectors:
+        try:
+            ensure_qdrant_collection(len(vectors[0]))
+        except Exception:
+            pass
+
+    points = []
+    for it, vec in zip(items, vectors):
+        cid = it.get("chunk_id") or it.get("id")
+        if not cid:
+            continue
+        payload = {
+            "doc_id": it.get("doc_id"),
+            "section_id": it.get("section_id"),
+            "chunk_id": cid,
+            "text": it.get("text"),
+            "namespace": it.get("namespace", NAMESPACE_DEFAULT)
+        }
+        extra = it.get("payload") or {}
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                payload.setdefault(k, v)
+        points.append(PointStruct(id=cid, vector=vec, payload=payload))
+
+    try:
+        if points:
+            qdrant.upsert(collection_name=COLL, points=points)
+    except Exception as e:
+        logger.exception("Qdrant upsert failed")
+        raise HTTPException(503, f"Qdrant upsert error: {e}")
+
+    # Optional lexical indexing (MeiliSearch)
+    indexed = 0
+    if (req.index_lexical or USE_MEILI) and items:
+        try:
+            headers = {"Content-Type":"application/json"}
+            if MEILI_API_KEY:
+                headers["Authorization"] = f"Bearer {MEILI_API_KEY}"
+            # Ensure index exists (ignore if it does)
+            requests.post(f"{MEILI_URL}/indexes", headers=headers, data=json.dumps({"uid": COLL} ), timeout=5)
+            docs = []
+            for it in items:
+                docs.append({
+                    "id": it.get("chunk_id") or it.get("id"),
+                    "chunk_id": it.get("chunk_id") or it.get("id"),
+                    "doc_id": it.get("doc_id"),
+                    "section_id": it.get("section_id"),
+                    "text": it.get("text"),
+                    "namespace": it.get("namespace", NAMESPACE_DEFAULT)
+                })
+            if docs:
+                r = requests.post(f"{MEILI_URL}/indexes/{COLL}/documents", headers=headers, data=json.dumps(docs), timeout=30)
+                if r.ok:
+                    indexed = len(docs)
+        except Exception:
+            logger.exception("Meili indexing failed")
+
+    return {"ok": True, "upserted": len(points), "lexical_indexed": indexed}

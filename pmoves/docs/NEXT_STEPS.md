@@ -17,6 +17,20 @@ _Last updated: 2025-09-07_
 - [ ] Neo4j: seed brand alias dictionary (DARKXSIDE, POWERFULMOVES) — pending
 - [ ] Windows/WSL polish: add scripts/smoke.ps1 and helper commands — pending
 
+## PMOVES.YT Enhancements (High Priority)
+- [ ] Robust downloads: resume support, retry with exponential backoff, per-domain rate limiting, playlist/channel ingestion, and concurrent worker pool with bounded memory.
+- [ ] Storage: multipart uploads to MinIO for large files; checksum verification; lifecycle and retention tags.
+- [ ] Metadata: enrich `videos` with duration, channel, tags; track ingest provenance and versioning in `meta`.
+- [ ] Transcripts: switch `ffmpeg-whisper` to `faster-whisper` GPU path; language auto-detect and diarization flags; partial updates for long videos.
+- [ ] Events/NATS: standardize `ingest.*` topics and dead-letter queue; idempotent handlers using `s3_base_prefix`.
+- [ ] Gemma integration (summaries):
+  - Option A (Ollama): call `gemma2:9b-instruct` to generate chapter/short/long summaries and thumbnails text; store under `studio_board.meta.gemma`.
+  - Option B (HF Transformers): run `google/gemma-2-9b-it` when GPU available, gated by env `YT_GEMMA_ENABLE`.
+  - Embeddings: use `google/embeddinggemma-300M` for transcript segments; fall back to MiniLM when disabled.
+- [ ] API hardening: request validation, structured errors, OpenAPI docs, health and readiness probes.
+- [ ] Observability: structured logs, Prometheus metrics (download time, upload time, transcript latency), and S3 object sizes.
+- [ ] Security: signed URLs only; optional content filters; domain allowlist.
+
 ## Later
 - [ ] Office docs conversion lane (libreoffice headless → PDF)
 - [ ] OCR: image ingestion with text extraction + tagging
@@ -32,6 +46,7 @@ _Last updated: 2025-09-07_
 - [ ] Jellyfin refresh hook + Discord rich embeds (cover art, duration, link)
 - [ ] Supabase RLS hardening pass (non-dev)
 - [ ] Qwen2-Audio provider (desktop-only toggle) for advanced audio QA/summarization
+ - [ ] PMOVES.YT: wire Gemma summaries (Ollama by default), add `/yt/summarize` and `/yt/chapters` endpoints; add smoke target `make yt-smoke URL=...`
 
 
 #recovered from archive 

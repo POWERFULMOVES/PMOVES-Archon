@@ -1,11 +1,28 @@
-import os, json, tempfile, shutil, asyncio
-from typing import Dict, Any, Optional
+import os, json, tempfile, shutil, asyncio, time, re
+from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, Body, HTTPException
 import yt_dlp
 import boto3
 import requests
 from nats.aio.client import Client as NATS
-from services.common.events import envelope
+# Prefer shared envelope util if present; otherwise, fall back to a local stub
+try:
+    from services.common.events import envelope  # type: ignore
+except Exception:
+    import uuid, datetime
+    def envelope(topic: str, payload: dict, correlation_id: str|None=None, parent_id: str|None=None, source: str="pmoves-yt"):
+        # Minimal schema-free envelope for environments where shared modules aren’t available
+        env = {
+            "id": str(uuid.uuid4()),
+            "topic": topic,
+            "ts": datetime.datetime.utcnow().isoformat() + "Z",
+            "version": "v1",
+            "source": source,
+            "payload": payload,
+        }
+        if correlation_id: env["correlation_id"] = correlation_id
+        if parent_id: env["parent_id"] = parent_id
+        return env
 
 app = FastAPI(title="PMOVES.YT", version="1.0.0")
 
@@ -18,6 +35,20 @@ DEFAULT_NAMESPACE = os.environ.get("INDEXER_NAMESPACE","pmoves")
 SUPA = os.environ.get("SUPA_REST_URL","http://postgrest:3000")
 NATS_URL = os.environ.get("NATS_URL","nats://nats:4222")
 FFW_URL = os.environ.get("FFW_URL","http://ffmpeg-whisper:8078")
+HIRAG_URL = os.environ.get("HIRAG_URL","http://hi-rag-gateway-v2:8086")
+
+# Summarization (Gemma) configuration
+YT_SUMMARY_PROVIDER = os.environ.get("YT_SUMMARY_PROVIDER", "ollama")  # ollama|hf
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+YT_GEMMA_MODEL = os.environ.get("YT_GEMMA_MODEL", "gemma2:9b-instruct")
+HF_GEMMA_MODEL = os.environ.get("HF_GEMMA_MODEL", "google/gemma-2-9b-it")
+HF_USE_GPU = os.environ.get("HF_USE_GPU", "false").lower() == "true"
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+# Playlist/Channel defaults
+YT_PLAYLIST_MAX = int(os.environ.get("YT_PLAYLIST_MAX", "50"))
+YT_CONCURRENCY = int(os.environ.get("YT_CONCURRENCY", "2"))
+YT_RATE_LIMIT = float(os.environ.get("YT_RATE_LIMIT", "0.0"))  # seconds between downloads
 
 _nc: Optional[NATS] = None
 
@@ -56,6 +87,45 @@ def base_prefix(video_id: str):
 def supa_insert(table: str, row: Dict[str,Any]):
     try:
         r = requests.post(f"{SUPA}/{table}", headers={'content-type':'application/json'}, data=json.dumps(row), timeout=20)
+        r.raise_for_status(); return r.json()
+    except Exception:
+        return None
+
+def supa_upsert(table: str, row: Dict[str,Any], on_conflict: Optional[str]=None):
+    try:
+        url = f"{SUPA}/{table}"
+        if on_conflict:
+            url += f"?on_conflict={on_conflict}"
+        r = requests.post(url, headers={'content-type':'application/json','prefer':'resolution=merge-duplicates'}, data=json.dumps(row), timeout=20)
+        r.raise_for_status(); return r.json()
+    except Exception:
+        return None
+
+def supa_update(table: str, match: Dict[str,Any], patch: Dict[str,Any]):
+    try:
+        # Build a simple eq filter query string
+        qs = []
+        for k, v in match.items():
+            if isinstance(v, str):
+                qs.append(f"{k}=eq.{v}")
+            else:
+                qs.append(f"{k}=eq.{json.dumps(v)}")
+        url = f"{SUPA}/{table}?" + "&".join(qs)
+        r = requests.patch(url, headers={'content-type':'application/json'}, data=json.dumps(patch), timeout=20)
+        r.raise_for_status(); return r.json()
+    except Exception:
+        return None
+
+def supa_get(table: str, match: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
+    try:
+        qs = []
+        for k, v in match.items():
+            if isinstance(v, str):
+                qs.append(f"{k}=eq.{v}")
+            else:
+                qs.append(f"{k}=eq.{json.dumps(v)}")
+        url = f"{SUPA}/{table}?" + "&".join(qs)
+        r = requests.get(url, timeout=20)
         r.raise_for_status(); return r.json()
     except Exception:
         return None
@@ -150,7 +220,7 @@ def yt_transcript(body: Dict[str,Any] = Body(...)):
         'whisper_model': body.get('whisper_model')
     }
     try:
-        r = requests.post(f"{FFW_URL}/transcribe", headers={'content-type':'application/json'}, data=json.dumps(payload), timeout=600)
+        r = requests.post(f"{FFW_URL}/transcribe", headers={'content-type':'application/json'}, data=json.dumps(payload), timeout=1200)
         j = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
         if not r.ok:
             raise HTTPException(r.status_code, f"ffmpeg-whisper error: {j}")
@@ -159,7 +229,8 @@ def yt_transcript(body: Dict[str,Any] = Body(...)):
             'video_id': vid,
             'language': j.get('language') or body.get('language') or 'auto',
             'text': j.get('text') or '',
-            's3_uri': j.get('s3_uri')
+            's3_uri': j.get('s3_uri'),
+            'meta': {'segments': j.get('segments')}
         })
         try:
             _publish_event('ingest.transcript.ready.v1', {'video_id': vid, 'namespace': ns, 'bucket': bucket, 'key': audio_key})
@@ -177,3 +248,287 @@ def yt_ingest(body: Dict[str,Any] = Body(...)):
     dl = yt_download({'url': url, 'namespace': ns, 'bucket': body.get('bucket') or DEFAULT_BUCKET})
     tr = yt_transcript({'video_id': dl['video_id'], 'namespace': ns, 'bucket': body.get('bucket') or DEFAULT_BUCKET, 'language': body.get('language'), 'whisper_model': body.get('whisper_model')})
     return {'ok': True, 'video': dl, 'transcript': tr}
+
+# -------------------- Playlist / Channel ingestion --------------------
+
+def _extract_entries(url: str) -> List[Dict[str,Any]]:
+    ydl_opts = { 'quiet': True, 'noprogress': True, 'skip_download': True, 'extract_flat': True }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        entries = info.get('entries') or []
+        out = []
+        for e in entries:
+            vid = e.get('id') or e.get('url')
+            if not vid: continue
+            out.append({'id': vid, 'title': e.get('title')})
+        return out
+
+def _job_create(job_type: str, args: Dict[str,Any]) -> Optional[str]:
+    row = {'type': job_type, 'args': args, 'state': 'queued', 'started_at': None, 'finished_at': None, 'error': None}
+    res = supa_insert('yt_jobs', row)
+    if isinstance(res, list) and res:
+        return res[0].get('id')
+    if isinstance(res, dict):
+        return res.get('id')
+    return None
+
+def _job_update(job_id: str, state: str, error: Optional[str]=None):
+    patch = {'state': state, 'error': error}
+    if state == 'running':
+        patch['started_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    if state in ('completed','failed'):
+        patch['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    supa_update('yt_jobs', {'id': job_id}, patch)
+
+def _item_upsert(job_id: str, video_id: str, status: str, error: Optional[str]=None, meta: Optional[Dict[str,Any]]=None):
+    row = {'job_id': job_id, 'video_id': video_id, 'status': status, 'error': error, 'retries': 0, 'meta': meta or {}}
+    supa_upsert('yt_items', row, on_conflict='job_id,video_id')
+
+def _ingest_one(video_url: str, ns: str, bucket: str) -> Dict[str,Any]:
+    try:
+        d = yt_download({'url': video_url, 'namespace': ns, 'bucket': bucket})
+        vid = d.get('video_id')
+        t = yt_transcript({'video_id': vid, 'namespace': ns, 'bucket': bucket})
+        return {'ok': True, 'video_id': vid, 'download': d, 'transcript': t}
+    except HTTPException as e:
+        return {'ok': False, 'error': str(e.detail)}
+
+@app.post('/yt/playlist')
+def yt_playlist(body: Dict[str,Any] = Body(...)):
+    url = body.get('url'); ns = body.get('namespace') or DEFAULT_NAMESPACE; bucket = body.get('bucket') or DEFAULT_BUCKET
+    if not url: raise HTTPException(400, 'url required')
+    limit = int(body.get('max_videos') or YT_PLAYLIST_MAX)
+    entries = _extract_entries(url)[:limit]
+    if not entries:
+        raise HTTPException(400, 'no entries found')
+    job_id = _job_create('playlist', {'url': url, 'namespace': ns, 'bucket': bucket, 'count': len(entries)})
+    if job_id: _job_update(job_id, 'running')
+    results = []
+    for i, e in enumerate(entries):
+        vid_url = f"https://www.youtube.com/watch?v={e['id']}" if len(e['id']) == 11 else e['id']
+        if job_id: _item_upsert(job_id, e['id'], 'running', None, {'title': e.get('title')})
+        r = _ingest_one(vid_url, ns, bucket)
+        results.append({'id': e['id'], **r})
+        if job_id: _item_upsert(job_id, e['id'], 'completed' if r.get('ok') else 'failed', r.get('error'))
+        if YT_RATE_LIMIT > 0:
+            time.sleep(YT_RATE_LIMIT)
+    if job_id: _job_update(job_id, 'completed')
+    return {'ok': True, 'job_id': job_id, 'count': len(results), 'results': results}
+
+@app.post('/yt/channel')
+def yt_channel(body: Dict[str,Any] = Body(...)):
+    # Accept channel URL or channel_id
+    base = body.get('url') or body.get('channel_id')
+    if not base:
+        raise HTTPException(400, 'url or channel_id required')
+    # yt-dlp accepts channel URLs; if only id provided, build URL
+    if not base.startswith('http'):
+        base = f"https://www.youtube.com/channel/{base}/videos"
+    return yt_playlist({'url': base, 'namespace': body.get('namespace'), 'bucket': body.get('bucket'), 'max_videos': body.get('max_videos')})
+
+# -------------------- Gemma Summarization --------------------
+
+def _summarize_ollama(text: str, style: str) -> str:
+    prompt = f"You are a skilled video summarizer. Style={style}. Summarize the transcript below succinctly.\n\nTranscript:\n{text[:12000]}"
+    try:
+        r = requests.post(f"{OLLAMA_URL}/api/generate", json={"model": YT_GEMMA_MODEL, "prompt": prompt, "stream": False}, timeout=180)
+        r.raise_for_status()
+        j = r.json()
+        return j.get('response') or j.get('data') or ''
+    except Exception as e:
+        raise HTTPException(502, f"Ollama summarization failed: {e}")
+
+def _summarize_hf(text: str, style: str) -> str:
+    # Optional local transformers path; requires GPU for Gemma-2 9B
+    try:
+        import torch  # noqa: F401
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+    except Exception:
+        raise HTTPException(500, "HF Transformers not installed; use provider=ollama or install transformers+torch")
+    try:
+        tok = AutoTokenizer.from_pretrained(HF_GEMMA_MODEL, token=HF_TOKEN)
+        model = AutoModelForCausalLM.from_pretrained(HF_GEMMA_MODEL, device_map="auto" if HF_USE_GPU else None, torch_dtype="auto")
+        sys_prompt = f"Summarize the following transcript in style={style}. Keep it concise and faithful."
+        prompt = f"<start_of_turn>user\n{sys_prompt}\n\nTranscript:\n{text[:8000]}<end_of_turn>\n<start_of_turn>model\n"
+        inputs = tok(prompt, return_tensors='pt').to(model.device)
+        out = model.generate(**inputs, max_new_tokens=512, temperature=0.3)
+        s = tok.decode(out[0], skip_special_tokens=True)
+        return s.split("<start_of_turn>model",1)[-1].strip()
+    except Exception as e:
+        raise HTTPException(500, f"HF Gemma generation failed: {e}")
+
+def _get_transcript(video_id: str) -> Dict[str,Any]:
+    rows = supa_get('transcripts', {'video_id': video_id}) or []
+    if not rows:
+        return {'text': '', 'segments': []}
+    # Prefer the longest transcript
+    rows.sort(key=lambda r: len(r.get('text') or ''), reverse=True)
+    row = rows[0]
+    meta = row.get('meta') or {}
+    return {'text': row.get('text') or '', 'segments': meta.get('segments') or []}
+
+@app.post('/yt/summarize')
+def yt_summarize(body: Dict[str,Any] = Body(...)):
+    vid = body.get('video_id'); provider = (body.get('provider') or YT_SUMMARY_PROVIDER).lower()
+    style = (body.get('style') or 'short')
+    if not vid: raise HTTPException(400, 'video_id required')
+    tr = _get_transcript(vid)
+    text = body.get('text') or tr.get('text')
+    if not text: raise HTTPException(404, 'transcript not found; run /yt/transcript first')
+    if provider == 'hf':
+        summary = _summarize_hf(text, style)
+    else:
+        summary = _summarize_ollama(text, style)
+    # persist into videos + studio_board meta
+    supa_update('videos', {'video_id': vid}, {'meta': {'gemma': {'style': style, 'provider': provider, 'summary': summary}}})
+    return {'ok': True, 'video_id': vid, 'provider': provider, 'style': style, 'summary': summary}
+
+@app.post('/yt/chapters')
+def yt_chapters(body: Dict[str,Any] = Body(...)):
+    vid = body.get('video_id'); provider = (body.get('provider') or YT_SUMMARY_PROVIDER).lower()
+    if not vid: raise HTTPException(400, 'video_id required')
+    tr = _get_transcript(vid)
+    text = body.get('text') or tr.get('text')
+    if not text: raise HTTPException(404, 'transcript not found; run /yt/transcript first')
+    guide = "Produce 5-12 chapters. JSON array of objects: {title, blurb}. No extra prose."
+    if provider == 'hf':
+        raw = _summarize_hf(text, f"chapters; {guide}")
+    else:
+        raw = _summarize_ollama(text, f"chapters; {guide}")
+    # try parse JSON array
+    chapters: List[Dict[str,Any]] = []
+    try:
+        # find first [ ... ] block
+        s = raw[raw.find('['): raw.rfind(']')+1]
+        chapters = json.loads(s)
+    except Exception:
+        # fallback: split lines
+        chapters = [{ 'title': line.strip('- ').strip(), 'blurb': '' } for line in raw.splitlines() if line.strip()][:10]
+    supa_update('videos', {'video_id': vid}, {'meta': {'gemma': {'chapters': chapters}}})
+    return {'ok': True, 'video_id': vid, 'chapters': chapters}
+
+# -------------------- Segmentation → JSONL + CGP emit --------------------
+
+def _segment_transcript(text: str, doc_id: str, namespace: str) -> List[Dict[str,Any]]:
+    # Naive sentence/paragraph segmentation by punctuation + length budget
+    # Target ~900-1200 chars per chunk
+    chunks: List[Dict[str,Any]] = []
+    buf = []
+    budget = 1000
+    def flush():
+        if not buf:
+            return
+        content = ' '.join(buf).strip()
+        if content:
+            chunk_id = f"{doc_id}:{len(chunks)}"
+            chunks.append({
+                'doc_id': doc_id,
+                'section_id': None,
+                'chunk_id': chunk_id,
+                'text': content,
+                'namespace': namespace,
+                'payload': {'source': 'youtube'}
+            })
+        buf.clear()
+    for part in re.split(r"(?<=[\.!?])\s+|\n+", text):
+        if not part:
+            continue
+        buf.append(part)
+        if sum(len(x) for x in buf) >= budget:
+            flush()
+    flush()
+    # ensure at least one chunk
+    if not chunks and text:
+        chunks.append({'doc_id': doc_id, 'section_id': None, 'chunk_id': f"{doc_id}:0", 'text': text[:1200], 'namespace': namespace, 'payload': {'source': 'youtube'}})
+    return chunks
+
+def _segment_from_whisper_segments(segments: List[Dict[str,Any]], doc_id: str, namespace: str, target_dur: float = 30.0) -> List[Dict[str,Any]]:
+    chunks: List[Dict[str,Any]] = []
+    cur: List[Dict[str,Any]] = []
+    cur_dur = 0.0
+    def flush():
+        nonlocal cur, cur_dur
+        if not cur:
+            return
+        start = float(cur[0].get('start') or 0.0)
+        end = float(cur[-1].get('end') or start)
+        text = ' '.join((s.get('text') or '').strip() for s in cur).strip()
+        chunk_id = f"{doc_id}:{len(chunks)}"
+        chunks.append({
+            'doc_id': doc_id,
+            'section_id': None,
+            'chunk_id': chunk_id,
+            'text': text,
+            'namespace': namespace,
+            'payload': {'source': 'youtube', 't_start': start, 't_end': end}
+        })
+        cur = []
+        cur_dur = 0.0
+    for s in segments:
+        st = float(s.get('start') or 0.0); en = float(s.get('end') or st)
+        d = max(0.0, en - st)
+        cur.append({'start': st, 'end': en, 'text': s.get('text') or ''})
+        cur_dur += d
+        if cur_dur >= target_dur:
+            flush()
+    flush()
+    if not chunks and segments:
+        s0 = segments[0]
+        chunks.append({'doc_id': doc_id, 'section_id': None, 'chunk_id': f"{doc_id}:0", 'text': s0.get('text') or '', 'namespace': namespace, 'payload': {'source':'youtube','t_start': float(s0.get('start') or 0.0),'t_end': float(s0.get('end') or 0.0)}})
+    return chunks
+
+def _build_cgp(video_id: str, chunks: List[Dict[str,Any]], title: Optional[str]) -> Dict[str,Any]:
+    nbins = 32
+    spectrum = [0.0]*nbins
+    n = max(1, len(chunks))
+    for i in range(n):
+        b = min(nbins-1, int(i * nbins / n))
+        spectrum[b] += 1.0/n
+    points = []
+    for i, ch in enumerate(chunks):
+        points.append({
+            'id': f"p:yt:{video_id}:{i}",
+            'modality': 'video',
+            'ref_id': video_id,
+            't_start': (ch.get('payload') or {}).get('t_start'),
+            't_end': (ch.get('payload') or {}).get('t_end'),
+            'proj': float((i+1)/n),
+            'conf': 1.0,
+            'text': ch['text'][:400]
+        })
+    c = {
+        'id': f"c:yt:{video_id}",
+        'summary': title or f"YouTube {video_id}",
+        'spectrum': spectrum,
+        'points': points
+    }
+    return {'spec': 'chit.cgp.v0.1', 'super_nodes': [{'constellations': [c]}]}
+
+@app.post('/yt/emit')
+def yt_emit(body: Dict[str,Any] = Body(...)):
+    vid = body.get('video_id'); ns = body.get('namespace') or DEFAULT_NAMESPACE
+    if not vid: raise HTTPException(400, 'video_id required')
+    # fetch metadata for optional title
+    vids = supa_get('videos', {'video_id': vid}) or []
+    title = vids[0].get('title') if vids else None
+    tr = _get_transcript(vid)
+    text = body.get('text') or tr.get('text')
+    segs = tr.get('segments') or []
+    if not (text or segs): raise HTTPException(404, 'transcript not found; run /yt/transcript first')
+    doc_id = f"yt:{vid}"
+    chunks = _segment_from_whisper_segments(segs, doc_id, ns) if segs else _segment_transcript(text, doc_id, ns)
+    # upsert JSONL to hi-rag v2
+    try:
+        payload = {'items': chunks, 'ensure_collection': True}
+        r = requests.post(f"{HIRAG_URL}/hirag/upsert-batch", headers={'content-type':'application/json'}, data=json.dumps(payload), timeout=180)
+        r.raise_for_status()
+    except Exception as e:
+        raise HTTPException(502, f"upsert-batch failed: {e}")
+    # emit CGP
+    try:
+        cgp = _build_cgp(vid, chunks, title)
+        r2 = requests.post(f"{HIRAG_URL}/geometry/event", headers={'content-type':'application/json'}, data=json.dumps({'type':'geometry.cgp.v1','data':cgp}), timeout=60)
+        r2.raise_for_status()
+    except Exception as e:
+        raise HTTPException(502, f"CGP emit failed: {e}")
+    return {'ok': True, 'video_id': vid, 'chunks': len(chunks)}

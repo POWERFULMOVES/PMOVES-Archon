@@ -170,3 +170,21 @@ Optional smoke targets:
 ## Cleanup
 - Stop containers: `make down`
 - Remove volumes (destructive): `make clean`
+## YouTube → Index + Shapes
+
+Prereqs
+- Services: `ffmpeg-whisper`, `pmoves-yt`, `hi-rag-gateway-v2` up and healthy.
+- Data: `postgres`, `postgrest`, `qdrant`, `minio`, `neo4j` up.
+
+Steps
+- Ingest and emit (replace URL):
+  - `make yt-emit-smoke URL=https://www.youtube.com/watch?v=2Vv-BfVoq4g`
+- What it checks:
+  - /yt/info yields a valid `video_id`
+  - /yt/ingest downloads, extracts audio, transcribes (faster-whisper)
+  - /yt/emit segments transcript into chunks and posts them to /hirag/upsert-batch; emits CGP to /geometry/event
+  - /shape/point/p:yt:<id>:0/jump returns a valid video locator
+
+Optional
+- Summarize with Gemma (Ollama default):
+  - `curl -X POST http://localhost:8077/yt/summarize -H 'content-type: application/json' -d '{"video_id":"<id>","style":"short"}' | jq`
