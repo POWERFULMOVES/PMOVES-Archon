@@ -1,99 +1,231 @@
 # Smoke Tests
-Last updated: 2025-08-29
 
-## Quick commands
-- Start stack: `make up`
-- Stop all: `make down`
-- Nuke local volumes: `make clean`
-- One-shot smoke: `make smoke`
+This guide covers preflight wiring, starting the core stack, and running the local smoke tests. Use it as a quick readiness checklist before deeper testing.
 
-## Health checks
-- Presign: http://localhost:8088/healthz
-- Render Webhook: http://localhost:8085/healthz
-- Hi‑RAG v2 stats: http://localhost:8087/hirag/admin/stats
-- Retrieval Eval UI: http://localhost:8090
-- PostgREST: http://localhost:3000
+## Prerequisites
+- Docker Desktop (Compose v2 available via `docker compose`)
+- PowerShell 7+ on Windows, or Bash/Zsh on macOS/Linux
+- Optional: `jq` (required for `make smoke`; PowerShell script does not require it)
 
-## Example queries
-Hybrid + rerank query:
-```
-curl -s localhost:8087/hirag/query \
-  -H 'content-type: application/json' \
-  -d '{"query":"what is pmoves?","namespace":"pmoves","k":8,"alpha":0.7}' | jq .
-```
+## 1) Environment Wiring
+1. Create `.env` from the sample and append service snippets:
+   - Windows (PowerShell):
+     - `Copy-Item .env.example .env`
+     - `Get-Content env.presign.additions, env.render_webhook.additions | Add-Content .env`
+     - Optional rerank config: `Get-Content env.hirag.reranker.additions, env.hirag.reranker.providers.additions | Add-Content .env`
+   - macOS/Linux (Bash):
+     - `cp .env.example .env`
+     - `cat env.presign.additions env.render_webhook.additions >> .env`
+     - Optional: `cat env.hirag.reranker.additions env.hirag.reranker.providers.additions >> .env`
+2. Set shared secrets (change these):
+   - `PRESIGN_SHARED_SECRET`
+   - `RENDER_WEBHOOK_SHARED_SECRET`
+3. Buckets: ensure MinIO has buckets you plan to use (defaults: `assets`, `outputs`). You can create buckets via the MinIO Console at `http://localhost:9001` if needed.
 
-Webhook insert + verify:
-```
-curl -s -X POST http://localhost:8085/comfy/webhook \
-  -H 'content-type: application/json' \
-  -H "Authorization: Bearer ${RENDER_WEBHOOK_SHARED_SECRET:-change_me}" \
-  -d '{"bucket":"outputs","key":"demo.png","s3_uri":"s3://outputs/demo.png","title":"Demo","namespace":"pmoves","author":"local","tags":["demo"],"auto_approve":false}'
+## 2) Preflight (Recommended)
+- Cross‑platform: `make flight-check`
+- Windows direct script: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1`
 
-curl -s "http://localhost:3000/studio_board?order=id.desc&limit=1" | jq .
-```
+This checks tool availability, common ports, `.env` keys vs `.env.example`, and validates `contracts/topics.json`.
 
-## Individual smoke targets
-- `make smoke`: end-to-end presign/webhook/postgrest and a basic Hi-RAG query.
-- `make smoke-rerank`: calls Hi-RAG with reranking enabled (requires the model to be available).
-- `make smoke-presign-put`: obtains a presigned PUT URL and uploads a small text file to MinIO.
+## 3) Start Core Stack
+- Start data + workers profile (v2 gateway):
+  - `make up`
+- Wait ~15–30s for services to become ready.
 
-## Publisher Enrichments
-- Archive: `PMOVES_publisher_enrich_smoketest.zip`
-- Script: `smoketest_publisher_enrich.sh`
-- Validates: `published_events` record + `publisher_audit` rows and (optionally) Discord notification.
+Useful health checks:
+- Presign: `curl http://localhost:8088/healthz`
+- Render Webhook: `curl http://localhost:8085/healthz`
+- PostgREST: `curl http://localhost:3000`
+- Hi‑RAG v2 stats: `curl http://localhost:8087/hirag/admin/stats`
 
-## Presign
-- Use curl examples in `COMFYUI_MINIO_PRESIGN.md` to PUT/GET a text file.
+## 4) Seed Demo Data (Optional but helpful)
+- `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
+- Alternatively: `make load-jsonl FILE=$(pwd)/datasets/queries_demo.jsonl`
 
-## PMOVES.YT
-Info + download + transcript (replace URL):
-```
-curl -s -X POST http://localhost:8077/yt/info \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=XXXXXXXX"}' | jq .
+## 5) Run Smoke Tests
+Choose one:
+- macOS/Linux: `make smoke` (requires `jq`)
+- Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-curl -s -X POST http://localhost:8077/yt/download \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=XXXXXXXX","bucket":"assets","namespace":"pmoves"}' | jq .
+What the smoke covers:
+1) Qdrant ready (6333)
+2) Meilisearch health (7700, warned if missing)
+3) Neo4j UI reachable (7474, warned if not)
+4) Presign health (8088)
+5) Render Webhook health (8085)
+6) PostgREST reachable (3000)
+7) Insert a demo row via Render Webhook
+8) Verify a `studio_board` row exists via PostgREST
+9) Run a Hi-RAG v2 query (8087)
 
-# Use the returned video_id from /yt/download
-curl -s -X POST http://localhost:8077/yt/transcript \
-  -H 'content-type: application/json' \
-  -d '{"video_id":"<id>","bucket":"assets"}' | jq .
+## 6) Geometry Bus (CHIT) — End-to-end
 
-# Verify rows
-curl -s "http://localhost:3000/videos?order=id.desc&limit=1" | jq .
-curl -s "http://localhost:3000/transcripts?order=id.desc&limit=1" | jq .
-```
+1. Create minimal CGP payload `cgp.json`:
+   ```json
+   {
+     "type": "geometry.cgp.v1",
+     "data": {
+       "spec": "chit.cgp.v0.1",
+       "super_nodes": [
+         { "constellations": [
+           { "id": "c.test.1", "summary": "beat-aligned hook",
+             "spectrum": [0.05,0.1,0.2,0.3,0.2,0.1,0.03,0.02],
+             "points": [ { "id": "p.test.1", "modality": "video", "ref_id": "yt123", "t_start": 12.5, "frame_idx": 300, "proj": 0.8, "conf": 0.9, "text": "chorus line" } ]
+           }
+         ] }
+       ]
+     }
+   }
+   ```
 
-## FFmpeg+Whisper
-Transcribe directly from raw video:
-```
-curl -s -X POST http://localhost:8078/transcribe \
-  -H 'content-type: application/json' \
-  -d '{"bucket":"assets","key":"yt/<id>/raw.mp4","out_audio_key":"yt/<id>/audio.m4a"}' | jq .
-```
+2. Optional signing (if `CHIT_REQUIRE_SIGNATURE=true` in gateway):
+   ```bash
+   python - << 'PY'
+   import json,sys
+   from tools.chit_security import sign_cgp
+   doc=json.load(open('cgp.json'))
+   signed=sign_cgp(doc['data'],'change-me')
+   json.dump({'type':'geometry.cgp.v1','data':signed}, open('cgp.signed.json','w'))
+   PY
+   ```
 
-## Media-Video (YOLO)
-Detect objects on frames every N seconds:
-```
-curl -s -X POST http://localhost:8079/detect \
-  -H 'content-type: application/json' \
-  -d '{"bucket":"assets","key":"yt/<id>/raw.mp4","video_id":"<id>"}' | jq .
-```
+3. POST event:
+   ```bash
+   curl -s http://localhost:8086/geometry/event -H 'content-type: application/json' -d @cgp.json
+   # or @cgp.signed.json if signing enabled
+   ```
 
-## Media-Audio (Emotion)
-Classify top emotion per 5s window:
-```
-curl -s -X POST http://localhost:8082/emotion \
-  -H 'content-type: application/json' \
-  -d '{"bucket":"assets","key":"yt/<id>/audio.m4a","video_id":"<id>"}' | jq .
-```
+4. Jump test:
+   ```bash
+   curl -s http://localhost:8086/shape/point/p.test.1/jump
+   ```
 
-## Agents Profile
-Bring up: `docker compose --profile agents up -d nats agent-zero archon`
-Health:
-```
-curl -s http://localhost:8080/healthz | jq .   # agent-zero
-curl -s http://localhost:8091/healthz | jq .   # archon
-```
+5. (Optional) Learned text decode (requires `CHIT_DECODE_TEXT=true` and `transformers`):
+   ```bash
+   curl -s http://localhost:8086/geometry/decode/text \
+     -H 'content-type: application/json' \
+     -d '{"mode":"learned","constellation_id":"c.test.1"}'
+   ```
+
+6. Calibration report:
+   ```bash
+   curl -s http://localhost:8086/geometry/calibration/report \
+     -H 'content-type: application/json' \
+     -d @cgp.json
+   ```
+
+Expected: 200s; locator shows `{ "modality":"video","ref_id":"yt123","t":12.5,"frame":300 }`.
+
+## 7) Live Geometry UI + WebRTC
+
+1. Start v2 GPU gateway or v2 gateway (serves UI):
+   - `docker compose --profile gpu up -d hi-rag-gateway-v2-gpu` (GPU) or `docker compose --profile workers up -d hi-rag-gateway-v2`
+2. Open http://localhost:8087/geometry/
+3. Click Connect (room `public`). Post a CGP (make smoke-geometry) and watch points animate.
+4. Open the page in a second browser window; both connect to `public` room. Use Share Shape to send a `shape-hello` on the DataChannel.
+5. Click “Send Current CGP” to share the last geometry over the DataChannel; add a passphrase to sign the CGP capsule.
+6. Toggle “Encrypt anchors” and set a passphrase to AES‑GCM encrypt constellation anchors client‑side before sending; the receiving gateway can decrypt if `CHIT_DECRYPT_ANCHORS=true`.
+
+## 8) Mesh Handshake (NATS)
+
+1. Start mesh: `make mesh-up` (starts NATS + mesh-agent).
+2. In the UI, click “Send Signed CGP → Mesh”. This calls the gateway, which publishes to `mesh.shape.handshake.v1`.
+3. The mesh-agent receives the capsule, verifies HMAC if `MESH_PASSPHRASE` is set, and posts it to `/geometry/event` so your UI updates locally.
+4. Optional: set `MESH_PASSPHRASE` to enforce signature verification across nodes; use the same passphrase in the UI when signing.
+
+## 9) Import Capsule → DB (Offline Ingest)
+
+1. Use the provided example capsule: `datasets/example_capsule.json`
+2. From the UI, click “Load Capsule”, choose the file, set passphrase if signing was used, and click “Import DB”.
+3. Expected: UI updates; Supabase tables insert rows (anchors, constellations, shape_points). If Realtime is running, events stream to subscribers.
+
+4. Alternatively, publish via CLI: `make mesh-handshake FILE=cgp.json`.
+   - Signaling goes through `/ws/signaling/public`. DataChannel is p2p.
+
+
+Optional smoke targets:
+- `make smoke-presign-put` — end‑to‑end presign PUT and upload
+- `make smoke-rerank` — query with `use_rerank=true` (provider optional)
+- `make smoke-langextract` — extract chunks from XML via `langextract` and load
+
+## Troubleshooting
+- Port in use: change the host port in `docker-compose.yml` or stop the conflicting process.
+- Qdrant not ready: `docker compose logs -f qdrant` and retry after a few seconds.
+- 401 from Render Webhook: ensure `Authorization: Bearer $RENDER_WEBHOOK_SHARED_SECRET` matches `.env`.
+- PostgREST errors: confirm `postgres` is up and `/supabase/initdb` scripts finished; check `docker compose logs -f postgres postgrest`.
+- Rerank disabled: if providers are unreachable, set `RERANK_ENABLE=false` or configure provider keys in `.env`.
+
+## Log Triage
+- List services and status: `docker compose ps`
+- Tail recent logs for core services:
+  - `docker compose logs --since 15m presign render-webhook postgrest hi-rag-gateway-v2`
+  - `docker compose logs -f render-webhook` (follow live)
+  - Shortcut: `make logs-core` (follow) or `make logs-core-15m`
+- Common signals:
+  - render-webhook JSONDecodeError on insert → ensure PostgREST returns JSON. Rebuild service after updating to headers with `Prefer: return=representation`:
+    - `docker compose build render-webhook && docker compose up -d render-webhook`
+  - Neo4j UnknownLabelWarning (e.g., `Entity`) → expected until graph/dictionary is seeded.
+
+## Cleanup
+- Stop containers: `make down`
+- Remove volumes (destructive): `make clean`
+## YouTube → Index + Shapes
+
+Prereqs
+- Services: `ffmpeg-whisper`, `pmoves-yt`, `hi-rag-gateway-v2` up and healthy.
+- Data: `postgres`, `postgrest`, `qdrant`, `minio`, `neo4j` up.
+
+Steps
+- Ingest and emit (replace URL):
+  - `make yt-emit-smoke URL=https://www.youtube.com/watch?v=2Vv-BfVoq4g`
+- What it checks:
+  - /yt/info yields a valid `video_id`
+  - /yt/ingest downloads, extracts audio, transcribes (faster-whisper)
+  - /yt/emit segments transcript into chunks and posts them to /hirag/upsert-batch; emits CGP to /geometry/event
+  - /shape/point/p:yt:<id>:0/jump returns a valid video locator
+
+Optional
+- Summarize with Gemma (Ollama default):
+  - `curl -X POST http://localhost:8077/yt/summarize -H 'content-type: application/json' -d '{"video_id":"<id>","style":"short"}' | jq`
+
+## Preflight + Health Checks
+
+Run a quick preflight (tools, ports, missing .env keys) and full retro report with HTTP health:
+
+- `make flight-check-retro` (full, styled, includes HTTP health table)
+- `make preflight` (quick JSON snapshot + styled summary)
+
+HTTP endpoints checked:
+- Qdrant `/ready`
+- Meilisearch `/health`
+- PostgREST `/` (200)
+- Neo4j UI `/` (200)
+- Presign `/healthz` (expects `{ok:true}`)
+- Render Webhook `/healthz` (expects `{ok:true}`)
+- Hi‑RAG v2 `/` (expects `{ok:true}`)
+- PMOVES.YT `/healthz` (expects `{ok:true}`)
+- ffmpeg‑whisper `/healthz` (expects `{ok:true}`)
+- publisher-discord `/healthz` (expects `{ok:true}`)
+- jellyfin-bridge `/healthz` (expects `{ok:true}`)
+
+## Discord Publisher
+
+- Set `DISCORD_WEBHOOK_URL` in `.env` to your channel webhook.
+- Start service: `docker compose --profile orchestration up -d publisher-discord nats`.
+- Smoke: `curl -X POST http://localhost:8092/publish -H 'content-type: application/json' -d '{"content":"PMOVES test ping"}'`
+  - Expect 200/204 from Discord webhook (message in channel).
+
+## Jellyfin Bridge
+
+- Optional: set `JELLYFIN_URL` and `JELLYFIN_API_KEY` in `.env` to enable live checks.
+- Link a video: `curl -X POST http://localhost:8093/jellyfin/link -H 'content-type: application/json' -d '{"video_id":"<id>","jellyfin_item_id":"<jf_id>"}'`
+- Get playback URL: `curl -X POST http://localhost:8093/jellyfin/playback-url -H 'content-type: application/json' -d '{"video_id":"<id>","t":42}'`
+  - Expect a URL pointing at Jellyfin web with start time.
+
+## Playlist/Channel Ingestion
+
+- `make yt-playlist-smoke URL=<playlist_or_channel_url>`
+  - Starts a `yt_jobs` playlist job (max_videos=3)
+  - Polls `yt_items` until at least one item is present
+  - Picks the first completed (or first available) `video_id`, emits chunks+CGP, and verifies geometry jump
