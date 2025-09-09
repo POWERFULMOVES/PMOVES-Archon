@@ -206,3 +206,10 @@ HTTP endpoints checked:
 - Hi‑RAG v2 `/` (expects `{ok:true}`)
 - PMOVES.YT `/healthz` (expects `{ok:true}`)
 - ffmpeg‑whisper `/healthz` (expects `{ok:true}`)
+
+## Playlist/Channel Ingestion
+
+- `make yt-playlist-smoke URL=<playlist_or_channel_url>`
+  - Starts a `yt_jobs` playlist job (max_videos=3)
+  - Polls `yt_items` until at least one item is present
+  - Picks the first completed (or first available) `video_id`, emits chunks+CGP, and verifies geometry jump
