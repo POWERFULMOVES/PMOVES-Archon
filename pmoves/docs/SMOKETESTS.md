@@ -188,3 +188,21 @@ Steps
 Optional
 - Summarize with Gemma (Ollama default):
   - `curl -X POST http://localhost:8077/yt/summarize -H 'content-type: application/json' -d '{"video_id":"<id>","style":"short"}' | jq`
+
+## Preflight + Health Checks
+
+Run a quick preflight (tools, ports, missing .env keys) and full retro report with HTTP health:
+
+- `make flight-check-retro` (full, styled, includes HTTP health table)
+- `make preflight` (quick JSON snapshot + styled summary)
+
+HTTP endpoints checked:
+- Qdrant `/ready`
+- Meilisearch `/health`
+- PostgREST `/` (200)
+- Neo4j UI `/` (200)
+- Presign `/healthz` (expects `{ok:true}`)
+- Render Webhook `/healthz` (expects `{ok:true}`)
+- Hi‑RAG v2 `/` (expects `{ok:true}`)
+- PMOVES.YT `/healthz` (expects `{ok:true}`)
+- ffmpeg‑whisper `/healthz` (expects `{ok:true}`)

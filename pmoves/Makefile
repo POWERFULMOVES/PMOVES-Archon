@@ -110,6 +110,12 @@ flight-check-retro:
 	( command -v uv >/dev/null 2>&1 && uv pip install -q -r tools/flightcheck/requirements.txt || python -m pip install -q -r tools/flightcheck/requirements.txt ) && \
 	python tools/flightcheck/retro_flightcheck.py
 
+.PHONY: preflight
+preflight:
+	@echo "Running PMOVES preflight checks..."
+	@python tools/flightcheck/retro_flightcheck.py --quick || true
+	@python tools/flightcheck/retro_flightcheck.py --theme neon --beep
+
 .PHONY: env-dedupe
 env-dedupe:
 	@python tools/env_dedupe.py

@@ -27,6 +27,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, TextColumn
+import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[2]
 console = Console()
@@ -59,6 +61,18 @@ PORT_MAP = {
 
 ENV_FILES = [ROOT / ".env", ROOT / ".env.example"]
 CONTRACTS = ROOT / "contracts" / "topics.json"
+
+HTTP_HEALTH = [
+    ("qdrant", "http://localhost:6333/ready", "json_ok_or_200"),
+    ("meilisearch", "http://localhost:7700/health", "json_ok_or_200"),
+    ("postgrest", "http://localhost:3000", "http_200"),
+    ("neo4j-ui", "http://localhost:7474", "http_200"),
+    ("presign", "http://localhost:8088/healthz", "ok_true"),
+    ("render-webhook", "http://localhost:8085/healthz", "ok_true"),
+    ("hi-rag-gateway-v2", "http://localhost:8087/", "ok_true"),
+    ("pmoves-yt", "http://localhost:8077/healthz", "ok_true"),
+    ("ffmpeg-whisper", "http://localhost:8078/healthz", "ok_true"),
+]
 
 THEMES = {
     "green": {
@@ -319,6 +333,58 @@ def check_ports():
     console.print(table)
 
 
+def _http_get(url: str, timeout: float = 4.0):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            ct = resp.headers.get("content-type", "")
+            data = resp.read()
+            body = data.decode("utf-8", errors="ignore")
+            return resp.status, ct, body
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="ignore")
+        except Exception:
+            body = str(e)
+        return e.code, "", body
+    except Exception as e:
+        return None, "", str(e)
+
+
+def check_http():
+    table = Table(box=box.SIMPLE)
+    table.add_column("service", style="cyan")
+    table.add_column("url", style="bright_white")
+    table.add_column("status")
+    table.add_column("detail", style="bright_black")
+    for name, url, kind in HTTP_HEALTH:
+        code, ct, body = _http_get(url)
+        ok = False
+        detail = ""
+        if code is None:
+            detail = body
+        else:
+            detail = f"{code}"
+            if kind == "ok_true":
+                try:
+                    j = json.loads(body)
+                    ok = bool(j.get("ok")) and code == 200
+                except Exception:
+                    ok = False
+            elif kind == "json_ok_or_200":
+                if code == 200:
+                    ok = True
+                else:
+                    try:
+                        json.loads(body)
+                        ok = code == 200
+                    except Exception:
+                        ok = False
+            elif kind == "http_200":
+                ok = code == 200
+        table.add_row(name, url, "PASS" if ok else "FAIL", detail)
+    console.print(table)
+
+
 def check_env():
     env_path, example_path = ENV_FILES
     env_keys = read_env_keys(env_path)
@@ -409,6 +475,7 @@ def main():
         section("repo shape"); check_repo_shape()
         section("contracts"); check_contracts()
         section("ports"); check_ports()
+        section("http health"); check_http()
         section("environment"); check_env()
         section("docker", body=None); check_docker_services()
 
