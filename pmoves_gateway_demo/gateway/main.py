@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from gateway.api.chit import router as chit_router
 from gateway.api.signaling import router as sig_router
 from gateway.api.viz import router as viz_router
+from gateway.api.workflow import router as workflow_router
 
 app = FastAPI(title="PMOVES.AI Gateway Demo")
 
@@ -16,6 +17,7 @@ app.add_middleware(
 app.include_router(chit_router)
 app.include_router(sig_router)
 app.include_router(viz_router)
+app.include_router(workflow_router)
 app.mount("/web", StaticFiles(directory="web"), name="web")
 # Expose generated outputs as read-only static routes
 app.mount("/data", StaticFiles(directory="data", check_dir=False), name="data")
