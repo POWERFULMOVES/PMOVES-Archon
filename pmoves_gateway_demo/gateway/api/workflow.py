@@ -9,7 +9,7 @@ from gateway.api.chit import (
     CGP,
     geometry_event,
     geometry_decode_text,
-    calibration_report,
+    geometry_calibration_report,
 )
 
 
@@ -45,10 +45,9 @@ def demo_run(body: DemoRunRequest) -> Dict[str, Any]:
 
     cgp = CGP.model_validate(cgp_obj)
 
-    # 2) Ingest/persist
-    # Use provided shape_id or generate from payload id/meta
-    shape_id = body.shape_id or cgp.super_nodes[0].constellations[0].id.replace("/", "_")
-    ingest_resp = geometry_event(cgp=cgp, shape_id=shape_id)
+    # 2) Ingest/persist (shape_id is derived inside the endpoint from payload content)
+    ingest_resp = geometry_event(cgp=cgp)
+    shape_id = ingest_resp.get("shape_id")
 
     # 3) Decode text (geometry-only)
     decode_resp = geometry_decode_text(
@@ -58,7 +57,7 @@ def demo_run(body: DemoRunRequest) -> Dict[str, Any]:
     )
 
     # 4) Calibration / reconstruction artifacts
-    calib = calibration_report(cgp=cgp)
+    calib = geometry_calibration_report(cgp=cgp)
 
     # 5) Compose a manifest with helpful links
     manifest = {
@@ -66,7 +65,6 @@ def demo_run(body: DemoRunRequest) -> Dict[str, Any]:
         "data_url": f"/data/{shape_id}.json",
         "artifacts": {
             "reconstruction_report": "/artifacts/reconstruction_report.md",
-            "metrics": "/artifacts/metrics.json",
         },
         "decode": decode_resp,
         "calibration": calib,
@@ -77,4 +75,3 @@ def demo_run(body: DemoRunRequest) -> Dict[str, Any]:
         },
     }
     return manifest
-
