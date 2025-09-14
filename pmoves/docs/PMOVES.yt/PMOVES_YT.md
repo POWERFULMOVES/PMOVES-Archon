@@ -10,6 +10,21 @@ Endpoints
 - POST `/yt/summarize`: { video_id, style: short|long|chapters, provider?: ollama|hf } → uses Gemma (Ollama or HF) to summarize transcript; stores in `videos.meta.gemma`.
 - POST `/yt/chapters`: { video_id, provider? } → returns JSON array [{title, blurb}], stores in `videos.meta.gemma.chapters`.
 - POST `/yt/emit`: { video_id, namespace?, text? } → segments transcript into retrieval chunks (JSONL) and emits CGP to the Geometry Bus; pushes chunks via `hi-rag-v2 /hirag/upsert-batch`.
+## Playlist/Channel ingest
+
+### Concurrent processing
+
+Playlists and channels can be processed in parallel. `YT_CONCURRENCY` controls how many videos are handled at once (default `2`). `YT_RATE_LIMIT` adds a delay in seconds between starting each video to avoid quota issues (default `0`, meaning no delay).
+
+Example:
+
+```bash
+export YT_CONCURRENCY=4
+export YT_RATE_LIMIT=1.5
+curl -X POST http://localhost:8077/yt/playlist \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://www.youtube.com/playlist?list=PL..."}'
+```
 
 Compose
 - `pmoves-yt` (8077) and `ffmpeg-whisper` (8078) included under profiles `workers|orchestration|agents`.
