@@ -107,13 +107,6 @@ def geometry_event(cgp: CGP):
     except Exception:
         pass
 
-    # Emit realtime event (SSE mock)
-    try:
-        from gateway.api.events import emit_event  # late import to avoid cycles
-        emit_event({"type": "geometry.event", "shape_id": shape_hash})
-    except Exception:
-        pass
-
     return {"ok": True, "shape_id": shape_hash, "event": "geometry.cgp.v1"}
 
 @router.get("/shape/point/{pid}/jump")
