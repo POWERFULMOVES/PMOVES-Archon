@@ -85,16 +85,14 @@ def test_transcript(monkeypatch):
     pub.assert_called_once()
 
 def test_summarize(monkeypatch):
-    monkeypatch.setattr(yt, 'supa_get', lambda *a, **k: [{'text': 'hello world', 'meta': {}}])
-    class DummyResp:
-        def __init__(self):
-            self.status_code = 200
-            self.headers = {'content-type': 'application/json'}
-        def json(self):
-            return {'response': 'summary'}
-        def raise_for_status(self):
-            pass
-    monkeypatch.setattr(yt.requests, 'post', lambda *a, **k: DummyResp())
+    def fake_supa_get(table, match):
+        if table == 'transcripts':
+            return [{'text': 'hello world', 'meta': {}}]
+        if table == 'videos':
+            return [{'video_id': 'abc123', 'meta': {'thumb': 'http://thumb.jpg', 'gemma': {'chapters': []}}}]
+        return []
+    monkeypatch.setattr(yt, 'supa_get', fake_supa_get)
+    monkeypatch.setattr(yt, '_summarize_ollama', lambda text, style: 'summary')
     supa_upd = MagicMock()
     monkeypatch.setattr(yt, 'supa_update', supa_upd)
     pub = MagicMock()
@@ -103,6 +101,35 @@ def test_summarize(monkeypatch):
     resp = client.post('/yt/summarize', json={'video_id': 'abc123'})
     assert resp.status_code == 200
     supa_upd.assert_called_once()
+    patch = supa_upd.call_args[0][2]
+    assert patch['meta']['thumb'] == 'http://thumb.jpg'
+    assert patch['meta']['gemma']['summary'] == 'summary'
+    assert patch['meta']['gemma']['provider'] == 'ollama'
+    assert patch['meta']['gemma']['style'] == 'short'
+    pub.assert_called_once()
+
+
+def test_chapters_preserve_thumb(monkeypatch):
+    def fake_supa_get(table, match):
+        if table == 'transcripts':
+            return [{'text': 'hello world', 'meta': {'segments': []}}]
+        if table == 'videos':
+            return [{'video_id': 'abc123', 'meta': {'thumb': 'http://thumb.jpg', 'gemma': {'summary': 'existing'}}}]
+        return []
+    monkeypatch.setattr(yt, 'supa_get', fake_supa_get)
+    monkeypatch.setattr(yt, '_summarize_ollama', lambda text, style: '[{"title": "Intro", "blurb": ""}]')
+    supa_upd = MagicMock()
+    monkeypatch.setattr(yt, 'supa_update', supa_upd)
+    pub = MagicMock()
+    monkeypatch.setattr(yt, '_publish_event', pub)
+    client = TestClient(yt.app)
+    resp = client.post('/yt/chapters', json={'video_id': 'abc123'})
+    assert resp.status_code == 200
+    supa_upd.assert_called_once()
+    patch = supa_upd.call_args[0][2]
+    assert patch['meta']['thumb'] == 'http://thumb.jpg'
+    assert patch['meta']['gemma']['summary'] == 'existing'
+    assert patch['meta']['gemma']['chapters'][0]['title'] == 'Intro'
     pub.assert_called_once()
 
 def test_emit(monkeypatch):
