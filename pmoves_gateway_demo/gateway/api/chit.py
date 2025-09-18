@@ -154,6 +154,7 @@ def ingest_cgp(cgp: Dict[str, Any]) -> str:
     except Exception:
         pass
 
+
     try:
         from gateway.api.events import emit_event  # late import to avoid cycles
         emit_event({"type": "geometry.event", "shape_id": shape_id})
@@ -168,6 +169,9 @@ def geometry_event(event: GeometryEventEnvelope):
         raise HTTPException(status_code=400, detail="Unsupported geometry event type")
     ingest_cgp(event.data.model_dump())
     return {"ok": True}
+
+    return {"ok": True, "shape_id": shape_hash, "event": "geometry.cgp.v1"}
+
 
 @router.get("/shape/point/{pid}/jump")
 def shape_point_jump(pid: str):

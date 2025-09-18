@@ -16,7 +16,6 @@ from gateway.api import chit
 from gateway.api.signaling import router as sig_router
 from gateway.api.viz import router as viz_router
 from gateway.api.workflow import router as workflow_router
-from gateway.api.events import router as events_router
 
 app = FastAPI(title="PMOVES.AI Gateway Demo")
 
@@ -40,7 +39,6 @@ app.include_router(chit.router)
 app.include_router(sig_router)
 app.include_router(viz_router)
 app.include_router(workflow_router)
-app.include_router(events_router)
 app.mount("/web", StaticFiles(directory="web"), name="web")
 # Expose generated outputs as read-only static routes
 app.mount("/data", StaticFiles(directory="data", check_dir=False), name="data")
@@ -143,9 +141,12 @@ def root():
         <div style=\"border:1px solid #223457;border-radius:12px;padding:14px;background:#0b162b70\">
           <div class=\"row\" style=\"display:flex;gap:10px;align-items:center;flex-wrap:wrap\">
             <button class=\"inline-btn\" id=\"runDemo\">Run Demo</button>
-            <a class=\"inline-btn\" href=\"/events/stream\" target=\"_blank\">Open Events Stream (SSE)</a>
             <span class=\"pill\">Learned Decode: <b style=\"color: __LEARNED_COLOR__\">__LEARNED_TEXT__</b></span>
             <span class=\"pill\">Supabase: <b style=\"color: __SUPA_COLOR__\">__SUPA_TEXT__</b></span>
+          </div>
+          <div class=\"meta\" style=\"margin-top:8px\">
+            Tip: Production gateways stream workflow updates via Supabase or other event buses. For the demo, monitor the server
+            logs or inspect the workflow response for artifact links.
           </div>
           <pre id=\"demoOut\" style=\"margin-top:10px;white-space:pre-wrap;background:#0b162b;color:#b7fbce;border:1px solid #223457;border-radius:8px;padding:10px;min-height:80px\"></pre>
           <div id=\"demoLinks\" class=\"meta\"></div>
