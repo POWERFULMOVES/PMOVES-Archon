@@ -15,13 +15,32 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT") or os.environ.get("S3_ENDPOINT
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID") or "minioadmin"
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "minioadmin"
 MINIO_SECURE = (os.environ.get("MINIO_SECURE","false").lower() == "true")
+
+FRAMES_BUCKET = os.environ.get("MEDIA_VIDEO_FRAMES_BUCKET")
+FRAMES_PREFIX = os.environ.get("MEDIA_VIDEO_FRAMES_PREFIX", "media-video/frames")
+
 FRAME_BUCKET = os.environ.get("FRAME_BUCKET") or os.environ.get("FRAME_S3_BUCKET")
+
 
 app = FastAPI(title='Media-Video', version='1.0.0')
 
 def s3_client():
     endpoint_url = MINIO_ENDPOINT if "://" in MINIO_ENDPOINT else f"{'https' if MINIO_SECURE else 'http'}://{MINIO_ENDPOINT}"
     return boto3.client("s3", aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY, endpoint_url=endpoint_url)
+
+def s3_http_base() -> str:
+    if MINIO_ENDPOINT.startswith("http://") or MINIO_ENDPOINT.startswith("https://"):
+        base = MINIO_ENDPOINT
+    else:
+        base = f"{'https' if MINIO_SECURE else 'http'}://{MINIO_ENDPOINT}"
+    return base.rstrip('/')
+
+def frame_storage_path(source_bucket: str, video_id: str | None, source_key: str, frame_name: str) -> Dict[str, str]:
+    base_name = video_id or os.path.splitext(os.path.basename(source_key))[0]
+    prefix_parts = [FRAMES_PREFIX.strip("/") if FRAMES_PREFIX else None, base_name, frame_name]
+    key = "/".join([p for p in prefix_parts if p])
+    bucket = FRAMES_BUCKET or source_bucket
+    return {"bucket": bucket, "key": key}
 
 @app.get('/healthz')
 def healthz():
@@ -61,6 +80,9 @@ def detect(body: Dict[str,Any] = Body(...)):
         if yolo is None:
             raise HTTPException(501, 'YOLO model not available')
         detections = []
+
+        base_url = s3_http_base()
+
         base_key = os.path.splitext(os.path.basename(key))[0] or 'video'
         frame_prefix_parts = ['frames', ns]
         if vid:
@@ -68,16 +90,23 @@ def detect(body: Dict[str,Any] = Body(...)):
         else:
             frame_prefix_parts.append(base_key)
         frame_prefix = '/'.join(part.strip('/') for part in frame_prefix_parts if part)
+
         for fname in sorted(os.listdir(frames_dir)):
             if not fname.endswith('.jpg'):
                 continue
             fpath = os.path.join(frames_dir, fname)
+
+            storage = frame_storage_path(bucket, vid, key, fname)
+            s3.upload_file(fpath, storage['bucket'], storage['key'])
+            frame_uri = f"{base_url}/{storage['bucket']}/{storage['key']}"
+
             frame_key = f"{frame_prefix}/{fname}"
             try:
                 s3.upload_file(fpath, frame_bucket, frame_key)
             except Exception as exc:
                 raise HTTPException(500, f'frame upload error: {exc}')
             frame_uri = f"s3://{frame_bucket}/{frame_key}"
+
             res = yolo(fpath, verbose=False)
             for r in res:
                 for b in r.boxes:
@@ -102,7 +131,11 @@ def detect(body: Dict[str,Any] = Body(...)):
                 'ts_seconds': d.get('ts_seconds'),
                 'label': d.get('label'),
                 'score': d.get('score'),
+
+                'frame_uri': d.get('frame_uri') or d.get('frame')
+
                 'frame_uri': d.get('frame_uri')
+
             }
             for d in detections
         ]
