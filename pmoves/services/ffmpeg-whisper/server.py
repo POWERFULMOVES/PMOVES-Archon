@@ -1,8 +1,18 @@
-import os, json, tempfile, shutil, subprocess
-from typing import Dict, Any
+import logging
+import os, tempfile, shutil, subprocess
+from typing import Dict, Any, Optional
+
 from fastapi import FastAPI, Body, HTTPException
-import boto3
-from faster_whisper import WhisperModel
+
+try:  # pragma: no cover - exercised via tests with monkeypatching
+    import boto3
+except ImportError:  # pragma: no cover
+    boto3 = None  # type: ignore
+
+try:  # pragma: no cover - exercised via tests with monkeypatching
+    from faster_whisper import WhisperModel
+except ImportError:  # pragma: no cover
+    WhisperModel = None  # type: ignore
 import shutil as _shutil
 
 from services.common.supabase import insert_segments
@@ -13,8 +23,27 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT") or os.environ.get("S3_ENDPOINT
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID") or "minioadmin"
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "minioadmin"
 MINIO_SECURE = (os.environ.get("MINIO_SECURE","false").lower() == "true")
+MEDIA_AUDIO_URL = os.environ.get("MEDIA_AUDIO_URL")
+
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_timeout(value: Optional[str]) -> float:
+    if not value:
+        return 10.0
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid MEDIA_AUDIO_TIMEOUT value '%s'; using default", value)
+        return 10.0
+
+
+MEDIA_AUDIO_TIMEOUT = _coerce_timeout(os.environ.get("MEDIA_AUDIO_TIMEOUT"))
 
 def s3_client():
+    if boto3 is None:  # pragma: no cover - real runtime will have boto3
+        raise RuntimeError("boto3 is required but not installed")
     endpoint_url = MINIO_ENDPOINT if "://" in MINIO_ENDPOINT else f"{'https' if MINIO_SECURE else 'http'}://{MINIO_ENDPOINT}"
     return boto3.client("s3", aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY, endpoint_url=endpoint_url)
 
@@ -37,6 +66,41 @@ def _select_device() -> str:
     if _shutil.which("nvidia-smi"):
         return "cuda"
     return "cpu"
+
+
+def _forward_to_audio_service(payload: Dict[str, Any]) -> bool:
+    """Forward transcription metadata to the media-audio service.
+
+    Returns True when forwarding succeeds, False otherwise. When forwarding is
+    disabled (MEDIA_AUDIO_URL unset) or encounters an error, False is returned
+    so the caller can fall back to inserting segments locally.
+    """
+
+    if not MEDIA_AUDIO_URL:
+        return False
+
+    try:
+        import requests  # type: ignore
+    except ImportError:  # pragma: no cover - should not happen in production
+        logger.warning("requests is unavailable; skipping media-audio forwarding")
+        return False
+
+    try:
+        resp = requests.post(MEDIA_AUDIO_URL, json=payload, timeout=MEDIA_AUDIO_TIMEOUT)
+    except Exception as exc:  # pragma: no cover - network failures are rare in tests
+        logger.warning("Failed to forward transcription to media-audio: %s", exc, exc_info=True)
+        return False
+
+    if not resp.ok:
+        logger.warning(
+            "Media-audio forward returned non-success status %s: %s",
+            getattr(resp, "status_code", "?"),
+            getattr(resp, "text", ""),
+        )
+        return False
+
+    return True
+
 
 @app.post('/transcribe')
 def transcribe(body: Dict[str,Any] = Body(...)):
@@ -64,6 +128,8 @@ def transcribe(body: Dict[str,Any] = Body(...)):
         # faster-whisper (ctranslate2). Uses CUDA if available.
         device = _select_device()
         compute_type = 'float16' if device == 'cuda' else 'int8'
+        if WhisperModel is None:
+            raise HTTPException(500, 'WhisperModel backend not available')
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
         segments_iter, info = model.transcribe(audio_path, language=lang)
         segs = []
@@ -89,7 +155,21 @@ def transcribe(body: Dict[str,Any] = Body(...)):
             }
             for s in segs
         ]
-        insert_segments(rows)
+        payload = {
+            'video_id': vid,
+            'segments': segs,
+            'rows': rows,
+            'bucket': bucket,
+            'key': key,
+            'audio_uri': s3_uri,
+            'language': getattr(info, 'language', None) or lang,
+            'text': text,
+        }
+        forwarded = _forward_to_audio_service(payload)
+        if not forwarded:
+            if MEDIA_AUDIO_URL:
+                logger.info("media-audio forwarding unavailable; inserting segments locally for video_id=%s", vid)
+            insert_segments(rows)
         return {'ok': True, 'text': text, 'segments': segs, 'language': getattr(info, 'language', None) or lang, 's3_uri': s3_uri, 'device': device}
     except subprocess.CalledProcessError as e:
         raise HTTPException(500, f"ffmpeg error: {e}")
