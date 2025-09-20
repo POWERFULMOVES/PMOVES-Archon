@@ -6,7 +6,18 @@ _Last updated: 2025-08-29_
 - **Hi‑RAG Reranker Providers** — `HI_RAG_RERANK_PROVIDERS.md`
 - **Qwen (CUDA Torch) Notes** — `HIRAG_QWEN_CUDA_NOTES.md`
 - **Retrieval Eval Guide** — `RETRIEVAL_EVAL_GUIDE.md`
-- **Publisher Enrichments** — `PUBLISHER_ENRICHMENTS.md`
+- **Publisher Enrichments** — `CREATOR_PIPELINE.md` (see “Publisher enrichments” section)
 - **Render Completion Webhook** — `RENDER_COMPLETION_WEBHOOK.md`
 - **Presign Service** — `COMFYUI_MINIO_PRESIGN.md`
 - **Smoke Tests** — `SMOKETESTS.md`
+
+## Link Validation Checklist
+
+- [x] `CREATOR_PIPELINE.md`
+- [x] `COMFYUI_END_TO_END.md`
+- [x] `HI_RAG_RERANK_PROVIDERS.md`
+- [x] `HIRAG_QWEN_CUDA_NOTES.md`
+- [x] `RETRIEVAL_EVAL_GUIDE.md`
+- [x] `COMFYUI_MINIO_PRESIGN.md`
+- [x] `SMOKETESTS.md`
+- [x] `RENDER_COMPLETION_WEBHOOK.md`
