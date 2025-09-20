@@ -245,6 +245,8 @@ def yt_transcript(body: Dict[str,Any] = Body(...)):
         'language': body.get('language'),
         'whisper_model': body.get('whisper_model')
     }
+    if body.get('provider'):
+        payload['provider'] = body['provider']
     try:
         r = requests.post(f"{FFW_URL}/transcribe", headers={'content-type':'application/json'}, data=json.dumps(payload), timeout=1200)
         j = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
@@ -272,7 +274,16 @@ def yt_ingest(body: Dict[str,Any] = Body(...)):
     url = body.get('url'); ns = body.get('namespace') or DEFAULT_NAMESPACE
     if not url: raise HTTPException(400, 'url required')
     dl = yt_download({'url': url, 'namespace': ns, 'bucket': body.get('bucket') or DEFAULT_BUCKET})
-    tr = yt_transcript({'video_id': dl['video_id'], 'namespace': ns, 'bucket': body.get('bucket') or DEFAULT_BUCKET, 'language': body.get('language'), 'whisper_model': body.get('whisper_model')})
+    tr_payload = {
+        'video_id': dl['video_id'],
+        'namespace': ns,
+        'bucket': body.get('bucket') or DEFAULT_BUCKET,
+        'language': body.get('language'),
+        'whisper_model': body.get('whisper_model'),
+    }
+    if body.get('provider'):
+        tr_payload['provider'] = body['provider']
+    tr = yt_transcript(tr_payload)
     return {'ok': True, 'video': dl, 'transcript': tr}
 
 # -------------------- Playlist / Channel ingestion --------------------

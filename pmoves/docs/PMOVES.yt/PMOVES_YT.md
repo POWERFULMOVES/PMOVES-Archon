@@ -3,7 +3,7 @@
 Endpoints
 - POST `/yt/info`: { url } → returns { id, title, uploader, duration, webpage_url }.
 - POST `/yt/download`: { url, bucket?, namespace? } → downloads MP4, uploads to S3 at `yt/<id>/raw.mp4`, optional thumbnail; inserts `studio_board` + `videos`; emits `ingest.file.added.v1`.
-- POST `/yt/transcript`: { video_id, bucket?, namespace?, language?, whisper_model? } → extracts audio + runs Whisper (via ffmpeg‑whisper); inserts `transcripts`; emits `ingest.transcript.ready.v1`.
+- POST `/yt/transcript`: { video_id, bucket?, namespace?, language?, whisper_model?, provider? } → extracts audio + runs the selected transcription backend (`faster-whisper` default, `whisper`, or `qwen2-audio`); inserts `transcripts`; emits `ingest.transcript.ready.v1`.
 - POST `/yt/ingest`: convenience: info + download + transcript.
 - POST `/yt/playlist`: { url, namespace?, bucket?, max_videos?, … } → iterates playlist, tracks job state in `yt_jobs/yt_items`, downloads + transcribes each video.
 - POST `/yt/channel`: { url|channel_id, ... } → same as playlist for a channel.
@@ -44,7 +44,8 @@ Flow
 5) Downstream: LangExtract → extract-worker → Hi‑RAG + Neo4j; Jellyfin refresh + Discord embeds (pending)
 
 Notes
-- ffmpeg‑whisper currently uses OpenAI Whisper; GPU path is to switch to `faster-whisper`.
+- `ffmpeg-whisper` auto-detects CUDA GPUs (`WHISPER_DEVICE` / `USE_CUDA` override) and defaults to `faster-whisper`, falling back to CPU INT8 inference when no GPU is available.
+- Set `provider` in `/yt/transcript` or `/yt/ingest` to choose `faster-whisper`, `whisper` (WhisperX + optional PyAnnote diarization), or `qwen2-audio` (requires Transformers + Qwen2 Audio weights; GPU strongly recommended for real-time throughput).
 - For Jetson, use L4T PyTorch bases and CUDA‑enabled models.
 - Gemma providers:
   - `YT_SUMMARY_PROVIDER=ollama|hf`, `OLLAMA_URL`, `YT_GEMMA_MODEL` (default gemma2:9b-instruct)
