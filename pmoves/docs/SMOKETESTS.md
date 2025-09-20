@@ -38,6 +38,48 @@ Useful health checks:
 - Render Webhook: `curl http://localhost:8085/healthz`
 - PostgREST: `curl http://localhost:3000`
 - Hi‑RAG v2 stats: `curl http://localhost:8087/hirag/admin/stats`
+- Discord Publisher: `curl http://localhost:8092/healthz`
+
+### Discord Publisher (content.published.v1)
+
+Verify Discord wiring by emitting a `content.published.v1` event after the stack is up:
+
+```bash
+python - <<'PY'
+import asyncio, json, os
+from nats.aio.client import Client as NATS
+
+async def main():
+    nc = NATS()
+    await nc.connect(os.getenv("NATS_URL", "nats://localhost:4222"))
+    await nc.publish(
+        "content.published.v1",
+        json.dumps(
+            {
+                "topic": "content.published.v1",
+                "payload": {
+                    "title": "Smoke Story",
+                    "namespace": "smoke-test",
+                    "published_path": "smoke/story.md",
+                    "public_url": "https://example.org/smoke-story",
+                    "tags": ["demo", "smoke"],
+                    "cover_art": {
+                        "thumbnails": [
+                            {"url": "https://placehold.co/640x360.png", "width": 640, "height": 360}
+                        ]
+                    },
+                },
+            }
+        ).encode("utf-8"),
+    )
+    await nc.flush()
+    await nc.drain()
+
+asyncio.run(main())
+PY
+```
+
+Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags. Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
 - `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
@@ -240,6 +282,13 @@ HTTP endpoints checked:
 - Auto-linking (optional): set `JELLYFIN_AUTOLINK=true` and (optionally) `AUTOLINK_INTERVAL_SEC=60` to periodically map recent videos by title.
 - Search: `curl 'http://localhost:8093/jellyfin/search?query=<title>'`
 - Map by title: `curl -X POST http://localhost:8093/jellyfin/map-by-title -H 'content-type: application/json' -d '{"video_id":"<id>","title":"<title>"}'`
+
+## Content Publisher
+
+- The publisher listens on `content.publish.approved.v1` and stages media as `<MEDIA_LIBRARY_PATH>/<namespace>/<slug>.<ext>`.
+- Outgoing `content.published.v1` envelopes now include the source `description`, `tags`, and merged `meta` fields, plus optional
+  `public_url`/`jellyfin_item_id` whenever Jellyfin confirms a library refresh.
+- Configure `MEDIA_LIBRARY_PUBLIC_BASE_URL` to advertise HTTP paths for the downloaded artifacts.
 
 ## Playlist/Channel Ingestion
 
