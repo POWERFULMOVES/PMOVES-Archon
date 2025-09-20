@@ -41,6 +41,13 @@ OpenAI-compatible presets:
 - Legacy gateway: `make up-legacy`
 - Seed demo data (Qdrant/Meili): `make seed-data`
 
+### Events (NATS)
+
+- To publish/receive events locally, start a broker and enable it in env:
+  - `make up-nats` (starts `nats` service and writes `YT_NATS_ENABLE=true` + `NATS_URL=nats://nats:4222` to `.env.local`).
+  - Restart any services that should emit/subscribe after enabling.
+  - If you don’t need events, skip this; services run fine without NATS.
+
 ### Supabase: Local CLI vs Self‑Hosted
 
 - Local parity (via Supabase CLI):

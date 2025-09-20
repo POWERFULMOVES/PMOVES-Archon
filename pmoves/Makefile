@@ -1,4 +1,4 @@
-.PHONY: up down clean up-workers up-yt up-media up-jellyfin ps supabase-up supabase-stop supabase-clean supa-extract-remote
+.PHONY: up down clean up-workers up-yt up-media up-jellyfin up-nats ps supabase-up supabase-stop supabase-clean supa-extract-remote
 
 # Pin a stable Docker Compose project name so make targets
 # always operate on the same stack regardless of cwd/path.
@@ -62,6 +62,12 @@ up-cli:
 
 up-compose:
 	SUPA_PROVIDER=compose $(MAKE) up
+
+# Start a local NATS broker and enable events in .env.local
+up-nats:
+	docker compose -p $(PROJECT) --profile agents up -d nats
+	- pwsh -NoProfile -Command "if (-not (Test-Path .\.env.local)) { New-Item -ItemType File -Path .\.env.local | Out-Null }; $c = Get-Content .\.env.local | Where-Object { $_ -notmatch '^(YT_NATS_ENABLE|NATS_URL)=' }; $c + @('YT_NATS_ENABLE=true','NATS_URL=nats://nats:4222') | Set-Content .\.env.local"
+	- sh -c 'touch .env.local; tmp=$$(mktemp); grep -v -E "^(YT_NATS_ENABLE|NATS_URL)=" .env.local > "$$tmp"; printf "YT_NATS_ENABLE=true\nNATS_URL=nats://nats:4222\n" >> "$$tmp"; mv "$$tmp" .env.local' 2>/dev/null || true
 
 # Supabase lightweight services (realtime/storage/gotrue/studio) using main Postgres (Compose mode)
 SUPA_FILE ?= docker-compose.supabase.yml
