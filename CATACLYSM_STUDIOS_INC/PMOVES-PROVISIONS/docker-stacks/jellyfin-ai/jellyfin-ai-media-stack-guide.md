@@ -75,14 +75,22 @@ SUPABASE_SERVICE_KEY=your-service-role-key
 # Security
 JWT_SECRET=your-jwt-secret-here
 NEO4J_PASSWORD=mediapassword123
+JELLYFIN_USERNAME=your-jellyfin-username
+JELLYFIN_PASSWORD=your-jellyfin-password
+# Optional: provide a Jellyfin API key instead of username/password
+JELLYFIN_API_KEY=
 
-# AI Configuration  
+# AI Configuration
 OPENAI_API_KEY=your-openai-key-if-needed
 HUGGINGFACE_TOKEN=your-hf-token-if-needed
 
 # YouTube API (for content creation)
 YOUTUBE_API_KEY=your-youtube-api-key
 ```
+
+`JELLYFIN_USERNAME` and `JELLYFIN_PASSWORD` (or the optional `JELLYFIN_API_KEY`) are consumed by the audio processor to securely
+authenticate against your Jellyfin server. Populate these secrets through your provisioning workflow so containers can access the
+media library without prompting for manual credentials.
 
 ### Supabase Setup
 
