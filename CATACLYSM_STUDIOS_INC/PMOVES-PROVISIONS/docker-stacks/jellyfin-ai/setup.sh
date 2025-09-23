@@ -49,6 +49,14 @@ print_status "Setting directory permissions..."
 sudo chown -R $USER:$USER jellyfin/ neo4j/ qwen/ output/ logs/ redis/
 chmod -R 755 jellyfin/ neo4j/ qwen/ output/ logs/ redis/
 
+# Ensure shared Docker network exists for Supabase connectivity
+if ! docker network inspect pmoves-net >/dev/null 2>&1; then
+    print_status "Creating shared pmoves-net network..."
+    docker network create pmoves-net
+else
+    print_status "Using existing pmoves-net network"
+fi
+
 # Create environment file if it doesn't exist
 if [ ! -f .env ]; then
     print_status "Creating environment file..."

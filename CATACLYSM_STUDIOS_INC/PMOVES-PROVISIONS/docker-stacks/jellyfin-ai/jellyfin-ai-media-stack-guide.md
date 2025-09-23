@@ -22,19 +22,24 @@ This stack integrates:
 ### Installation
 
 1. **Clone/Download the configuration files**
-2. **Run the setup script:**
+2. **Ensure the shared Docker network exists** (needed to reach the PMOVES Supabase stack):
+   ```bash
+   docker network create pmoves-net 2>/dev/null || true
+   ```
+
+3. **Run the setup script:**
    ```bash
    chmod +x setup.sh
    ./setup.sh
    ```
 
-3. **Configure environment variables:**
+4. **Configure environment variables:**
    ```bash
    cp .env.template .env
    # Edit .env with your actual credentials
    ```
 
-4. **Start the stack:**
+5. **Start the stack:**
    ```bash
    docker-compose up -d
    ```
