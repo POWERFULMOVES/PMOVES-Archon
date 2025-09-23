@@ -34,6 +34,7 @@ if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/
     exit 1
 fi
 
+
 # Create necessary directories
 print_status "Creating directory structure..."
 mkdir -p media/{music,videos,podcasts}
@@ -43,6 +44,25 @@ mkdir -p qwen/{models,cache}
 mkdir -p output
 mkdir -p logs
 mkdir -p redis/data
+
+# Create necessary directories
+print_status "Creating directory structure..."
+mkdir -p media/{music,videos,podcasts}
+mkdir -p jellyfin/{config,cache}
+mkdir -p neo4j/{data,logs,import,plugins}
+mkdir -p qwen/{models,cache}
+mkdir -p output
+mkdir -p logs
+mkdir -p redis/data
+
+# Ensure the shared pmoves-net network exists for Supabase connectivity
+if ! docker network ls --format '{{.Name}}' | grep -wq "pmoves-net"; then
+    print_status "Creating shared pmoves-net network..."
+    docker network create pmoves-net
+else
+    print_status "Using existing pmoves-net network"
+fi
+
 
 # Set permissions
 print_status "Setting directory permissions..."

@@ -21,6 +21,7 @@ This stack integrates:
 
 ### Installation
 
+
 1. **Clone/Download the configuration files**
 2. **Ensure the shared Docker network exists** (needed to reach the PMOVES Supabase stack):
    ```bash
@@ -28,10 +29,20 @@ This stack integrates:
    ```
 
 3. **Run the setup script:**
+
+1. **Clone/Download the configuration files**
+   - If you're running this stack without the core PMOVES services, create the shared network first:
+     ```bash
+     docker network create pmoves-net
+     ```
+     (Safe to rerun; Docker will reuse the network if it already exists.)
+2. **Run the setup script:**
+
    ```bash
    chmod +x setup.sh
    ./setup.sh
    ```
+
 
 4. **Configure environment variables:**
    ```bash
@@ -43,6 +54,19 @@ This stack integrates:
    ```bash
    docker-compose up -d
    ```
+
+
+3. **Configure environment variables:**
+   ```bash
+   cp .env.template .env
+   # Edit .env with your actual credentials
+   ```
+
+4. **Start the stack:**
+   ```bash
+   docker-compose up -d
+   ```
+
 
 ## 📁 Directory Structure
 
@@ -80,14 +104,22 @@ SUPABASE_SERVICE_KEY=your-service-role-key
 # Security
 JWT_SECRET=your-jwt-secret-here
 NEO4J_PASSWORD=mediapassword123
+JELLYFIN_USERNAME=your-jellyfin-username
+JELLYFIN_PASSWORD=your-jellyfin-password
+# Optional: provide a Jellyfin API key instead of username/password
+JELLYFIN_API_KEY=
 
-# AI Configuration  
+# AI Configuration
 OPENAI_API_KEY=your-openai-key-if-needed
 HUGGINGFACE_TOKEN=your-hf-token-if-needed
 
 # YouTube API (for content creation)
 YOUTUBE_API_KEY=your-youtube-api-key
 ```
+
+`JELLYFIN_USERNAME` and `JELLYFIN_PASSWORD` (or the optional `JELLYFIN_API_KEY`) are consumed by the audio processor to securely
+authenticate against your Jellyfin server. Populate these secrets through your provisioning workflow so containers can access the
+media library without prompting for manual credentials.
 
 ### Supabase Setup
 
