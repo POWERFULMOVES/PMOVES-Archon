@@ -75,6 +75,10 @@ SUPABASE_SERVICE_KEY=your-service-role-key
 # Security
 JWT_SECRET=your-jwt-secret-here
 NEO4J_PASSWORD=mediapassword123
+JELLYFIN_USERNAME=your-jellyfin-username
+JELLYFIN_PASSWORD=your-jellyfin-password
+# Optionally set an API key instead of credentials
+JELLYFIN_API_KEY=
 
 # AI Configuration  
 OPENAI_API_KEY=your-openai-key-if-needed
@@ -91,7 +95,7 @@ YOUTUBE_API_KEY=your-youtube-api-key
    ```sql
    -- Use supabase-setup.sql content
    ```
-3. Update your .env file with the project credentials
+3. Update your .env file with the project credentials, including Jellyfin credentials or an API key.
 
 ### Neo4j Configuration
 
