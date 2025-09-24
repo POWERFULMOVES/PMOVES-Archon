@@ -30,8 +30,9 @@ class MediaProcessor:
         self.qwen_url = os.getenv("QWEN_AUDIO_URL", "http://qwen-audio:8000")
 
         # Initialize clients
+        self.supabase: Optional[Client] = None
         if self.supabase_url and self.supabase_key:
-            self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+            self.supabase = create_client(self.supabase_url, self.supabase_key)
 
         self.neo4j_driver = GraphDatabase.driver(
             self.neo4j_uri,
