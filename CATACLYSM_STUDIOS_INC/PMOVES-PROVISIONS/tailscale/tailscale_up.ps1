@@ -32,9 +32,18 @@ if ($authKey) {
     $tailscaleArgs += "--authkey=$authKey"
 }
 
-Write-Host "Executing tailscale.exe up $($tailscaleArgs -join ' ')" -ForegroundColor Cyan
 try {
-    tailscale.exe up @tailscaleArgs
+    $tailscaleCli = Get-Command 'tailscale.exe' -ErrorAction Stop
+}
+catch {
+    throw "tailscale.exe is not in PATH. Install Tailscale first or reopen a new PowerShell session."
+}
+
+$tailscalePath = $tailscaleCli.Source
+
+Write-Host "Executing $tailscalePath up $($tailscaleArgs -join ' ')" -ForegroundColor Cyan
+try {
+    & $tailscalePath up @tailscaleArgs
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         throw "tailscale.exe exited with code $exitCode"
