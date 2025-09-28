@@ -45,7 +45,8 @@ Compose service snippet (paste under services):
 
 - `TAILSCALE_ONLY=true` restricts **every** endpoint (REST + WebSocket) to Tailnet source IPs.
 - `TAILSCALE_ADMIN_ONLY=true` keeps the public `/hirag/query` and geometry helpers open while still locking admin, ingest, and mutation endpoints to Tailnet clients when `TAILSCALE_ONLY` is `false`.
-- Both Hi‑RAG gateways (`hi-rag-gateway` and `hi-rag-gateway-v2`) share the same environment variables and CIDR list.
+- Setting `TAILSCALE_ONLY=true` overrides the admin flag — the whole service is gated regardless of `TAILSCALE_ADMIN_ONLY`.
+- Both Hi‑RAG gateways (`hi-rag-gateway` and `hi-rag-gateway-v2`) read the same environment variables and CIDR list.
 
 Example configurations:
 
@@ -65,4 +66,26 @@ Endpoints:
 - GET  /hirag/admin/stats   (Tailscale‑gated)
 - POST /hirag/admin/refresh (Tailscale‑gated)
 - POST /hirag/admin/cache/clear (Tailscale‑gated)
+
+#### Smoke check
+
+When either flag enforces the Tailnet, public requests from non‑Tailnet IPs receive HTTP 403. Example:
+
+```bash
+# Assume the gateway is running locally with TAILSCALE_ONLY=true
+curl -i \
+  -H "Content-Type: application/json" \
+  -H "X-Forwarded-For: 8.8.8.8" \
+  -d '{"query":"hello","namespace":"default"}' \
+  http://localhost:8086/hirag/query
+```
+
+Expected response snippet:
+
+```
+HTTP/1.1 403 Forbidden
+{"detail":"Service restricted to Tailscale network"}
+```
+
+Swap `TAILSCALE_ONLY=false` and `TAILSCALE_ADMIN_ONLY=true` to confirm that `/hirag/admin/stats` returns the same 403 while `/hirag/query` succeeds.
 
