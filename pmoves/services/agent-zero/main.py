@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shlex
@@ -13,7 +14,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Path as FPath, Query
+from nats.aio.client import Client as NATS
 from pydantic import BaseModel, Field
+
+from services.common.events import envelope
+
+import mcp_server
 
 logger = logging.getLogger("pmoves.agent_zero.service")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -32,7 +38,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 @dataclass
-class AgentZeroConfig:
+class AgentZeroRuntimeConfig:
     """Configuration container for the Agent Zero runtime wrapper."""
 
     root: Path = field(
@@ -131,6 +137,62 @@ class AgentZeroConfig:
         return env
 
 
+class AgentZeroServiceConfig(BaseModel):
+    """Configuration exposed via the public Agent Zero API."""
+
+    port: int = Field(default=8080, description="Port the FastAPI service listens on")
+    nats_url: str = Field(
+        default="nats://nats:4222", description="NATS connection string"
+    )
+    geometry_gateway_url: str = Field(
+        default="http://localhost:8087",
+        description="Base URL for the geometry gateway runtime",
+    )
+    youtube_ingest_url: str = Field(
+        default="http://localhost:8077",
+        description="Base URL for the YouTube ingest runtime",
+    )
+    render_webhook_url: str = Field(
+        default="http://localhost:8085",
+        description="Webhook endpoint for ComfyUI renders",
+    )
+    agent_form: str = Field(
+        default="POWERFULMOVES", description="Default MCP form name"
+    )
+    agent_forms_dir: str = Field(
+        default="configs/agents/forms",
+        description="Directory containing Agent Zero YAML form definitions",
+    )
+    knowledge_base_dir: str = Field(
+        default="runtime/knowledge",
+        description="Local directory for Agent Zero knowledge base artifacts",
+    )
+    mcp_runtime_dir: str = Field(
+        default="runtime/mcp",
+        description="Directory used by MCP runtime shims (logs, pipes, sockets)",
+    )
+
+
+def load_service_config() -> AgentZeroServiceConfig:
+    return AgentZeroServiceConfig(
+        port=int(os.environ.get("PORT", 8080)),
+        nats_url=os.environ.get("NATS_URL", "nats://nats:4222"),
+        geometry_gateway_url=os.environ.get(
+            "HIRAG_URL", os.environ.get("GATEWAY_URL", "http://localhost:8087")
+        ),
+        youtube_ingest_url=os.environ.get("YT_URL", "http://localhost:8077"),
+        render_webhook_url=os.environ.get(
+            "RENDER_WEBHOOK_URL", "http://localhost:8085"
+        ),
+        agent_form=os.environ.get("AGENT_FORM", "POWERFULMOVES"),
+        agent_forms_dir=os.environ.get("AGENT_FORMS_DIR", "configs/agents/forms"),
+        knowledge_base_dir=os.environ.get(
+            "AGENT_KNOWLEDGE_BASE_DIR", "runtime/knowledge"
+        ),
+        mcp_runtime_dir=os.environ.get("AGENT_MCP_RUNTIME_DIR", "runtime/mcp"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runtime client
 # ---------------------------------------------------------------------------
@@ -144,7 +206,7 @@ class AgentZeroRequestError(RuntimeError):
 
 
 class AgentZeroClient:
-    def __init__(self, config: AgentZeroConfig) -> None:
+    def __init__(self, config: AgentZeroRuntimeConfig) -> None:
         self._config = config
 
     @property
@@ -249,7 +311,7 @@ class AgentZeroClient:
 class AgentZeroProcessManager:
     """Manage the lifecycle of the Agent Zero subprocess."""
 
-    def __init__(self, config: AgentZeroConfig, client: AgentZeroClient) -> None:
+    def __init__(self, config: AgentZeroRuntimeConfig, client: AgentZeroClient) -> None:
         self._config = config
         self._client = client
         self._process: Optional[asyncio.subprocess.Process] = None
@@ -405,15 +467,72 @@ class MemoryPayload(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class EventPublishRequest(BaseModel):
+    topic: str = Field(..., description="NATS topic to publish to")
+    payload: Dict[str, Any] = Field(
+        default_factory=dict, description="Event payload body"
+    )
+
+
+class MCPExecuteRequest(BaseModel):
+    cmd: str = Field(..., description="MCP command name")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict, description="Arguments for the command"
+    )
+
+
+class MCPExecuteResponse(BaseModel):
+    cmd: str
+    result: Dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
 # Application setup
 # ---------------------------------------------------------------------------
 
 
-config = AgentZeroConfig()
-client = AgentZeroClient(config)
-process_manager = AgentZeroProcessManager(config, client)
+service_config = load_service_config()
+runtime_config = AgentZeroRuntimeConfig()
+client = AgentZeroClient(runtime_config)
+process_manager = AgentZeroProcessManager(runtime_config, client)
 app = FastAPI(title="Agent Zero Supervisor")
+
+_nats: Optional[NATS] = None
+_nats_connect_task: Optional[asyncio.Task[None]] = None
+_nats_lock: Optional[asyncio.Lock] = None
+
+
+def get_service_config() -> AgentZeroServiceConfig:
+    return service_config
+
+
+def _get_nats_lock() -> asyncio.Lock:
+    global _nats_lock
+    if _nats_lock is None:
+        _nats_lock = asyncio.Lock()
+    return _nats_lock
+
+
+async def ensure_nats_connected() -> NATS:
+    global _nats
+    if _nats and _nats.is_connected:
+        return _nats
+    lock = _get_nats_lock()
+    async with lock:
+        if _nats and _nats.is_connected:
+            return _nats
+        nc = NATS()
+        await nc.connect(servers=[service_config.nats_url])
+        _nats = nc
+        logger.info("Connected to NATS at %s", service_config.nats_url)
+        return nc
+
+
+async def _connect_nats_background() -> None:
+    try:
+        await ensure_nats_connected()
+    except Exception:  # pragma: no cover - best effort background connection
+        logger.exception("Failed to establish NATS connection")
 
 
 async def ensure_runtime_running() -> None:
@@ -423,6 +542,10 @@ async def ensure_runtime_running() -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     await process_manager.start()
+    global _nats_connect_task
+    _nats_connect_task = asyncio.create_task(
+        _connect_nats_background(), name="agent-zero-nats-connect"
+    )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -436,6 +559,15 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     await process_manager.stop()
+    global _nats_connect_task
+    if _nats_connect_task:
+        _nats_connect_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _nats_connect_task
+        _nats_connect_task = None
+    if _nats and _nats.is_connected:
+        await _nats.drain()
+        await _nats.close()
 
 
 @app.get("/healthz")
@@ -448,6 +580,10 @@ async def healthz() -> Dict[str, Any]:
         "pid": getattr(process_manager._process, "pid", None),
         "last_returncode": process_manager.last_returncode,
     }
+    detail["nats"] = {
+        "url": service_config.nats_url,
+        "connected": bool(_nats and _nats.is_connected),
+    }
     if running:
         try:
             runtime_health = await client.health()
@@ -455,6 +591,57 @@ async def healthz() -> Dict[str, Any]:
         except AgentZeroRequestError as exc:
             detail["runtime"] = {"status": "error", "detail": str(exc)}
     return detail
+
+
+@app.get("/config/environment", response_model=AgentZeroServiceConfig)
+def get_environment_endpoint() -> AgentZeroServiceConfig:
+    return get_service_config()
+
+
+@app.get("/mcp/commands")
+def list_mcp_commands(
+    config: AgentZeroServiceConfig = Depends(get_service_config),
+) -> Dict[str, Any]:
+    return {
+        "default_form": config.agent_form,
+        "forms_dir": config.agent_forms_dir,
+        "runtime": {
+            "knowledge_base_dir": config.knowledge_base_dir,
+            "mcp_runtime_dir": config.mcp_runtime_dir,
+        },
+        "commands": mcp_server.list_commands(),
+    }
+
+
+async def _execute_command(cmd: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, mcp_server.execute_command, cmd, args)
+
+
+@app.post("/mcp/execute", response_model=MCPExecuteResponse)
+async def execute_mcp_command(request: MCPExecuteRequest) -> MCPExecuteResponse:
+    if request.cmd not in mcp_server.COMMAND_REGISTRY:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown MCP command: {request.cmd}"
+        )
+    try:
+        result = await _execute_command(request.cmd, request.arguments)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return MCPExecuteResponse(cmd=request.cmd, result=result)
+
+
+@app.post("/events/publish", response_model=Dict[str, str])
+async def events_publish(body: EventPublishRequest) -> Dict[str, str]:
+    try:
+        nc = await ensure_nats_connected()
+    except Exception as exc:  # pragma: no cover - network failure path
+        raise HTTPException(
+            status_code=503, detail="NATS connection not ready"
+        ) from exc
+    message = envelope(body.topic, body.payload, source="agent-zero")
+    await nc.publish(body.topic.encode(), json.dumps(message).encode())
+    return {"published": body.topic}
 
 
 @app.post("/sessions")
@@ -581,4 +768,4 @@ async def delete_memory(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    uvicorn.run(app, host="0.0.0.0", port=service_config.port)
