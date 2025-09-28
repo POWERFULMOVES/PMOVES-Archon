@@ -281,22 +281,31 @@ def _ip_in_cidrs(ip: str, cidrs):
 def _tailscale_required(admin_only: bool) -> bool:
     if TAILSCALE_ONLY:
         return True
-    if admin_only and TAILSCALE_ADMIN_ONLY:
-        return True
+    if admin_only:
+        return TAILSCALE_ADMIN_ONLY
     return False
+
+
+def _tailscale_violation_detail(admin_only: bool) -> str:
+    return (
+        "Admin endpoints restricted to Tailscale network"
+        if admin_only
+        else "Service restricted to Tailscale network"
+    )
+
+
+def _tailscale_ip_allowed(ip: str, admin_only: bool) -> bool:
+    if not _tailscale_required(admin_only):
+        return True
+    return _ip_in_cidrs(ip, TAILSCALE_CIDRS)
 
 
 def require_tailscale(request: Request, admin_only: bool = False):
     if not _tailscale_required(admin_only):
         return
     ip = _client_ip(request)
-    if not _ip_in_cidrs(ip, TAILSCALE_CIDRS):
-        detail = (
-            "Admin endpoints restricted to Tailscale network"
-            if admin_only
-            else "Service restricted to Tailscale network"
-        )
-        raise HTTPException(status_code=403, detail=detail)
+    if not _tailscale_ip_allowed(ip, admin_only):
+        raise HTTPException(status_code=403, detail=_tailscale_violation_detail(admin_only))
 
 
 def require_admin_tailscale(request: Request):
