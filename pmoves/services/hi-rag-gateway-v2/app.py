@@ -331,9 +331,17 @@ def _ip_in_cidrs(ip: str, cidrs):
 def _tailscale_required(admin_only: bool) -> bool:
     if TAILSCALE_ONLY:
         return True
-    if admin_only and TAILSCALE_ADMIN_ONLY:
-        return True
+    if admin_only:
+        return TAILSCALE_ADMIN_ONLY
     return False
+
+
+def _tailscale_violation_detail(admin_only: bool) -> str:
+    return (
+        "Admin endpoints restricted to Tailscale network"
+        if admin_only
+        else "Service restricted to Tailscale network"
+    )
 
 
 def _tailscale_ip_allowed(ip: str, admin_only: bool) -> bool:
@@ -343,14 +351,11 @@ def _tailscale_ip_allowed(ip: str, admin_only: bool) -> bool:
 
 
 def require_tailscale(request: Request, admin_only: bool = False):
+    if not _tailscale_required(admin_only):
+        return
     ip = _client_ip(request)
     if not _tailscale_ip_allowed(ip, admin_only):
-        detail = (
-            "Admin endpoints restricted to Tailscale network"
-            if admin_only
-            else "Service restricted to Tailscale network"
-        )
-        raise HTTPException(status_code=403, detail=detail)
+        raise HTTPException(status_code=403, detail=_tailscale_violation_detail(admin_only))
 
 
 def require_admin_tailscale(request: Request):
@@ -749,7 +754,7 @@ async def ws_signaling(ws: WebSocket, room: str):
     ip = ws.client.host if ws.client else "127.0.0.1"
     if not _tailscale_ip_allowed(ip, admin_only=False):
         logger.warning("Rejecting websocket connection from non-Tailnet IP %s", ip)
-        await ws.close(code=1008, reason="Tailnet required")
+        await ws.close(code=1008, reason=_tailscale_violation_detail(admin_only=False))
         return
     await ws.accept()
     await _room_add(room, ws)
