@@ -12,16 +12,18 @@ This bundle lets you mass-deploy your homelab and workstations **in parallel** w
 
 ## Quick Start
 1. **Ventoy USBs**: create multiple sticks. Copy this bundle to each one. Copy your ISO files into `isos/`.
-2. **Windows**: pick your Win11 ISO in Ventoy. If prompted, select the **Autounattend** template. First login runs `windows/win-postinstall.ps1` from the USB automatically.
+2. **Windows**: pick your Win11 ISO in Ventoy. If prompted, select the **Autounattend** template. First login runs `windows/win-postinstall.ps1` from the USB automatically. If `tailscale/tailscale_up.ps1` is present, the post-install will also join the host to your Tailnet right away.
 3. **Ubuntu**: pick the Ubuntu Server ISO. The autoinstall will use `linux/ubuntu-autoinstall/user-data` and set up Docker + Tailscale.
 4. **Proxmox VE 9**: Install from ISO normally, then run `proxmox/pve9_postinstall.sh` to finish. Alternatively, install Debian 13 (autoinstall), then run `proxmox/pve_on_debian13.sh` to convert to PVE 9.
 5. **Jetson**: Flash JetPack as usual. Then run `jetson/jetson-postinstall.sh` on first boot. Use `jetson/ngc_login.sh` to authenticate to NGC, and `jetson/pull_and_save.sh` to pre-pull/save containers.
 6. **Stacks**: On your main host/VM, `docker compose -f docker-stacks/portainer.yml up -d`, then deploy the rest from Portainer.
 
 ## Secrets
-- Replace placeholders like `YOUR_TUNNEL_TOKEN_HERE` and fill `tailscale/tailscale_up.sh` with your Tailnet preferences.
+- Replace placeholders like `YOUR_TUNNEL_TOKEN_HERE` and fill both `tailscale/tailscale_up.sh` (Linux) and `tailscale/tailscale_up.ps1` (Windows) with your Tailnet preferences.
+- Store the Windows Tailnet auth key in `tailscale/tailscale_authkey.txt` (not committed) or set a `TAILSCALE_AUTHKEY` environment variable before running `tailscale/tailscale_up.ps1`. The script automatically picks one of those sources when it runs.
 - For NVIDIA NGC, run `jetson/ngc_login.sh` (or do `docker login nvcr.io`) with your API key.
 
 ## Notes
 - Ventoy mapping lives in `ventoy/ventoy.json`—edit the `"image"` paths to match your ISO filenames.
 - If Windows doesn't auto-run the post-install script, open the USB and run `windows/win-postinstall.ps1` as admin.
+- On staged builds, confirm the machine appears in the Tailnet admin console with the expected tags right after post-install.

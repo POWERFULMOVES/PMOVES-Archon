@@ -2,6 +2,10 @@
 # Run as Admin (FirstLogonCommands tries to auto-run this)
 Write-Host "Starting Windows Post-Install..." -ForegroundColor Cyan
 
+$scriptPath = $MyInvocation.MyCommand.Path
+$scriptDir = Split-Path -Parent $scriptPath
+$bundleRoot = Split-Path -Parent $scriptDir
+
 # Enable long paths & show file extensions
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f | Out-Null
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v HideFileExt /t REG_DWORD /d 0 /f | Out-Null
@@ -28,6 +32,17 @@ if (Test-Path $settings) {
   $json.autoStart = $true
   $json.wslEngineEnabled = $true
   $json | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding UTF8
+}
+
+$tailscaleScript = Join-Path $bundleRoot 'tailscale/tailscale_up.ps1'
+if (Test-Path $tailscaleScript) {
+  Write-Host "Running Tailnet bootstrap script..." -ForegroundColor Cyan
+  try {
+    & $tailscaleScript
+  }
+  catch {
+    Write-Warning "Tailnet bootstrap failed: $($_.Exception.Message)"
+  }
 }
 
 Write-Host "Windows Post-Install complete. Reboot recommended." -ForegroundColor Green
