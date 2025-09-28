@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import shlex
@@ -14,10 +13,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Path as FPath, Query
-from nats.aio.client import Client as NATS
 from pydantic import BaseModel, Field
 
-from services.common.events import envelope
+from services.agent_zero.controller import AgentZeroController, ControllerSettings
 
 import mcp_server
 
@@ -472,6 +470,16 @@ class EventPublishRequest(BaseModel):
     payload: Dict[str, Any] = Field(
         default_factory=dict, description="Event payload body"
     )
+    correlation_id: Optional[str] = Field(
+        default=None, description="Correlation identifier to include in the envelope"
+    )
+    parent_id: Optional[str] = Field(
+        default=None, description="Parent envelope identifier"
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Override the source field on the published envelope",
+    )
 
 
 class MCPExecuteRequest(BaseModel):
@@ -497,54 +505,50 @@ client = AgentZeroClient(runtime_config)
 process_manager = AgentZeroProcessManager(runtime_config, client)
 app = FastAPI(title="Agent Zero Supervisor")
 
-_nats: Optional[NATS] = None
-_nats_connect_task: Optional[asyncio.Task[None]] = None
-_nats_lock: Optional[asyncio.Lock] = None
+controller_settings = ControllerSettings(nats_url=service_config.nats_url)
+event_controller = AgentZeroController(controller_settings)
+_controller_task: Optional[asyncio.Task[None]] = None
+_controller_shutdown = asyncio.Event()
+_controller_ready = asyncio.Event()
 
 
 def get_service_config() -> AgentZeroServiceConfig:
     return service_config
 
 
-def _get_nats_lock() -> asyncio.Lock:
-    global _nats_lock
-    if _nats_lock is None:
-        _nats_lock = asyncio.Lock()
-    return _nats_lock
-
-
-async def ensure_nats_connected() -> NATS:
-    global _nats
-    if _nats and _nats.is_connected:
-        return _nats
-    lock = _get_nats_lock()
-    async with lock:
-        if _nats and _nats.is_connected:
-            return _nats
-        nc = NATS()
-        await nc.connect(servers=[service_config.nats_url])
-        _nats = nc
-        logger.info("Connected to NATS at %s", service_config.nats_url)
-        return nc
-
-
-async def _connect_nats_background() -> None:
-    try:
-        await ensure_nats_connected()
-    except Exception:  # pragma: no cover - best effort background connection
-        logger.exception("Failed to establish NATS connection")
-
-
 async def ensure_runtime_running() -> None:
     await process_manager.ensure_running()
+
+
+async def _controller_connect_loop() -> None:
+    backoff = 1.0
+    while not _controller_shutdown.is_set():
+        try:
+            await event_controller.start()
+        except Exception:  # pragma: no cover - connectivity issues
+            _controller_ready.clear()
+            logger.exception("Failed to start Agent Zero controller")
+            try:
+                await asyncio.wait_for(_controller_shutdown.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                backoff = min(backoff * 2, 30.0)
+            continue
+        else:
+            _controller_ready.set()
+            try:
+                await _controller_shutdown.wait()
+            finally:
+                _controller_ready.clear()
+            break
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
     await process_manager.start()
-    global _nats_connect_task
-    _nats_connect_task = asyncio.create_task(
-        _connect_nats_background(), name="agent-zero-nats-connect"
+    global _controller_task
+    _controller_shutdown.clear()
+    _controller_task = asyncio.create_task(
+        _controller_connect_loop(), name="agent-zero-controller-connect"
     )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -559,15 +563,15 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     await process_manager.stop()
-    global _nats_connect_task
-    if _nats_connect_task:
-        _nats_connect_task.cancel()
+    _controller_shutdown.set()
+    global _controller_task
+    if _controller_task:
         with contextlib.suppress(asyncio.CancelledError):
-            await _nats_connect_task
-        _nats_connect_task = None
-    if _nats and _nats.is_connected:
-        await _nats.drain()
-        await _nats.close()
+            await _controller_task
+        _controller_task = None
+    if event_controller.is_started:
+        with contextlib.suppress(Exception):
+            await event_controller.stop()
 
 
 @app.get("/healthz")
@@ -582,8 +586,13 @@ async def healthz() -> Dict[str, Any]:
     }
     detail["nats"] = {
         "url": service_config.nats_url,
-        "connected": bool(_nats and _nats.is_connected),
+        "connected": event_controller.is_connected,
+        "controller_started": event_controller.is_started,
+        "subjects": list(controller_settings.subjects),
+        "stream": controller_settings.stream_name,
     }
+    if event_controller.is_started:
+        detail["nats"]["metrics"] = event_controller.metrics
     if running:
         try:
             runtime_health = await client.health()
@@ -633,15 +642,20 @@ async def execute_mcp_command(request: MCPExecuteRequest) -> MCPExecuteResponse:
 
 @app.post("/events/publish", response_model=Dict[str, str])
 async def events_publish(body: EventPublishRequest) -> Dict[str, str]:
-    try:
-        nc = await ensure_nats_connected()
-    except Exception as exc:  # pragma: no cover - network failure path
-        raise HTTPException(
-            status_code=503, detail="NATS connection not ready"
-        ) from exc
-    message = envelope(body.topic, body.payload, source="agent-zero")
-    await nc.publish(body.topic.encode(), json.dumps(message).encode())
-    return {"published": body.topic}
+    if not (_controller_ready.is_set() and event_controller.is_connected):
+        raise HTTPException(status_code=503, detail="NATS controller not ready")
+    env = await event_controller.publish(
+        body.topic,
+        body.payload,
+        correlation_id=body.correlation_id,
+        parent_id=body.parent_id,
+        source=body.source or "agent-zero",
+    )
+    response: Dict[str, str] = {"published": body.topic}
+    envelope_id = env.get("id")
+    if envelope_id:
+        response["id"] = envelope_id
+    return response
 
 
 @app.post("/sessions")
