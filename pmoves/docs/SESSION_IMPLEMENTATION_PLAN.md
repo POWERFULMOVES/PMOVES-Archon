@@ -21,7 +21,11 @@ This working session establishes the concrete implementation tasks needed to clo
 
 1. Expand error and reporting hooks to surface HTTP failures, missing dependencies, and asset lookup issues in publisher logs.
 2. Schedule Jellyfin metadata backfill job after automation loop validation; capture duration estimates and data volume in the run log.
+   - Backfill script committed at `pmoves/services/publisher/scripts/backfill_published_metadata.py`.
+   - Dry run: `python pmoves/services/publisher/scripts/backfill_published_metadata.py --limit 25`
+   - Apply once credentials are loaded: append `--apply` to persist Supabase updates.
 3. Verify refreshed metadata renders in Discord embeds and Agent Zero payloads (tie back to automation evidence above).
+   - Embed sanity check: `python - <<'PY' ...` (see evidence log for rendered JSON snippet).
 
 ## 3. Broader Roadmap Prep (M3–M5)
 
@@ -81,3 +85,4 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | Agent Zero received content.publish.approved.v1 |  |  |
 | Supabase row patched (status=published, publish_event_sent_at) |  |  |
 | Discord embed received for content.published.v1 |  |  |
+| Discord embed render (sample payload) |  | `cb3c36` |

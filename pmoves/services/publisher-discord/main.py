@@ -295,12 +295,16 @@ def _format_event(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     elif name == "content.published.v1":
         title = payload.get("title") or payload.get("slug") or payload.get("published_path")
         emb["title"] = f"Published: {title or 'content'}"
-        public_url = payload.get("public_url")
+        public_url = payload.get("public_url") or payload.get("jellyfin_public_url")
         published_path = payload.get("published_path")
         namespace = payload.get("namespace") or payload.get("workspace")
         artifact_uri = payload.get("artifact_uri")
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
         jellyfin_item_id = payload.get("jellyfin_item_id") or meta.get("jellyfin_item_id")
+        jellyfin_public_url = (
+            payload.get("jellyfin_public_url")
+            or (meta.get("jellyfin_public_url") if isinstance(meta, dict) else None)
+        )
         duration_s = None
         for k in ("duration",):
             try:
@@ -339,21 +343,24 @@ def _format_event(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             emb["fields"].append({"name": "Duration", "value": _fmt_dur(duration_s), "inline": True})
         if jellyfin_item_id:
             emb["fields"].append({"name": "Jellyfin Item", "value": f"`{jellyfin_item_id}`", "inline": True})
-            # Build deep link when a base URL is available (payload/meta or env JELLYFIN_URL)
-            jf_base = (
-                payload.get("jellyfin_base_url")
-                or (meta.get("jellyfin_base_url") if isinstance(meta, dict) else None)
-                or JELLYFIN_URL
-            )
-            if isinstance(jf_base, str) and jf_base:
-                jf_base = jf_base.rstrip("/")
-                try:
-                    tval = payload.get("t") or payload.get("start") or payload.get("start_time")
-                    tparam = f"&startTime={int(float(tval))}" if tval is not None else ""
-                except Exception:
-                    tparam = ""
-                jf_link = f"{jf_base}/web/index.html#!/details?id={jellyfin_item_id}{tparam}"
-                emb["fields"].append({"name": "Jellyfin", "value": jf_link, "inline": False})
+            if jellyfin_public_url:
+                emb["fields"].append({"name": "Jellyfin", "value": jellyfin_public_url, "inline": False})
+            else:
+                # Build deep link when a base URL is available (payload/meta or env JELLYFIN_URL)
+                jf_base = (
+                    payload.get("jellyfin_base_url")
+                    or (meta.get("jellyfin_base_url") if isinstance(meta, dict) else None)
+                    or JELLYFIN_URL
+                )
+                if isinstance(jf_base, str) and jf_base:
+                    jf_base = jf_base.rstrip("/")
+                    try:
+                        tval = payload.get("t") or payload.get("start") or payload.get("start_time")
+                        tparam = f"&startTime={int(float(tval))}" if tval is not None else ""
+                    except Exception:
+                        tparam = ""
+                    jf_link = f"{jf_base}/web/index.html#!/details?id={jellyfin_item_id}{tparam}"
+                    emb["fields"].append({"name": "Jellyfin", "value": jf_link, "inline": False})
         tags = list(_coerce_tags(payload.get("tags") or meta.get("tags") if isinstance(meta, dict) else []))
         if tags:
             formatted_tags = ", ".join(f"`{tag}`" for tag in tags[:12])
