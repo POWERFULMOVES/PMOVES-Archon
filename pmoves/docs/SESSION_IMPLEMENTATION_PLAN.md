@@ -70,14 +70,20 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 
 | Step | Timestamp (UTC) | Evidence Link/Note |
 | --- | --- | --- |
-| agent-zero health OK |  |  |
-| jellyfin-bridge health OK |  |  |
-| publisher-discord health OK |  |  |
-| Discord webhook ping successful |  |  |
-| n8n approval_poller imported + creds set |  |  |
-| n8n echo_publisher imported + creds set |  |  |
-| n8n activated (poller → echo publisher) |  |  |
-| Supabase row seeded (status=approved) |  |  |
-| Agent Zero received content.publish.approved.v1 |  |  |
-| Supabase row patched (status=published, publish_event_sent_at) |  |  |
-| Discord embed received for content.published.v1 |  |  |
+| agent-zero health OK | — | Blocked in Codex sandbox; service not running. |
+| jellyfin-bridge health OK | — | Not applicable to this session; focus remained on Supabase ↔ Discord automation. |
+| publisher-discord health OK | — | Service unreachable without docker-compose stack. |
+| Discord webhook ping successful | — | Discord API not accessible; webhook secret unavailable. |
+| n8n approval_poller imported + creds set | — | n8n UI cannot be reached in current environment. |
+| n8n echo_publisher imported + creds set | — | Dependent on n8n access; credentials unavailable. |
+| n8n activated (poller → echo publisher) | — | Workflows not activated due to missing prerequisites. |
+| Supabase row seeded (status=approved) | — | Supabase database not provisioned in sandbox. |
+| Agent Zero received content.publish.approved.v1 | — | Requires running Agent Zero + n8n; both blocked. |
+| Supabase row patched (status=published, publish_event_sent_at) | — | Depends on workflow execution; not run. |
+| Discord embed received for content.published.v1 | — | Blocked alongside Discord webhook test. |
+
+### Follow-up Guardrails & Work Items (Identified 2025-10-23)
+
+- Provision a reproducible local automation profile that bundles Supabase, Agent Zero, and n8n so the activation checklist can be executed without manual service orchestration.
+- Add mock credentials or a dedicated staging webhook to `.env.example` to clarify which secrets must be sourced before running the workflows; document rotation expectations.
+- Automate evidence capture (timestamps, log snapshots) through a scriptable checklist to reduce manual copy/paste during validation sessions.
