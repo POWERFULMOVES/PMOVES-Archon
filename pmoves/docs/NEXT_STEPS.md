@@ -67,6 +67,7 @@ _Last updated: 2025-09-26_
 ### Jellyfin & Discord Polish
 - [x] Jellyfin library refresh automation (cron/webhook).
 - [ ] Discord rich embeds (cover art, duration, deep links) wired to `content.published.v1`.
+  - Note: publisher now renders optional `thumbnail_url`, `duration`, and Jellyfin deep links when `jellyfin_item_id` and base URL are available. Validate in Discord using `make demo-content-published`.
 - [ ] (Optional) Discord follow-up buttons (approve/reject) for moderation workflows.
 
 ### Retrieval & Graph
