@@ -21,7 +21,11 @@ This working session establishes the concrete implementation tasks needed to clo
 
 1. Expand error and reporting hooks to surface HTTP failures, missing dependencies, and asset lookup issues in publisher logs.
 2. Schedule Jellyfin metadata backfill job after automation loop validation; capture duration estimates and data volume in the run log.
+   - Backfill script committed at `pmoves/services/publisher/scripts/backfill_published_metadata.py`.
+   - Dry run: `python pmoves/services/publisher/scripts/backfill_published_metadata.py --limit 25`
+   - Apply once credentials are loaded: append `--apply` to persist Supabase updates.
 3. Verify refreshed metadata renders in Discord embeds and Agent Zero payloads (tie back to automation evidence above).
+   - Embed sanity check: `python - <<'PY' ...` (see evidence log for rendered JSON snippet).
 
 ## 3. Broader Roadmap Prep (M3–M5)
 
@@ -121,6 +125,9 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | Supabase row patched (status=published, publish_event_sent_at) |  |  |
 | Discord embed received for content.published.v1 |  |  |
 
+| Discord embed render (sample payload) |  | `cb3c36` |
+
+
 
 ### Persona Publish Gate & Retrieval Evidence
 
@@ -148,7 +155,7 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | gateway emitted `geometry.cgp.v1` | _2025-10-07T00:06:48Z_ | Tail `services/gateway/logs/*.log` – observed envelope with `constellation_id` + `shape_id`. |
 | ShapeStore warm (gateway) | _2025-10-07T00:06:53Z_ | `ShapeStore.warm_from_db` log confirms cache hydrate from PostgREST (`limit=64`). |
 | PostgREST verification | _2025-10-07T00:07:05Z_ | `GET /pmoves_core.shape_index?select=shape_id,updated_at&order=updated_at.desc&limit=5` returns cached CGP IDs matching log entries. |
-=======
+
 ## 2025-09-30 – Rollout Attempt Notes (Codex environment)
 
 The following checklist captures what could be validated within the hosted Codex workspace. Supabase/Postgres and long-running Docker services are not available in this environment, so database migrations, seeds, and geometry smoke checks could not be executed directly. Use the recorded commands as guidance when rerunning on an operator workstation.

@@ -76,6 +76,9 @@
     "content.publish.approved.v1": {
       "schema": "schemas/content/publish.approved.v1.schema.json"
     },
+    "content.publish.failed.v1": {
+      "schema": "schemas/content/publish.failed.v1.schema.json"
+    },
     "content.published.v1": {
       "schema": "schemas/content/published.v1.schema.json"
     },
