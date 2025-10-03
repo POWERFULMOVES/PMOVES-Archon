@@ -1,4 +1,4 @@
-.PHONY: up down clean up-workers up-yt up-media up-jellyfin up-nats ps supabase-up supabase-stop supabase-clean supa-extract-remote
+.PHONY: up down clean up-workers up-yt up-media up-jellyfin up-nats ps supabase-up supabase-stop supabase-clean supa-extract-remote env-setup env-check
 
 # Pin a stable Docker Compose project name so make targets
 # always operate on the same stack regardless of cwd/path.
@@ -107,6 +107,15 @@ supa-status:
 
 supa-extract-remote:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/extract_supa_md.ps1 -Source supa.md -Out .env.supa.remote
+
+# Environment helpers
+env-setup:
+	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_setup.ps1
+	- bash scripts/env_setup.sh || true
+
+env-check:
+	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
+	- bash scripts/env_check.sh || true
 
 .PHONY: up-legacy
 up-legacy:
