@@ -17,23 +17,44 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Push-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)
-Set-Location ..  # pmoves/
+$script:exitCode = 0
 
-Write-Host "== PMOVES Windows Quick Setup ==" -ForegroundColor Cyan
+try {
+  Set-Location ..  # pmoves/
 
-$setupArgs = @()
-if ($NonInteractive) { $setupArgs += '-NonInteractive' }
-if ($Defaults) { $setupArgs += '-Defaults' }
-if ($From -and $From -ne 'none') { $setupArgs += @('-From', $From) }
+  Write-Host "== PMOVES Windows Quick Setup ==" -ForegroundColor Cyan
 
-Write-Host "[1/2] Env setup..." -ForegroundColor Yellow
-& pwsh -NoProfile -File scripts/env_setup.ps1 @setupArgs
+  $setupArgs = @()
+  if ($NonInteractive) { $setupArgs += '-NonInteractive' }
+  if ($Defaults) { $setupArgs += '-Defaults' }
+  if ($From -and $From -ne 'none') { $setupArgs += @('-From', $From) }
 
-Write-Host "[2/2] Preflight check..." -ForegroundColor Yellow
-$checkArgs = @()
-if ($Quick) { $checkArgs += '-Quick' }
-& pwsh -NoProfile -File scripts/env_check.ps1 @checkArgs
+  Write-Host "[1/2] Env setup..." -ForegroundColor Yellow
+  & pwsh -NoProfile -File scripts/env_setup.ps1 @setupArgs
+  $setupExitCode = $LASTEXITCODE
+  if ($setupExitCode -ne 0) {
+    Write-Error "Env setup failed with exit code $setupExitCode."
+    $script:exitCode = $setupExitCode
+    return
+  }
 
-Write-Host "All done." -ForegroundColor Green
+  Write-Host "[2/2] Preflight check..." -ForegroundColor Yellow
+  $checkArgs = @()
+  if ($Quick) { $checkArgs += '-Quick' }
+  & pwsh -NoProfile -File scripts/env_check.ps1 @checkArgs
+  $checkExitCode = $LASTEXITCODE
+  if ($checkExitCode -ne 0) {
+    Write-Error "Preflight check failed with exit code $checkExitCode."
+    $script:exitCode = $checkExitCode
+    return
+  }
 
-Pop-Location
+  Write-Host "All done." -ForegroundColor Green
+}
+finally {
+  Pop-Location
+}
+
+if ($script:exitCode -ne 0) {
+  exit $script:exitCode
+}
