@@ -35,21 +35,23 @@ try {
   if ($setupExitCode -ne 0) {
     Write-Error "Env setup failed with exit code $setupExitCode."
     $script:exitCode = $setupExitCode
-    return
   }
 
-  Write-Host "[2/2] Preflight check..." -ForegroundColor Yellow
-  $checkArgs = @()
-  if ($Quick) { $checkArgs += '-Quick' }
-  & pwsh -NoProfile -File scripts/env_check.ps1 @checkArgs
-  $checkExitCode = $LASTEXITCODE
-  if ($checkExitCode -ne 0) {
-    Write-Error "Preflight check failed with exit code $checkExitCode."
-    $script:exitCode = $checkExitCode
-    return
+  if ($script:exitCode -eq 0) {
+    Write-Host "[2/2] Preflight check..." -ForegroundColor Yellow
+    $checkArgs = @()
+    if ($Quick) { $checkArgs += '-Quick' }
+    & pwsh -NoProfile -File scripts/env_check.ps1 @checkArgs
+    $checkExitCode = $LASTEXITCODE
+    if ($checkExitCode -ne 0) {
+      Write-Error "Preflight check failed with exit code $checkExitCode."
+      $script:exitCode = $checkExitCode
+    }
   }
 
-  Write-Host "All done." -ForegroundColor Green
+  if ($script:exitCode -eq 0) {
+    Write-Host "All done." -ForegroundColor Green
+  }
 }
 finally {
   Pop-Location
