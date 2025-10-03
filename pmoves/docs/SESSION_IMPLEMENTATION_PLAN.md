@@ -118,6 +118,11 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | publisher-discord health OK |  |  |
 | Discord webhook ping successful |  |  |
 | n8n approval_poller imported + creds set |  |  |
+| Preflight checks pass (Env/SQL/Tests) |  |  |
+| Webhook smoke (dry) reviewed |  |  |
+| Webhook smoke (live) returns 200 |  |  |
+| Publisher metrics visible (/metrics.json) |  |  |
+| Discord embed formatter tests pass |  |  |
 | n8n echo_publisher imported + creds set |  |  |
 | n8n activated (poller → echo publisher) |  |  |
 | Supabase row seeded (status=approved) |  |  |
@@ -184,5 +189,4 @@ The following checklist captures what could be validated within the hosted Codex
 - Provision a reproducible local automation profile that bundles Supabase, Agent Zero, and n8n so the activation checklist can be executed without manual service orchestration.
 - Add mock credentials or a dedicated staging webhook to `.env.example` to clarify which secrets must be sourced before running the workflows; document rotation expectations.
 - Automate evidence capture (timestamps, log snapshots) through a scriptable checklist to reduce manual copy/paste during validation sessions.
-
 

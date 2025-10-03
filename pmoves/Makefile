@@ -141,6 +141,11 @@ smoke-webhook-ci:
 	   python tools/smoke_webhook.py; \
 	 fi
 
+.PHONY: test-discord-format
+test-discord-format:
+	@echo "Running publisher-discord embed formatting tests" && \
+	 pytest -q pmoves/services/publisher-discord/tests -k formatting
+
 .PHONY: up-legacy
 up-legacy:
 	docker compose -p $(PROJECT) --profile data up -d qdrant neo4j minio meilisearch presign
