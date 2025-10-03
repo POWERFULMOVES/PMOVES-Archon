@@ -131,6 +131,16 @@ env-check:
 	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
 	- bash scripts/env_check.sh || true
 
+.PHONY: smoke-webhook-ci
+smoke-webhook-ci:
+	@echo "Render-webhook smoke (dry-run by default). Use LIVE=1 to POST."
+	@cd pmoves && \
+	 if [ "$(LIVE)" = "1" ]; then \
+	   python tools/smoke_webhook.py --live; \
+	 else \
+	   python tools/smoke_webhook.py; \
+	 fi
+
 .PHONY: up-legacy
 up-legacy:
 	docker compose -p $(PROJECT) --profile data up -d qdrant neo4j minio meilisearch presign
