@@ -131,6 +131,21 @@ env-check:
 	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
 	- bash scripts/env_check.sh || true
 
+.PHONY: smoke-webhook-ci
+smoke-webhook-ci:
+	@echo "Render-webhook smoke (dry-run by default). Use LIVE=1 to POST."
+	@cd pmoves && \
+	 if [ "$(LIVE)" = "1" ]; then \
+	   python tools/smoke_webhook.py --live; \
+	 else \
+	   python tools/smoke_webhook.py; \
+	 fi
+
+.PHONY: test-discord-format
+test-discord-format:
+	@echo "Running publisher-discord embed formatting tests" && \
+	 pytest -q pmoves/services/publisher-discord/tests -k formatting
+
 .PHONY: up-legacy
 up-legacy:
 	docker compose -p $(PROJECT) --profile data up -d qdrant neo4j minio meilisearch presign
