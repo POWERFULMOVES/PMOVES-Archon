@@ -18,6 +18,7 @@ _Last updated: 2025-09-26_
 - [ ] Backfill historic Jellyfin entries with enriched metadata and confirm downstream consumers (Agent Zero, Discord) render the new fields.
 
 ### 3. Graph & Retrieval Enhancements (Kickoff M3)
+- [x] Wire the gateway `/mindmap/{constellation_id}` endpoint to Neo4j with seed + smoke coverage (2025-10-06).
 - [ ] Seed Neo4j with the brand alias dictionary (DARKXSIDE, POWERFULMOVES, plus pending community submissions) and record Cypher script locations (draft plan in `SESSION_IMPLEMENTATION_PLAN.md`).
 - [ ] Outline relation-extraction passes from captions/notes to candidate graph edges; define success metrics and owner in the project tracker.
 - [ ] Prepare reranker parameter sweep plan (datasets, toggles, artifact storage) for integration into CI, aligning with the prep checklist captured in `SESSION_IMPLEMENTATION_PLAN.md` and ensuring persona publish gating thresholds stay versioned.
@@ -140,6 +141,7 @@ _Last updated: 2025-10-05_
 - [ ] Plot baseline ROI visuals (turnaround vs engagement vs cost) using the Supabase rollup tables and incorporate the guidance captured in `TELEMETRY_ROI.md` into the dashboard notes.
 
 ### 3. Graph & Retrieval Enhancements (Kickoff M3)
+- [x] Wire the gateway `/mindmap/{constellation_id}` endpoint to Neo4j with seed + smoke coverage (2025-10-06).
 - [ ] Seed Neo4j with the brand alias dictionary (DARKXSIDE, POWERFULMOVES, plus pending community submissions) and record Cypher script locations (draft plan in `SESSION_IMPLEMENTATION_PLAN.md`).
 - [ ] Outline relation-extraction passes from captions/notes to candidate graph edges; define success metrics and owner in the project tracker.
 - [ ] Prepare reranker parameter sweep plan (datasets, toggles, artifact storage) for integration into CI, aligning with the prep checklist captured in `SESSION_IMPLEMENTATION_PLAN.md` and ensuring persona publish gating thresholds stay versioned.
@@ -237,4 +239,6 @@ _Last updated: 2025-10-05_
 ---
 
 > Archived snapshot (2025-09-08): [NEXT_STEPS_2025-09-08](archive/NEXT_STEPS_2025-09-08.md)
+
+
 
