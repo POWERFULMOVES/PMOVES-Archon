@@ -13,6 +13,86 @@ log() {
   echo -e "\n[pmoves] $*"
 }
 
+
+configure_rustdesk_server() {
+  local image="${RUSTDESK_SERVER_IMAGE:-rustdesk/rustdesk-server:latest}"
+  local data_root="${RUSTDESK_DATA_DIR:-/var/lib/rustdesk}"
+  local env_file="/etc/default/rustdesk-server"
+
+  log "Provisioning RustDesk relay/ID services (hbbs/hbbr) via Docker (${image})."
+
+  mkdir -p "${data_root}/hbbs" "${data_root}/hbbr"
+
+  if [[ ! -f "${env_file}" ]]; then
+    cat <<'EOF' | tee "${env_file}" > /dev/null
+# Environment overrides for RustDesk relay services.
+# Modify HBBS_ARGS / HBBR_ARGS to pass additional flags (e.g. --relay my.domain.com).
+# Ports default to upstream recommendations but can be changed when needed.
+HBBS_ARGS=""
+HBBR_ARGS=""
+RUSTDESK_PORT_HBBS_TCP=21115
+RUSTDESK_PORT_HBBS_RELAY_TCP=21116
+RUSTDESK_PORT_HBBS_RELAY_UDP=21116
+RUSTDESK_PORT_HBBS_API=21118
+RUSTDESK_PORT_HBBR_TCP=21117
+RUSTDESK_PORT_HBBR_REVERSE=21119
+EOF
+  fi
+
+  cat <<EOF | tee /etc/systemd/system/rustdesk-hbbs.service > /dev/null
+[Unit]
+Description=RustDesk Rendezvous Server (hbbs)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/default/rustdesk-server
+Restart=always
+TimeoutStopSec=30
+ExecStartPre=/usr/bin/docker pull ${image}
+ExecStartPre=/usr/bin/docker rm -f rustdesk-hbbs >/dev/null 2>&1 || true
+ExecStart=/bin/sh -c "/usr/bin/docker run --name rustdesk-hbbs --rm \\
+  -v ${data_root}/hbbs:/root \\
+  -p \${RUSTDESK_PORT_HBBS_TCP}:21115 \\
+  -p \${RUSTDESK_PORT_HBBS_RELAY_TCP}:21116 \\
+  -p \${RUSTDESK_PORT_HBBS_RELAY_UDP}:21116/udp \\
+  -p \${RUSTDESK_PORT_HBBS_API}:21118 \\
+  ${image} hbbs \${HBBS_ARGS}"
+ExecStop=/usr/bin/docker stop rustdesk-hbbs
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat <<EOF | tee /etc/systemd/system/rustdesk-hbbr.service > /dev/null
+[Unit]
+Description=RustDesk Relay Server (hbbr)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/default/rustdesk-server
+Restart=always
+TimeoutStopSec=30
+ExecStartPre=/usr/bin/docker pull ${image}
+ExecStartPre=/usr/bin/docker rm -f rustdesk-hbbr >/dev/null 2>&1 || true
+ExecStart=/bin/sh -c "/usr/bin/docker run --name rustdesk-hbbr --rm \\
+  -v ${data_root}/hbbr:/root \\
+  -p \${RUSTDESK_PORT_HBBR_TCP}:21117 \\
+  -p \${RUSTDESK_PORT_HBBR_REVERSE}:21119 \\
+  ${image} hbbr \${HBBR_ARGS}"
+ExecStop=/usr/bin/docker stop rustdesk-hbbr
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now rustdesk-hbbs.service rustdesk-hbbr.service
+  log "RustDesk services enabled. Keys live under ${data_root}/hbbs (id_ed25519*)."
+
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [--mode <standalone|web|full>]
@@ -56,6 +136,7 @@ parse_args() {
         ;;
     esac
   done
+
 }
 
 ensure_env_file() {
@@ -71,6 +152,76 @@ ensure_env_file() {
     log "Skipping ${target}; template ${template} not found."
   fi
 }
+
+
+log "Refreshing base system packages."
+apt update && apt -y upgrade
+apt -y install ca-certificates curl gnupg lsb-release build-essential git unzip jq python3 python3-pip python3-venv
+
+
+# Docker & NVIDIA container toolkit
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt update
+apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt update && apt -y install nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+usermod -aG docker "${SUDO_USER:-$USER}"
+
+
+# Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable --now tailscaled
+echo 'Run: sudo tailscale up --ssh --accept-routes'
+
+log "Configuring RustDesk repository."
+curl -fsSL https://apt.rustdesk.com/key.pub | gpg --dearmor -o /etc/apt/keyrings/rustdesk.gpg
+chmod a+r /etc/apt/keyrings/rustdesk.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/rustdesk.gpg] https://apt.rustdesk.com/ stable main" | tee /etc/apt/sources.list.d/rustdesk.list > /dev/null
+apt update
+apt -y install rustdesk
+
+configure_rustdesk_server
+
+log "Installing Tailscale and bringing host onto Tailnet."
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable --now tailscaled
+if [[ -x "${TAILSCALE_HELPER}" ]]; then
+  # shellcheck disable=SC1090
+  source "${TAILSCALE_HELPER}"
+else
+  log "Tailnet helper not found at ${TAILSCALE_HELPER}; skipping automatic tailscale up."
+fi
+
+log "Syncing PMOVES.AI repository to ${TARGET_DIR}."
+mkdir -p "${TARGET_DIR}"
+if [[ -d "${TARGET_DIR}/.git" ]]; then
+  current_branch=$(git -C "${TARGET_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+  git -C "${TARGET_DIR}" fetch --all --prune
+  git -C "${TARGET_DIR}" reset --hard "origin/${current_branch}"
+elif [[ -d "${TARGET_DIR}" && -n $(ls -A "${TARGET_DIR}" 2>/dev/null) ]]; then
+  timestamp=$(date +%Y%m%d%H%M%S)
+  backup_dir="${TARGET_DIR}.bak-${timestamp}"
+  mv "${TARGET_DIR}" "${backup_dir}"
+  log "Existing non-git directory moved to ${backup_dir}."
+  git clone "${REPO_URL}" "${TARGET_DIR}"
+else
+  git clone "${REPO_URL}" "${TARGET_DIR}"
+fi
+
+if [[ ! -d "${TARGET_DIR}/.git" ]]; then
+  log "Failed to sync PMOVES.AI repository to ${TARGET_DIR}."
+  exit 1
+fi
+
+if [[ -d "${PMOVES_ROOT}" ]]; then
 
 install_base_packages() {
   local packages=("$@")
@@ -163,6 +314,7 @@ ensure_pmoves_env() {
     log "PMOVES project directory not found under ${TARGET_DIR}; skipping env bootstrap."
     return 1
   fi
+
 
   log "Ensuring environment files exist."
   ensure_env_file ".env" ".env.example"
