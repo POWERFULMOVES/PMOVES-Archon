@@ -1,5 +1,5 @@
 # PMOVES v5 • Documentation Index
-_Last updated: 2025-02-15_
+_Last updated: 2025-10-07_
 
 - **Creator Pipeline** — `CREATOR_PIPELINE.md`
 - **ComfyUI End‑to‑End** — `COMFYUI_END_TO_END.md`
