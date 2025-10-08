@@ -1,6 +1,6 @@
 # Tailnet + Discord Deployment Runbook
 
-_Last updated: 2025-02-15_
+_Last updated: 2025-10-07_
 
 This runbook walks through launching PMOVES services on a Tailscale-connected host so they can back Discord automations from both a local workstation and a self-hosted VPS. It also records how to pre-seed RustDesk so you can remote in for maintenance.
 
