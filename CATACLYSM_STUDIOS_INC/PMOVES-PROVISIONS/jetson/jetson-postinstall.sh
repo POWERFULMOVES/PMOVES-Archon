@@ -7,6 +7,7 @@ REPO_URL=${PMOVES_REPO_URL:-https://github.com/CataclysmStudiosInc/PMOVES.AI.git
 TARGET_DIR=${PMOVES_INSTALL_DIR:-/opt/pmoves}
 PMOVES_ROOT="${TARGET_DIR}/pmoves"
 TAILSCALE_HELPER="${BUNDLE_ROOT}/tailscale/tailscale_up.sh"
+TAILSCALE_AUTH_FILE="${BUNDLE_ROOT}/tailscale/tailscale_authkey.txt"
 JETSON_CONTAINERS_DIR=${JETSON_CONTAINERS_DIR:-/opt/jetson-containers}
 MODE_INPUT=${MODE:-full}
 
@@ -72,6 +73,12 @@ ensure_env_file() {
   fi
 }
 
+
+log "Refreshing base system packages."
+
+apt update && apt -y upgrade
+apt -y install ca-certificates curl gnupg lsb-release build-essential git unzip jq python3 python3-pip python3-venv docker.io docker-compose-plugin
+=======
 install_base_packages() {
   local packages=("$@")
   log "Refreshing base system packages."
@@ -81,6 +88,7 @@ install_base_packages() {
     apt -y install "${packages[@]}"
   fi
 }
+
 
 configure_docker_for_nvidia() {
   log "Configuring Docker for NVIDIA runtime."
@@ -93,6 +101,57 @@ configure_docker_for_nvidia() {
   }
 }
 JSON
+
+systemctl enable --now docker
+usermod -aG docker "${SUDO_USER:-$USER}"
+systemctl restart docker
+
+
+# Tailscale setup and Tailnet join
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable tailscaled
+systemctl start tailscaled
+
+join_tailnet() {
+  local helper_path="$1"
+  local auth_file="$2"
+  local auth_value="${TAILSCALE_AUTHKEY:-}"
+
+  if [[ -z "${auth_value}" && -f "${auth_file}" ]]; then
+    auth_value=$(head -n1 "${auth_file}" | tr -d '\r')
+    if [[ -n "${auth_value}" ]]; then
+      log "Using Tailnet auth key from ${auth_file}."
+    else
+      log "Tailnet auth key file ${auth_file} is empty; continuing without auth key."
+    fi
+  fi
+
+  if [[ -n "${auth_value}" ]]; then
+    export TAILSCALE_AUTHKEY="${auth_value}"
+  fi
+
+  if ( # subshell keeps helper's shell options local
+    if [[ -n "${auth_value}" ]]; then
+      export TAILSCALE_AUTHKEY
+    fi
+    # shellcheck disable=SC1090
+    source "${helper_path}"
+  ); then
+    log "Tailnet join completed successfully."
+  else
+    local status=$?
+    log "Tailnet join failed via helper (${helper_path}) with exit code ${status}."
+  fi
+}
+
+if [[ -f "${TAILSCALE_HELPER}" ]]; then
+  if [[ -x "${TAILSCALE_HELPER}" ]]; then
+    log "Attempting Tailnet join using ${TAILSCALE_HELPER}."
+    join_tailnet "${TAILSCALE_HELPER}" "${TAILSCALE_AUTH_FILE}"
+  else
+    log "Tailnet helper found at ${TAILSCALE_HELPER} but is not executable; attempting to source anyway."
+    join_tailnet "${TAILSCALE_HELPER}" "${TAILSCALE_AUTH_FILE}"
+
   systemctl enable --now docker
   usermod -aG docker "${SUDO_USER:-$USER}"
   systemctl restart docker
@@ -147,6 +206,7 @@ sync_pmoves_repo() {
   if [[ ! -d "${TARGET_DIR}/.git" ]]; then
     log "Failed to sync PMOVES.AI repository to ${TARGET_DIR}."
     exit 1
+
   fi
 }
 
@@ -175,6 +235,39 @@ install_pmoves_python_dependencies() {
   else
     log "install_all_requirements.sh not found at ${PMOVES_ROOT}/scripts; skipping dependency install."
   fi
+
+else
+  log "PMOVES project directory not found under ${TARGET_DIR}; skipping env bootstrap and dependency install."
+fi
+
+if [[ -d "${BUNDLE_ROOT}/docker-stacks" ]]; then
+  ln -sfn "${BUNDLE_ROOT}/docker-stacks" "${TARGET_DIR}/docker-stacks"
+  log "Linked docker-stacks bundle into ${TARGET_DIR}."
+fi
+
+log "Installing jetson-containers and dependencies."
+if [[ -d "${JETSON_CONTAINERS_DIR}/.git" ]]; then
+  git -C "${JETSON_CONTAINERS_DIR}" fetch --all --prune
+  git -C "${JETSON_CONTAINERS_DIR}" reset --hard origin/main
+elif [[ -d "${JETSON_CONTAINERS_DIR}" && -n $(ls -A "${JETSON_CONTAINERS_DIR}" 2>/dev/null) ]]; then
+  timestamp=$(date +%Y%m%d%H%M%S)
+  backup_dir="${JETSON_CONTAINERS_DIR}.bak-${timestamp}"
+  mv "${JETSON_CONTAINERS_DIR}" "${backup_dir}"
+  log "Existing non-git jetson-containers directory moved to ${backup_dir}."
+  git clone https://github.com/dusty-nv/jetson-containers.git "${JETSON_CONTAINERS_DIR}"
+else
+  git clone https://github.com/dusty-nv/jetson-containers.git "${JETSON_CONTAINERS_DIR}"
+fi
+
+if [[ -f "${JETSON_CONTAINERS_DIR}/install.sh" ]]; then
+  bash "${JETSON_CONTAINERS_DIR}/install.sh"
+else
+  log "install.sh not found under ${JETSON_CONTAINERS_DIR}; skipping jetson-containers installer."
+fi
+
+
+log "Jetson bootstrap complete."
+
 }
 
 link_docker_stacks() {
@@ -266,3 +359,4 @@ main() {
 }
 
 main "$@"
+
