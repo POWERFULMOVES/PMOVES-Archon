@@ -22,6 +22,6 @@ fi
 cd PMOVES.AI
 
 echo "→ Running first-run wizard…"
-./scripts/install/wizard.sh
+(cd pmoves && ./scripts/install/wizard.sh)
 
 echo "✔ PMOVES bootstrap complete."

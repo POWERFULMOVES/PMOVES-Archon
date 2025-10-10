@@ -72,22 +72,37 @@ PROJECT ?= pmoves
 SUPA_PROVIDER ?= cli
 
 # Data services differ by provider: with CLI we don't run Postgres/PostgREST here
-ifeq ($(SUPA_PROVIDER),cli)
-DATA_SERVICES := qdrant neo4j minio meilisearch presign
+DATA_SERVICES := minio presign
+
+ifeq ($(EXTERNAL_QDRANT),true)
 else
-DATA_SERVICES := qdrant neo4j minio meilisearch postgres postgrest presign
+DATA_SERVICES += qdrant
+endif
+
+ifeq ($(EXTERNAL_NEO4J),true)
+else
+DATA_SERVICES += neo4j
+endif
+
+ifeq ($(EXTERNAL_MEILI),true)
+else
+DATA_SERVICES += meilisearch
+endif
+
+ifeq ($(SUPA_PROVIDER),cli)
+else
+ifeq ($(EXTERNAL_SUPABASE),true)
+else
+DATA_SERVICES += postgres postgrest
+endif
 endif
 up:
-
-	docker compose -p $(PROJECT) --profile data up -d $(DATA_SERVICES)
+	@if [ -n "$(strip $(DATA_SERVICES))" ]; then docker compose -p $(PROJECT) --profile data up -d $(DATA_SERVICES); fi
 	docker compose -p $(PROJECT) --profile data --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker
 	$(MAKE) up-yt
 	$(MAKE) up-jellyfin
-ifneq ($(SUPA_PROVIDER),cli)
-	$(MAKE) supabase-up
-endif
-
-	docker compose --profile data up -d qdrant neo4j minio meilisearch postgres postgrest presign
+	@if [ "$(SUPA_PROVIDER)" != "cli" ] && [ "$(EXTERNAL_SUPABASE)" != "true" ]; then $(MAKE) supabase-up; fi
+	@if [ -n "$(strip $(DATA_SERVICES))" ]; then docker compose --profile data up -d $(DATA_SERVICES); fi
 	docker compose --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker pdf-ingest
 
 
