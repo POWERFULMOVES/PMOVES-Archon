@@ -20,12 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY services/agent-zero/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy vendored Agent Zero runtime assets
-COPY runtime ${AGENT_ZERO_HOME}/runtime
+COPY services/agent-zero/runtime ${AGENT_ZERO_HOME}/runtime
 
 # Copy service implementation
 COPY services /app/services
