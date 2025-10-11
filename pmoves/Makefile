@@ -234,7 +234,7 @@ discord-ping-ps:
 .PHONY: smoke
 smoke:
 	@which jq >/dev/null 2>&1 || (echo "jq is required for smoke tests" && exit 1)
-	@echo "[1/9] Qdrant ready..." && curl -sf http://localhost:6333/ready >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[1/9] Qdrant ready..." && curl -sf http://localhost:6333/readyz >/dev/null && echo OK || (echo FAIL && exit 1)
 	@echo "[2/9] Meilisearch ready..." && curl -sf http://localhost:7700/health >/dev/null && echo OK || (echo WARN: skipping; true)
 	@echo "[3/9] Neo4j UI..." && curl -sf http://localhost:7474 >/dev/null && echo OK || (echo WARN: UI not reachable; true)
 	@echo "[4/9] presign health..." && curl -sf http://localhost:8088/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
