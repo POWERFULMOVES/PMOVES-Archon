@@ -3,6 +3,8 @@
 ## Quickstart
 
 ### 1. Prepare environment files
+- Windows (no Make): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1`
+- Or use Make targets: `make env-setup` then `make env-check` to interactively generate and verify `.env`.
 - Copy `.env.example` → `.env`. This is the base configuration shared across every compose service.
 - Layer in secrets and provider credentials from the `*.additions` helpers (copy/paste the values into your `.env`). Common entries:
   - `env.presign.additions`
