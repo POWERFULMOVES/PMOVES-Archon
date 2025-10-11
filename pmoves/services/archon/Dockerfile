@@ -54,7 +54,7 @@ ENV SUPABASE_URL=${SUPABASE_URL_DEFAULT} \
     AGENT_FORMS_DIR=/app/configs/agents/forms \
     ARCHON_UI_STATIC_DIR=/app/static/archon-ui
 
-COPY requirements.txt ./
+COPY services/archon/requirements.txt ./requirements.txt
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 

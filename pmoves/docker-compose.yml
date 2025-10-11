@@ -430,7 +430,9 @@ services:
     networks: [pmoves]
 
   publisher-discord:
-    build: ./services/publisher-discord
+    build:
+      context: .
+      dockerfile: ./services/publisher-discord/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
