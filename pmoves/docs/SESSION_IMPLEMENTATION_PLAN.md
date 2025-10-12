@@ -34,6 +34,7 @@ This working session establishes the concrete implementation tasks needed to clo
 - Swapped `ffmpeg-whisper` to the CUDA 12.6 + cuDNN runtime base so faster-whisper can use GPU inference by default; pinned Torch nightly builds for Blackwell readiness and upgraded PyAnnote/Transformers (#transcripts GPU task from NEXT_STEPS).
 - Added yt-dlp hardening in `pmoves-yt` (`YT_PLAYER_CLIENT`, `YT_USER_AGENT`, `YT_FORCE_IPV4`, `YT_EXTRACTOR_RETRIES`, optional `YT_COOKIES`) to stabilize YouTube fetches without manual tinkering. Documented the env in `pmoves/docs/PMOVES.yt/PMOVES_YT.md`.
 - Recorded smoke expectations: rerun `make yt-emit-smoke URL=...` after stack restart to confirm the new curl locator assertion runs with jq string comparison (Makefile tweak).
+- 2025-10-12T21:56:33Z — `make -C pmoves yt-emit-smoke URL=https://www.youtube.com/watch?v=dQw4w9WgXcQ` (lyrics profile) completed cleanly; geometry jump assertion passed with the new jq string comparison.
 
 ## 3. Broader Roadmap Prep (M3–M5)
 
