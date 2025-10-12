@@ -96,10 +96,18 @@ else
 DATA_SERVICES += postgres postgrest
 endif
 endif
+
+POSTGRES_SCALE_FLAGS :=
+ifeq ($(EXTERNAL_SUPABASE),true)
+  ifneq ($(SUPA_PROVIDER),compose)
+    POSTGRES_SCALE_FLAGS := --scale postgres=0 --scale postgrest=0
+  endif
+endif
 up:
 	@docker compose -p $(PROJECT) --profile data --profile workers --profile agents up -d --scale postgres=0 --scale postgrest=0
 	@$(MAKE) supabase-bootstrap
 	@$(MAKE) neo4j-bootstrap
+	@docker compose -p $(PROJECT) --profile data --profile workers --profile agents up -d $(strip $(POSTGRES_SCALE_FLAGS))
 
 
 down:
