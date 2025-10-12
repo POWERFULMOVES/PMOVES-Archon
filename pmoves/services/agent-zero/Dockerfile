@@ -10,6 +10,12 @@ WORKDIR /app
 
 COPY services/agent-zero/requirements.txt ./pmoves-requirements.txt
 
+COPY services/agent-zero/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy vendored Agent Zero runtime assets
+COPY services/agent-zero/runtime ${AGENT_ZERO_HOME}/runtime
 RUN pip install --no-cache-dir -r /git/agent-zero/requirements.txt \
     && pip install --no-cache-dir -r pmoves-requirements.txt
 
