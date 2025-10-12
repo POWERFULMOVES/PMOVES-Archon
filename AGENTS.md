@@ -26,3 +26,12 @@
 ## Maintenance Reminders
 - Whenever the repository structure changes, update the root `README.md` and `folders.md` directory map to reflect the latest organization.
 - Keep documentation pointers synchronized so new contributors can onboard easily.
+
+## Testing & Validation
+- Before running checks, review `pmoves/docs/SMOKETESTS.md` for the current 12-step smoke harness flow and optional follow-on targets.
+- Use `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` and `pmoves/docs/LOCAL_DEV.md` to confirm environment scripts, Make targets, and Supabase CLI expectations.
+- Log smoke or manual verification evidence back into `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md` so roadmaps and next-step trackers stay aligned.
+
+## Agent Communication Practices
+- Summarize progress after each major action, compacting details to preserve context window space for upcoming tasks.
+- Tie summaries to the active roadmap items or checklists so parallel workstreams stay coherent across longer sessions.

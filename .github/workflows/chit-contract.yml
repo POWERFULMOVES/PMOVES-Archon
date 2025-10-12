@@ -1,5 +1,21 @@
 name: CHIT Contract Check
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pmoves/supabase/**/*.sql'
+      - 'pmoves/supabase/initdb/**'
+      - 'pmoves/services/**'
+      - 'pmoves/docs/SUPABASE_*.md'
+      - '.github/workflows/chit-contract.yml'
+  pull_request:
+    paths:
+      - 'pmoves/supabase/**/*.sql'
+      - 'pmoves/supabase/initdb/**'
+      - 'pmoves/services/**'
+      - 'pmoves/docs/SUPABASE_*.md'
+      - '.github/workflows/chit-contract.yml'
 
 jobs:
   verify:

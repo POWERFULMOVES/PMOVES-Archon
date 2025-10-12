@@ -1,8 +1,18 @@
-name: SQL Policy Lint (Draft)
+name: SQL Policy Lint
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'pmoves/supabase/sql/**'
+      - 'pmoves/supabase/migrations/**'
+      - '.github/workflows/sql-policy-lint.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'pmoves/supabase/sql/**'
+      - 'pmoves/supabase/migrations/**'
+      - '.github/workflows/sql-policy-lint.yml'
 
 jobs:
   lint:
