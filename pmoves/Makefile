@@ -104,6 +104,9 @@ ifeq ($(EXTERNAL_SUPABASE),true)
   endif
 endif
 up:
+	@docker compose -p $(PROJECT) --profile data --profile workers --profile agents up -d --scale postgres=0 --scale postgrest=0
+	@$(MAKE) supabase-bootstrap
+	@$(MAKE) neo4j-bootstrap
 	@docker compose -p $(PROJECT) --profile data --profile workers --profile agents up -d $(strip $(POSTGRES_SCALE_FLAGS))
 
 
@@ -206,6 +209,36 @@ env-setup:
 env-check:
 	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
 	- bash scripts/env_check.sh || true
+
+.PHONY: supabase-bootstrap
+supabase-bootstrap:
+	@if docker ps --format '{{.Names}}' | grep -q '^supabase_db_pmoves$$'; then \
+	  echo "→ Supabase CLI stack detected; applying schema + seed SQL"; \
+	  set -eu; \
+	  for f in supabase/initdb/*.sql; do \
+	    echo "   • Init $$f"; \
+	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  done; \
+	  for f in supabase/migrations/*.sql; do \
+	    echo "   • Migration $$f"; \
+	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  done; \
+	  if [ -f db/v5_12_grounded_personas.sql ]; then \
+	    echo "   • Schema db/v5_12_grounded_personas.sql"; \
+	    cat db/v5_12_grounded_personas.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  fi; \
+	  if [ -f db/v5_12_seed.sql ]; then \
+	    echo "   • Seed db/v5_12_seed.sql"; \
+	    cat db/v5_12_seed.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  fi; \
+	  echo "✔ Supabase schema + seeds applied."; \
+	else \
+	  echo "↷ Supabase CLI stack not running (supabase_db_pmoves missing); skipping Supabase bootstrap."; \
+	fi
+
+.PHONY: neo4j-bootstrap
+neo4j-bootstrap:
+	@bash scripts/neo4j_bootstrap.sh
 
 .PHONY: smoke-webhook-ci
 smoke-webhook-ci:
@@ -489,7 +522,7 @@ yt-emit-smoke:
 	  echo "[YT] Ingest" && curl -sS -X POST http://localhost:8077/yt/ingest -H 'content-type: application/json' -d '{"url":"$(URL)","namespace":"pmoves","bucket":"assets"}' | jq -e '.ok==true' >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  echo "[YT] Emit (chunks+CGP)" && curl -sS -X POST http://localhost:8077/yt/emit -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"namespace\":\"pmoves\"}" | tee .tmp_emit.json | jq -e '.ok==true and .chunks>=1 and (.upserted|tonumber) >= 1' >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  echo "[YT] Profile (if autotune)" && jq -r '.profile // "(none)"' .tmp_emit.json; \
-	  echo "[Geometry] Jump point 0" && curl -sS http://localhost:8087/shape/point/p:yt:$$VID:0/jump | jq -e '.locator.modality=="video" and .locator.ref_id==$$VID' >/dev/null && echo OK || (echo FAIL && exit 1); \
+	  echo "[Geometry] Jump point 0" && curl -sS http://localhost:8087/shape/point/p:yt:$$VID:0/jump | jq -e ".locator.modality==\"video\" and .locator.ref_id==\"$${VID}\"" >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  rm -f .tmp_info.json
 
 .PHONY: yt-playlist-smoke

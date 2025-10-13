@@ -83,12 +83,14 @@ _Last updated: 2025-10-11_
 - [x] ComfyUI ↔ MinIO presign endpoint — implemented; example notebook pending.
 - [ ] Windows/WSL polish: smoke script + helper commands.
 - [ ] (Optional) Draft ComfyUI ↔ MinIO presign notebook walk-through for inclusion in `docs/`.
+- [x] Local CI checklist published (`docs/LOCAL_CI_CHECKS.md`) with pytest/CHIT/SQL/env preflight expectations before every PR.
+- [x] Publish local CI checklist (`docs/LOCAL_CI_CHECKS.md`) and gate PRs on the pytest/grep/env preflight routine.
 
 ### PMOVES.YT Enhancements (Detailed)
 - [ ] Robust downloads: resume support, retry with exponential backoff, per-domain rate limiting, playlist/channel ingestion, and concurrent worker pool with bounded memory.
 - [ ] Storage: multipart uploads to MinIO for large files; checksum verification; lifecycle and retention tags.
 - [ ] Metadata: enrich `videos` with duration, channel, tags; track ingest provenance and versioning in `meta`.
-- [ ] Transcripts: switch `ffmpeg-whisper` to `faster-whisper` GPU path; language auto-detect and diarization flags; partial updates for long videos.
+- [x] Transcripts: switch `ffmpeg-whisper` to `faster-whisper` GPU path; language auto-detect and diarization flags; partial updates for long videos.
 - [ ] Events/NATS: standardize `ingest.*` topics and dead-letter queue; idempotent handlers using `s3_base_prefix`.
 - [ ] Gemma integration (summaries) with Ollama/HF options and embedding fallbacks.
 - [ ] API hardening: request validation, structured errors, OpenAPI docs, health/readiness probes.
@@ -105,7 +107,7 @@ _Last updated: 2025-10-11_
 ## Next Session Focus
 - [ ] media-video: insert `detections`/`segments` into Supabase and emit `analysis.entities.v1` — reference activation notes in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] media-audio: insert `emotions` into Supabase and emit `analysis.audio.v1`.
-- [ ] ffmpeg-whisper: switch to `faster-whisper` with GPU auto-detect (Jetson/desktop); confirm GPU smoke path documented in `SESSION_IMPLEMENTATION_PLAN.md`.
+- [x] ffmpeg-whisper: switch to `faster-whisper` with GPU auto-detect (Jetson/desktop); confirm GPU smoke path documented in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] CLIP embeddings on keyframes (optional; desktop on by default, Jetson off).
 - [ ] n8n flows: end-to-end ingest → transcribe → extract → index → notify.
 - [ ] Jellyfin refresh hook + Discord rich embeds (cover art, duration, link) with validation evidence logged in `SESSION_IMPLEMENTATION_PLAN.md`.
@@ -158,6 +160,7 @@ _Last updated: 2025-10-05_
 ### 5. Platform Operations & Tooling
 - [x] Publish Windows/WSL smoke scripts (`scripts/smoke.ps1`) with instructions in `pmoves/docs/LOCAL_DEV.md`.
 - [ ] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits.
+- [x] Normalize Supabase CLI endpoints for containers (`SUPA_REST_INTERNAL_URL`) so render-webhook, extract-worker, and geometry bus stay online after stack restarts; smoke harness verified on 2025-10-12. `make up` now auto-runs Supabase + Neo4j bootstraps so DB and mind-map seeds refresh each time.
 - [ ] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (initial research threads logged in `SESSION_IMPLEMENTATION_PLAN.md`).
 - [ ] Outline the presign notebook walkthrough deliverable once automation stabilizes.
 

@@ -16,6 +16,8 @@ This working session establishes the concrete implementation tasks needed to clo
 **Operational reminders applied**
 - Use the n8n import and manual verification checklist verbatim during activation.
 - Keep a running evidence trail (timestamps, log excerpts, screenshots) and archive it alongside the automation playbook once the loop completes.
+- Record Supabase CLI bring-up/down sequences (with `make down && make up`) plus the matching smoke output whenever we rotate JWT secrets or internal endpoints; today's rerun (2025-10-12) validated `SUPA_REST_INTERNAL_URL` + realtime tenant seeding.
+- After each stack restart, rely on `make up` to auto-run Supabase + Neo4j bootstraps so both Postgres schemas and the CHIT mind-map aliases stay seeded for geometry smoke tests.
 
 ## 2. Jellyfin Publisher Reliability Enhancements
 
@@ -26,6 +28,13 @@ This working session establishes the concrete implementation tasks needed to clo
    - Apply once credentials are loaded: append `--apply` to persist Supabase updates.
 3. Verify refreshed metadata renders in Discord embeds and Agent Zero payloads (tie back to automation evidence above).
    - Embed sanity check: `python - <<'PY' ...` (see evidence log for rendered JSON snippet).
+
+## 2.5 PMOVES.YT & ffmpeg-whisper Updates (2025-10-12)
+
+- Swapped `ffmpeg-whisper` to the CUDA 12.6 + cuDNN runtime base so faster-whisper can use GPU inference by default; pinned Torch nightly builds for Blackwell readiness and upgraded PyAnnote/Transformers (#transcripts GPU task from NEXT_STEPS).
+- Added yt-dlp hardening in `pmoves-yt` (`YT_PLAYER_CLIENT`, `YT_USER_AGENT`, `YT_FORCE_IPV4`, `YT_EXTRACTOR_RETRIES`, optional `YT_COOKIES`) to stabilize YouTube fetches without manual tinkering. Documented the env in `pmoves/docs/PMOVES.yt/PMOVES_YT.md`.
+- Recorded smoke expectations: rerun `make yt-emit-smoke URL=...` after stack restart to confirm the new curl locator assertion runs with jq string comparison (Makefile tweak).
+- 2025-10-12T21:56:33Z — `make -C pmoves yt-emit-smoke URL=https://www.youtube.com/watch?v=dQw4w9WgXcQ` (lyrics profile) completed cleanly; geometry jump assertion passed with the new jq string comparison.
 
 ## 3. Broader Roadmap Prep (M3–M5)
 
@@ -189,4 +198,3 @@ The following checklist captures what could be validated within the hosted Codex
 - Provision a reproducible local automation profile that bundles Supabase, Agent Zero, and n8n so the activation checklist can be executed without manual service orchestration.
 - Add mock credentials or a dedicated staging webhook to `.env.example` to clarify which secrets must be sourced before running the workflows; document rotation expectations.
 - Automate evidence capture (timestamps, log snapshots) through a scriptable checklist to reduce manual copy/paste during validation sessions.
-

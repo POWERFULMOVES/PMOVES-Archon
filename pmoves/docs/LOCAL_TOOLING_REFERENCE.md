@@ -6,6 +6,7 @@ This guide aggregates the entry points that keep local environments consistent a
 ## Environment & Secrets
 - `make env-setup` → runs `scripts/env_setup.sh` (Bash) or `scripts/env_setup.ps1` (PowerShell) to merge `.env.example` with the secret snippets under `env.*.additions`. Use `make env-setup -- --yes` to accept defaults non-interactively.
 - `make env-check` → calls `scripts/env_check.{sh,ps1}` for dependency checks, port collisions, and `.env` completeness.
+  - CI runs the PowerShell preflight on Windows runners only; Linux contributors should run `scripts/env_check.sh` locally if they bypass Make.
 - `scripts/create_venv*.{sh,ps1}` → optional helpers to create/activate Python virtualenvs outside of Conda. Pass the environment name as the first argument on Bash, or `-Name` in PowerShell.
 - `scripts/codex_bootstrap*.{sh,ps1}` → standardizes editor/agent prerequisites inside Codex or WSL sessions (installs `jq`, configures Make, syncs Python deps).
 - `scripts/install_all_requirements*.{sh,ps1}` → one-shot installs for every Python requirement file when you need parity with CI or remote hosts.
@@ -20,9 +21,13 @@ This guide aggregates the entry points that keep local environments consistent a
 ## Supabase Workflows
 - CLI parity (default):
   - `make supa-init` → initializes the Supabase CLI project.
-  - `make supa-start` / `make supa-stop` / `make supa-status` → lifecycle management for the CLI stack.
-  - `make supa-use-local` → copies `.env.supa.local.example` into `.env.local` so services reference the CLI hostnames/ports.
-  - TIP: to share networking with the compose services, run `supabase start --network-id pmoves-net` from `pmoves/`. Afterwards, update `.env.local` with the CLI-issued keys (`supabase status -o json`) and reapply `supabase/initdb/*.sql` so PostgREST, GoTrue, and Realtime expose the expected tables.
+- `make supa-start` / `make supa-stop` / `make supa-status` → lifecycle management for the CLI stack.
+- `make supa-use-local` → copies `.env.supa.local.example` into `.env.local` so services reference the CLI hostnames/ports.
+- TIP: to share networking with the compose services, run `supabase start --network-id pmoves-net` from `pmoves/`. Afterwards, update `.env.local` with the CLI-issued keys (`supabase status -o json`) and reapply `supabase/initdb/*.sql` so PostgREST, GoTrue, and Realtime expose the expected tables.
+- When the CLI stack is running (`supabase_db_pmoves` container), `make up` automatically invokes `supabase-bootstrap` which replays `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and the v5.12 schema/seed files under `db/` so your database stays current without manual psql loops.
+- `make neo4j-bootstrap` copies the seed CSV (`neo4j/datasets/person_aliases_seed.csv`) into the live container and runs the Cypher scripts under `neo4j/cypher/` so the CHIT/mindmap graph always has baseline data. `make up` runs this helper after the Supabase bootstrap when `pmoves-neo4j-1` is online.
+- New in October 2025: containers now honour `SUPA_REST_INTERNAL_URL` (defaults to `http://api.supabase.internal:8000/rest/v1`) so compose services call the Supabase CLI stack directly. Host-side scripts continue to rely on `SUPA_REST_URL` (`http://127.0.0.1:54321/rest/v1`), so keep both values in sync when rotating credentials.
+- December 2025 update: services that publish to Supabase (pmoves-yt, ffmpeg-whisper, hi-rag-gateway-v2) now also read `SUPABASE_URL` and `SUPABASE_KEY`. When you run `supabase start --network-id pmoves-net`, copy the CLI-issued service role key into both `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_KEY`, and set `SUPABASE_URL=http://api.supabase.internal:8000` inside `.env.local` so in-network containers hit the CLI proxy directly.
 - Compose alternative:
   - `SUPA_PROVIDER=compose make up` → start core stack with compose Postgres/PostgREST.
   - `make supabase-up` / `make supabase-stop` / `make supabase-clean` → manage GoTrue, Realtime, Storage, Studio sidecars.
@@ -56,3 +61,4 @@ When provisioning remote hosts, ensure these directories map to persistent stora
 - Supabase deep dives: `docs/SUPABASE_FULL.md`, `docs/SUPABASE_SWITCH.md`
 - Agent Zero & Archon integration: `pmoves/services/agent-zero/README.md`, `pmoves/services/archon/README.md`
 - Roadmap alignment & evidence logging: `pmoves/docs/NEXT_STEPS.md`, `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`
+- Local CI workflow mirror (pytest, CHIT grep, SQL policy lint, env preflight): `docs/LOCAL_CI_CHECKS.md`

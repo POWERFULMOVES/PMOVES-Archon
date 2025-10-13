@@ -26,3 +26,17 @@
 ## Maintenance Reminders
 - Whenever the repository structure changes, update the root `README.md` and `folders.md` directory map to reflect the latest organization.
 - Keep documentation pointers synchronized so new contributors can onboard easily.
+
+## Testing & Validation
+- Before running checks, review `pmoves/docs/SMOKETESTS.md` for the current 12-step smoke harness flow and optional follow-on targets.
+- Use `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` and `pmoves/docs/LOCAL_DEV.md` to confirm environment scripts, Make targets, and Supabase CLI expectations.
+- Log smoke or manual verification evidence back into `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md` so roadmaps and next-step trackers stay aligned.
+
+## Local CI Expectations
+- Run the CI-equivalent checks documented in `docs/LOCAL_CI_CHECKS.md` (pytest targets, CHIT contract grep, SQL policy lint, env preflight) before pushing a branch.
+- Capture the commands/output in your PR template “Testing” section and tick the review coordination boxes only after these pass locally.
+- If a check is skipped (doc-only change, etc.), note the justification in Reviewer Notes so the automation waiver is explicit.
+
+## Agent Communication Practices
+- Summarize progress after each major action, compacting details to preserve context window space for upcoming tasks.
+- Tie summaries to the active roadmap items or checklists so parallel workstreams stay coherent across longer sessions.

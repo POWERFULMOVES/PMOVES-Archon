@@ -1,6 +1,6 @@
 # Repository Directory Map
 
-_Last updated: 2025-09-20_
+_Last updated: 2025-10-12_
 
 This document captures the current layout of the `PMOVES.AI` repository to help new contributors find key resources quickly. The tree below is trimmed to a maximum depth of two levels (root → child → grandchild) to balance detail and readability.
 
@@ -37,6 +37,7 @@ PY
 ├── .gitattributes
 ├── .github/
 │   ├── CODEOWNERS
+│   ├── copilot-instructions.md
 │   ├── pull_request_template.md
 │   └── workflows/
 │       ├── chit-contract.yml
@@ -65,6 +66,7 @@ PY
 ├── README.md
 ├── SECURITY.md
 ├── docs/
+│   ├── COPILOT_REVIEW_WORKFLOW.md
 │   ├── PMOVES.md
 │   ├── PMOVES_ARC.md
 │   ├── PMOVES_Multi-Agent_System_Crush_CLI_Integration_and_Guidelines.md

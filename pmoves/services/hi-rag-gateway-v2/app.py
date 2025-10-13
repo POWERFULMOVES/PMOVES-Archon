@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Distance, VectorParams, PointStruct
+import uuid
 from sentence_transformers import SentenceTransformer
 from FlagEmbedding import FlagReranker
 from rapidfuzz import fuzz
@@ -360,7 +361,10 @@ async def _geometry_realtime_worker(ws_url: str, api_key: str) -> None:
                 join_payload = {
                     "topic": "realtime:geometry.cgp.v1",
                     "event": "phx_join",
-                    "payload": {"config": {"broadcast": {"ack": False, "self": True}}},
+                    "payload": {
+                        "config": {"broadcast": {"ack": False, "self": True}},
+                        "access_token": api_key,
+                    },
                     "ref": "1",
                 }
                 await ws.send(json.dumps(join_payload))
@@ -1113,7 +1117,8 @@ def hirag_upsert_batch(req: UpsertReq = Body(...), _=Depends(require_admin_tails
         if isinstance(extra, dict):
             for k, v in extra.items():
                 payload.setdefault(k, v)
-        points.append(PointStruct(id=cid, vector=vec, payload=payload))
+        qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_URL, cid))
+        points.append(PointStruct(id=qdrant_id, vector=vec, payload=payload))
 
     try:
         if points:
