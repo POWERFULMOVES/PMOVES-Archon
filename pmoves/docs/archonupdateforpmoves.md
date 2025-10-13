@@ -7,6 +7,7 @@ Archon can now run entirely inside the PMOVES local stack alongside Supabase CLI
 - `pmoves/services/archon/main.py` patches Supabase URL validation and client wiring so Archon accepts `http://postgrest:3000` (Supabase CLI) and other in-network hosts.
 - Use `make supa-use-local` after starting the Supabase CLI stack (`supabase start --network-id pmoves-net`) so `.env.local` is populated with the internal PostgREST URL and service role key.
 - The wrapper sets `ARCHON_SUPABASE_BASE_URL` automatically; downstream MCP clients reuse the adjusted endpoint.
+- Docker builds now run `python -m playwright install --with-deps chromium` so the Crawl4AI workflows have a Chromium binary available. If you build the service manually, rerun that command inside the container.
 
 ## 2. Local CI Expectations
 

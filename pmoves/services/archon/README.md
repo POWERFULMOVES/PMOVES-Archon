@@ -58,3 +58,4 @@ The `mcp_server.py` helper exposes a lightweight HTTP client (`ArchonClient`) th
 - **Supabase client hitting public `.co` URLs**: ensure `supabase status -o json` has been run and that `make supa-use-local` wrote the CLI internal URLs into `.env.local`.
 - **NATS connection errors**: start NATS (`make up-nats`) or check the `NATS_URL` in `.env.local`.
 - **Vendor missing**: run `git submodule update --init --recursive` if `vendor/archon` was pruned.
+- **Playwright browser missing**: the container now installs Chromium via `python -m playwright install --with-deps chromium`. If you rebuild the image without that step, rerun the command (or `playwright install chromium`) so crawl workflows can launch a browser.
