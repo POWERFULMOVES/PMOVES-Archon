@@ -15,6 +15,25 @@ RUN apt-get update \
         curl \
         ca-certificates \
         gnupg \
+        libnss3 \
+        libnspr4 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libxkbcommon0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libxss1 \
+        libxtst6 \
+        libasound2 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgtk-3-0 \
+        fonts-liberation \
+        fonts-unifont \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
@@ -63,6 +82,9 @@ RUN git clone --depth 1 --branch "${ARCHON_GIT_REF}" https://github.com/coleam00
 COPY services/archon/requirements.txt ./requirements.txt
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
+
+# Pre-install Playwright browsers (Chromium) so crawl workflows succeed out of the box.
+RUN python -m playwright install chromium
 
 COPY services /app/services
 

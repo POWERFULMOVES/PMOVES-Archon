@@ -20,6 +20,8 @@ python-socketio[asyncio]>=5.11.0
 crawl4ai==0.6.2
 mcp==1.12.2
 docker>=6.1.0
+playwright==1.49.0
+yt-dlp==2024.12.23
 
 # Supabase/Postgres integration
 supabase==2.15.1

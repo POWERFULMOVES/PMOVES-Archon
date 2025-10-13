@@ -36,6 +36,7 @@
 - Run the CI-equivalent checks documented in `docs/LOCAL_CI_CHECKS.md` (pytest targets, CHIT contract grep, SQL policy lint, env preflight) before pushing a branch.
 - Capture the commands/output in your PR template “Testing” section and tick the review coordination boxes only after these pass locally.
 - If a check is skipped (doc-only change, etc.), note the justification in Reviewer Notes so the automation waiver is explicit.
+- If Agent Zero starts logging JetStream subscription errors (`nats: JetStream.Error cannot create queue subscription...`), rebuild the container (`docker compose build agent-zero && docker compose up -d agent-zero`) so the pull-consumer controller changes land and JetStream can recreate its consumers cleanly.
 
 ## Agent Communication Practices
 - Summarize progress after each major action, compacting details to preserve context window space for upcoming tasks.

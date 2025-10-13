@@ -36,6 +36,7 @@
 - Suggested commands: `pip install -r services/<name>/requirements.txt pytest` then `pytest -q`.
 - Before pushing, mirror the GitHub Actions checks documented in `docs/LOCAL_CI_CHECKS.md` (pytest suites, CHIT contract grep, SQL policy lint, env preflight). Capture each command/output in the PR template’s Testing section.
 - If you intentionally skip one of those checks (docs-only change, etc.), record the rationale in the PR Reviewer Notes so reviewers know the risk envelope.
+- JetStream drift can surface as `nats: JetStream.Error cannot create queue subscription…` in the Agent Zero container logs. Rebuild with `docker compose build agent-zero && docker compose up -d agent-zero` so the pull-subscribe controller code ships and the consumer metadata is recreated automatically.
 
 ## Commit & Pull Request Guidelines
 - Prefer Conventional Commits (e.g., `feat(hi-rag): hybrid search option`).

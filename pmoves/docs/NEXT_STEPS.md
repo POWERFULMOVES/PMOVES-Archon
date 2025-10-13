@@ -1,6 +1,6 @@
 
 # PMOVES v5 • NEXT_STEPS
-_Last updated: 2025-10-11_
+_Last updated: 2025-10-13_
 
 ## Immediate
 
@@ -161,6 +161,7 @@ _Last updated: 2025-10-05_
 - [x] Publish Windows/WSL smoke scripts (`scripts/smoke.ps1`) with instructions in `pmoves/docs/LOCAL_DEV.md`.
 - [ ] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits.
 - [x] Normalize Supabase CLI endpoints for containers (`SUPA_REST_INTERNAL_URL`) so render-webhook, extract-worker, and geometry bus stay online after stack restarts; smoke harness verified on 2025-10-12. `make up` now auto-runs Supabase + Neo4j bootstraps so DB and mind-map seeds refresh each time.
+- [x] Seeded `public.archon_prompts` via `supabase/initdb/09_archon_prompts.sql` + `10_archon_prompts_seed.sql` to eliminate PostgREST 205 warnings during Archon startup and ship minimal default prompts (2025-10-13).
 - [ ] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (initial research threads logged in `SESSION_IMPLEMENTATION_PLAN.md`).
 - [ ] Outline the presign notebook walkthrough deliverable once automation stabilizes.
 
