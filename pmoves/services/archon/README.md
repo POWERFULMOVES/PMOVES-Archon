@@ -57,5 +57,6 @@ The `mcp_server.py` helper exposes a lightweight HTTP client (`ArchonClient`) th
 - **Supabase URL validation failed**: confirm `SUPABASE_URL` is set and, if using HTTP, that the hostname is reachable. The wrapper auto-whitelists the hostname in `ARCHON_HTTP_ALLOW_HOSTS`.
 - **Supabase client hitting public `.co` URLs**: ensure `supabase status -o json` has been run and that `make supa-use-local` wrote the CLI internal URLs into `.env.local`.
 - **NATS connection errors**: start NATS (`make up-nats`) or check the `NATS_URL` in `.env.local`.
+- **Prompt catalog missing**: run `make supabase-bootstrap` (or rerun `make supabase-initdb`) so `public.archon_prompts` exists. The init script lives at `supabase/initdb/09_archon_prompts.sql` and prevents the PostgREST `PGRST205` warning during startup.
 - **Vendor missing**: run `git submodule update --init --recursive` if `vendor/archon` was pruned.
 - **Playwright browser missing**: the container now installs Chromium via `python -m playwright install --with-deps chromium`. If you rebuild the image without that step, rerun the command (or `playwright install chromium`) so crawl workflows can launch a browser.

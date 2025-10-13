@@ -600,19 +600,33 @@ class ArchonServiceSupervisor:
 SUPERVISOR = ArchonServiceSupervisor()
 
 
-@app.on_event("startup")
-async def _start_background_services() -> None:
+@asynccontextmanager
+async def _supervisor_lifespan(app: FastAPI):
     await SUPERVISOR.start()
+    try:
+        yield
+    finally:
+        await SUPERVISOR.stop()
 
 
-@app.on_event("shutdown")
-async def _stop_background_services() -> None:
-    await SUPERVISOR.stop()
+_existing_lifespan = getattr(app.router, "lifespan_context", None)
+
+if _existing_lifespan is None:
+    app.router.lifespan_context = _supervisor_lifespan
+else:
+
+    @asynccontextmanager
+    async def _composed_lifespan(app: FastAPI):
+        async with _existing_lifespan(app):
+            async with _supervisor_lifespan(app):
+                yield
+
+    app.router.lifespan_context = _composed_lifespan
 
 
 if __name__ == "__main__":
     uvicorn.run(
-        "pmoves.services.archon.main:app",
+        app,
         host="0.0.0.0",
         port=int(ENV_PORTS["server_port"]),
         log_level="info",

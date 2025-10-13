@@ -39,6 +39,7 @@ _ALIASES: Dict[str, Path] = {
 
 def _load(name: str, path: Path) -> ModuleType:
     module_name = f"{__name__}.{name}"
+    legacy_name = f"services.{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
     if not path.exists():
@@ -50,9 +51,14 @@ def _load(name: str, path: Path) -> ModuleType:
         raise ImportError(f"Unable to load spec for {module_name} from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    sys.modules.setdefault(legacy_name, module)
     spec.loader.exec_module(module)
     return module
 
 
-for alias, module_path in _ALIASES.items():
-    globals()[alias] = _load(alias, module_path)
+def __getattr__(name: str) -> ModuleType:
+    if name in _ALIASES:
+        module = _load(name, _ALIASES[name])
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
