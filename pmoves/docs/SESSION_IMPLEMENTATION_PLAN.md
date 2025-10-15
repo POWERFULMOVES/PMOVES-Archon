@@ -132,7 +132,7 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | Preflight checks pass (Env/SQL/Tests) |  |  |
 | Webhook smoke (dry) reviewed |  |  |
 | Webhook smoke (live) returns 200 |  |  |
-| Publisher metrics visible (/metrics.json) |  |  |
+| Publisher metrics visible (/metrics.json) |  | Automated via `pytest pmoves/services/publisher/tests -k metrics` (`test_metrics_server_serves_json_payloads`). |
 | Discord embed formatter tests pass |  |  |
 | n8n echo_publisher imported + creds set |  |  |
 | n8n activated (poller → echo publisher) |  |  |
