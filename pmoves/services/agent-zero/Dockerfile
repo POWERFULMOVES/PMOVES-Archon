@@ -1,8 +1,10 @@
-FROM python:3.11-slim
+FROM agent0ai/agent-zero:latest
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    AGENT_ZERO_HOME=/opt/agent-zero
+    AGENT_ZERO_HOME=/a0 \
+    AGENT_ZERO_ROOT=/a0 \
+    PATH="/opt/venv-a0/bin:${PATH}"
 
 WORKDIR /app
 
@@ -25,10 +27,16 @@ RUN pip install --no-cache-dir uv
 RUN uv pip install --system --no-cache-dir -r requirements.txt
 
 # Copy vendored Agent Zero runtime assets
-COPY runtime ${AGENT_ZERO_HOME}/runtime
+COPY services/agent-zero/runtime ${AGENT_ZERO_HOME}/runtime
+RUN pip install --no-cache-dir -r /git/agent-zero/requirements.txt \
+    && pip install --no-cache-dir -r pmoves-requirements.txt
 
-# Copy service implementation
-COPY . .
+RUN chmod +x /ins/copy_A0.sh
 
-EXPOSE 8080
-CMD ["python", "main.py"]
+# Include PMOVES contract schemas so Agent Zero can validate envelopes.
+COPY contracts /app/contracts
+
+# Copy PMOVES service implementation on top of the upstream runtime
+COPY services /app/services
+
+CMD ["/bin/bash", "-lc", "/ins/copy_A0.sh && /opt/venv-a0/bin/python /git/agent-zero/prepare.py --dockerized=true && /opt/venv-a0/bin/python services/agent-zero/main.py"]

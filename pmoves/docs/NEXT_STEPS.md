@@ -1,6 +1,6 @@
 
 # PMOVES v5 • NEXT_STEPS
-_Last updated: 2025-09-26_
+_Last updated: 2025-10-14_
 
 ## Immediate
 
@@ -8,14 +8,15 @@ _Last updated: 2025-09-26_
 - [ ] Execute the Supabase → Agent Zero → Discord activation checklist (`pmoves/docs/SUPABASE_DISCORD_AUTOMATION.md`) and log validation timestamps in the runbook.
 - [ ] Populate `.env` with Discord webhook credentials, perform a manual webhook ping, and capture the confirmation screenshot/log.
 - [ ] Activate the n8n approval poller and echo publisher workflows once secrets are loaded; document the activation + first successful run.
-- [ ] Confirm Jellyfin credentials (API key and optional user id) allow library enumeration; note any dependency gaps that require new guardrails.
-- [ ] Validate that enriched publisher metadata propagates into Agent Zero and Discord events; schedule a backfill for legacy records if fields are missing.
+- [x] Confirm Jellyfin credentials (API key and optional user id) allow library enumeration; use `make jellyfin-verify` before publisher smokes (2025-10-13). Re-ran on 2025-10-14 after populating `JELLYFIN_USER_ID=c26d57363bad4318a37c0bf8673c389c`.
+- [x] Validate that enriched publisher metadata propagates into Agent Zero and Discord events; schedule a backfill for legacy records if fields are missing.
+  - 2025-10-14: Agent Zero realtime listener (`python pmoves/tools/realtime_listener.py --topics content.published.v1 --max 1`) captured enriched payload, and `publisher-discord` delivered the Jellyfin-enriched embed to the mock webhook (see `docker logs mock-discord`).
 - [ ] Record step-by-step evidence in `SESSION_IMPLEMENTATION_PLAN.md` while executing the operational reminders list.
 
 ### 2. Jellyfin Publisher Reliability
 - [x] Add a scheduled refresh or webhook trigger so Jellyfin libraries update after publisher runs; include cron/webhook settings in `services/publisher/README.md`.
 - [ ] Expand error/reporting hooks so failures surface with actionable messages (Jellyfin HTTP errors, dependency mismatches, asset gaps).
-- [ ] Backfill historic Jellyfin entries with enriched metadata and confirm downstream consumers (Agent Zero, Discord) render the new fields.
+- [ ] Backfill historic Jellyfin entries with enriched metadata and confirm downstream consumers (Agent Zero, Discord) render the new fields. Use `make demo-content-published` to emit a sample `content.published.v1` envelope and inspect the Discord embed plus Agent Zero realtime listener output (`python pmoves/tools/realtime_listener.py`) for `thumbnail_url`, `duration`, and Jellyfin deep links.
 
 ### 3. Graph & Retrieval Enhancements (Kickoff M3)
 - [x] Wire the gateway `/mindmap/{constellation_id}` endpoint to Neo4j with seed + smoke coverage (2025-10-06).
@@ -33,8 +34,9 @@ _Last updated: 2025-09-26_
 
 ### 5. Platform Operations & Tooling
 - [x] Publish Windows/WSL smoke scripts (`scripts/smoke.ps1`) with instructions in `pmoves/docs/LOCAL_DEV.md`.
-- [ ] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits.
-- [ ] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (initial research threads logged in `SESSION_IMPLEMENTATION_PLAN.md`).
+- [x] Publish consolidated local tooling reference covering env scripts, Make targets, Supabase modes, and smoke workflows (`pmoves/docs/LOCAL_TOOLING_REFERENCE.md`), and link it from the root README.
+- [x] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits (see `pmoves/docs/SUPABASE_RLS_HARDENING_CHECKLIST.md`, 2025-10-14).
+- [x] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (captured in `pmoves/docs/CLIP_QWEN_INTEGRATION_PLAN.md`, 2025-10-14).
 - [ ] Outline the presign notebook walkthrough deliverable once automation stabilizes.
 
 ### 6. Grounded Personas & Packs Launch
@@ -44,6 +46,8 @@ _Last updated: 2025-09-26_
 - [ ] Wire the retrieval-eval harness as a persona publish gate; store dataset locations, metric thresholds, and last-run results in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] Exercise the creator pipeline end-to-end (presign → webhook → approval → index → publish) and document emitted events (`kb.ingest.asset.created.v1`, `kb.pack.published.v1`, `persona.published.v1`, `content.published.v1`).
 - [ ] Confirm geometry bus emissions (`geometry.cgp.v1`) populate the ShapeStore cache and note verification steps (API/CLI) in the runbook.
+  - ✅ Baseline guardrail: the local smoke tests now ingest a signed CGP, assert the `/shape/point/{id}/jump` locator, and hit `/geometry/calibration/report`; failures will block `make smoke`.
+  - Still needed: seed Supabase tables + Neo4j entities so ShapeStore warm-up stops warning about missing labels/keys, and capture the runbook evidence.
 - [ ] Draft a CI-oriented pack manifest linter (selectors, age, size limits) and reference the proposal in `pmoves/docs/ROADMAP.md` once scoped.
 
 ## n8n Flow Operations
@@ -81,12 +85,14 @@ _Last updated: 2025-09-26_
 - [x] ComfyUI ↔ MinIO presign endpoint — implemented; example notebook pending.
 - [ ] Windows/WSL polish: smoke script + helper commands.
 - [ ] (Optional) Draft ComfyUI ↔ MinIO presign notebook walk-through for inclusion in `docs/`.
+- [x] Local CI checklist published (`docs/LOCAL_CI_CHECKS.md`) with pytest/CHIT/SQL/env preflight expectations before every PR.
+- [x] Publish local CI checklist (`docs/LOCAL_CI_CHECKS.md`) and gate PRs on the pytest/grep/env preflight routine.
 
 ### PMOVES.YT Enhancements (Detailed)
 - [ ] Robust downloads: resume support, retry with exponential backoff, per-domain rate limiting, playlist/channel ingestion, and concurrent worker pool with bounded memory.
 - [ ] Storage: multipart uploads to MinIO for large files; checksum verification; lifecycle and retention tags.
 - [ ] Metadata: enrich `videos` with duration, channel, tags; track ingest provenance and versioning in `meta`.
-- [ ] Transcripts: switch `ffmpeg-whisper` to `faster-whisper` GPU path; language auto-detect and diarization flags; partial updates for long videos.
+- [x] Transcripts: switch `ffmpeg-whisper` to `faster-whisper` GPU path; language auto-detect and diarization flags; partial updates for long videos.
 - [ ] Events/NATS: standardize `ingest.*` topics and dead-letter queue; idempotent handlers using `s3_base_prefix`.
 - [ ] Gemma integration (summaries) with Ollama/HF options and embedding fallbacks.
 - [ ] API hardening: request validation, structured errors, OpenAPI docs, health/readiness probes.
@@ -103,7 +109,7 @@ _Last updated: 2025-09-26_
 ## Next Session Focus
 - [ ] media-video: insert `detections`/`segments` into Supabase and emit `analysis.entities.v1` — reference activation notes in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] media-audio: insert `emotions` into Supabase and emit `analysis.audio.v1`.
-- [ ] ffmpeg-whisper: switch to `faster-whisper` with GPU auto-detect (Jetson/desktop); confirm GPU smoke path documented in `SESSION_IMPLEMENTATION_PLAN.md`.
+- [x] ffmpeg-whisper: switch to `faster-whisper` with GPU auto-detect (Jetson/desktop); confirm GPU smoke path documented in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] CLIP embeddings on keyframes (optional; desktop on by default, Jetson off).
 - [ ] n8n flows: end-to-end ingest → transcribe → extract → index → notify.
 - [ ] Jellyfin refresh hook + Discord rich embeds (cover art, duration, link) with validation evidence logged in `SESSION_IMPLEMENTATION_PLAN.md`.
@@ -156,8 +162,11 @@ _Last updated: 2025-10-05_
 
 ### 5. Platform Operations & Tooling
 - [x] Publish Windows/WSL smoke scripts (`scripts/smoke.ps1`) with instructions in `pmoves/docs/LOCAL_DEV.md`.
-- [ ] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits.
-- [ ] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (initial research threads logged in `SESSION_IMPLEMENTATION_PLAN.md`).
+- [x] Draft Supabase RLS hardening checklist covering non-dev environments and dependency audits (see `pmoves/docs/SUPABASE_RLS_HARDENING_CHECKLIST.md`, 2025-10-14).
+- [x] Normalize Supabase CLI endpoints for containers (`SUPA_REST_INTERNAL_URL`) so render-webhook, extract-worker, and geometry bus stay online after stack restarts; smoke harness verified on 2025-10-12. `make up` now auto-runs Supabase + Neo4j bootstraps so DB and mind-map seeds refresh each time.
+- [x] Seeded `public.archon_prompts` via `supabase/initdb/09_archon_prompts.sql` + `10_archon_prompts_seed.sql` and mirrored CHIT geometry tables in `11_chit_geometry.sql` so Archon local stacks stay aligned with migrations (2025-10-13).
+- [x] Unified env + secrets onboarding with `python -m pmoves.scripts.bootstrap_env` / `make bootstrap` and added `make preflight` guard before stack start (2025-10-14).
+- [x] Plan optional CLIP + Qwen2-Audio integrations, including toggles, GPU/Jetson expectations, and smoke tests (captured in `pmoves/docs/CLIP_QWEN_INTEGRATION_PLAN.md`, 2025-10-14).
 - [ ] Outline the presign notebook walkthrough deliverable once automation stabilizes.
 
 ### 6. Grounded Personas & Packs Launch

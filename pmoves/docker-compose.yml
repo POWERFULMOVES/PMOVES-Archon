@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:15
+    image: ankane/pgvector
     restart: unless-stopped
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-pmoves}
@@ -10,8 +10,13 @@ services:
     volumes:
       - supabase-data:/var/lib/postgresql/data
       - ./supabase/initdb:/docker-entrypoint-initdb.d:ro
-    profiles: ["data","orchestration"]
+    profiles: ["data","orchestration","supabase-local"]
     networks: [pmoves]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   postgrest:
     image: postgrest/postgrest:latest
@@ -25,13 +30,13 @@ services:
       - PGRST_SERVER_PORT=${PGRST_SERVER_PORT:-3000}
       - PGRST_JWT_SECRET=${SUPABASE_JWT_SECRET:-dev_jwt_secret}
     ports: ["3000:3000"]
-    profiles: ["orchestration","workers"]
+    profiles: ["orchestration","workers","supabase-local"]
     networks: [pmoves]
   qdrant:
     image: qdrant/qdrant:v1.10.0
     restart: unless-stopped
     ports: ["6333:6333"]
-    profiles: ["data"]
+    profiles: ["data","qdrant-local"]
     networks: [pmoves]
   meilisearch:
     image: getmeili/meilisearch:v1.8
@@ -40,21 +45,22 @@ services:
       - MEILI_ENV=production
       - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-master_key}
     ports: ["7700:7700"]
-    profiles: ["data"]
+    profiles: ["data","meili-local"]
     networks: [pmoves]
   neo4j:
     image: neo4j:5.22
     restart: unless-stopped
     environment:
       - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+      - NEO4J_dbms_security_allow__csv__import__from__file__urls=true
     ports: ["7474:7474","7687:7687"]
     volumes:
       - neo4j-data:/data
       - ./neo4j/cypher:/cypher:ro
-    profiles: ["data"]
+    profiles: ["data","neo4j-local"]
     networks: [pmoves]
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u $NEO4J_USER -p $NEO4J_PASSWORD 'RETURN 1' || exit 1"]
+      test: ["CMD-SHELL", "auth=\"$$NEO4J_AUTH\"; user=\"$${auth%%/*}\"; pass=\"$${auth#*/}\"; /var/lib/neo4j/bin/cypher-shell -a bolt://localhost:7687 -u \"$$user\" -p \"$$pass\" 'RETURN 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -139,7 +145,7 @@ services:
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
-      - SUPA_REST_URL=${SUPA_REST_URL:-http://postgrest:3000}
+      - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
       - DEFAULT_NAMESPACE=${INDEXER_NAMESPACE:-pmoves}
       - RENDER_WEBHOOK_SHARED_SECRET=${RENDER_WEBHOOK_SHARED_SECRET}
       - RENDER_AUTO_APPROVE=${RENDER_AUTO_APPROVE:-false}
@@ -159,7 +165,7 @@ services:
       - SENTENCE_MODEL=${SENTENCE_MODEL:-all-MiniLM-L6-v2}
       - MEILI_URL=${MEILI_URL:-http://meilisearch:7700}
       - MEILI_API_KEY=${MEILI_MASTER_KEY}
-      - SUPA_REST_URL=${SUPA_REST_URL:-http://postgrest:3000}
+      - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
     ports: ["8083:8083"]
     profiles: ["workers","orchestration"]
     networks: [pmoves]
@@ -200,7 +206,9 @@ services:
     networks: [pmoves]
 
   ffmpeg-whisper:
-    build: ./services/ffmpeg-whisper
+    build:
+      context: ..
+      dockerfile: pmoves/services/ffmpeg-whisper/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
@@ -274,7 +282,7 @@ services:
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - YT_BUCKET=${YT_BUCKET:-assets}
       - INDEXER_NAMESPACE=${INDEXER_NAMESPACE:-pmoves}
-      - SUPA_REST_URL=${SUPA_REST_URL:-http://postgrest:3000}
+      - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
     depends_on: [minio]
     ports: ["8077:8077"]
@@ -315,7 +323,7 @@ services:
       - TAILSCALE_ONLY=${TAILSCALE_ONLY:-false}
       - TAILSCALE_CIDRS=${TAILSCALE_CIDRS:-100.64.0.0/10}
     ports: ["8087:8086"]
-    profiles: ["workers"]
+    profiles: ["workers","gateway"]
     depends_on:
       qdrant:
         condition: service_started
@@ -374,41 +382,55 @@ services:
   # Agents profile (opt-in): NATS broker + Agent Zero + Archon
   nats:
     image: nats:2.10-alpine
+    command: ["-js"]
     restart: unless-stopped
     ports: ["4222:4222"]
     profiles: ["agents"]
     networks: [pmoves]
 
   agent-zero:
-    build: ./services/agent-zero
+    build:
+      context: .
+      dockerfile: ./services/agent-zero/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
       - PORT=8080
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - AGENT_ZERO_API_BASE=${AGENT_ZERO_API_BASE:-http://127.0.0.1:80}
+      - AGENT_ZERO_CAPTURE_OUTPUT=${AGENT_ZERO_CAPTURE_OUTPUT:-true}
+      - AGENT_ZERO_EXTRA_ARGS=${AGENT_ZERO_EXTRA_ARGS:---port=80}
+      - AGENTZERO_JETSTREAM=${AGENTZERO_JETSTREAM:-true}
     depends_on: [nats]
     ports: ["8080:8080"]
     volumes:
       # Default host directories keep Agent Zero runtime data between restarts.
       # Override AGENT_ZERO_*_DIR env vars in your shell to point at different host paths.
-      - ${AGENT_ZERO_MEMORY_DIR:-./data/agent-zero/memory}:/app/runtime/memory
-      - ${AGENT_ZERO_KNOWLEDGE_DIR:-./data/agent-zero/knowledge}:/app/runtime/knowledge
-      - ${AGENT_ZERO_INSTRUMENTS_DIR:-./data/agent-zero/instruments}:/app/runtime/instruments
-      - ${AGENT_ZERO_LOG_DIR:-./data/agent-zero/logs}:/app/logs
+      - ${AGENT_ZERO_MEMORY_DIR:-./data/agent-zero/memory}:/a0/memory
+      - ${AGENT_ZERO_KNOWLEDGE_DIR:-./data/agent-zero/knowledge}:/a0/knowledge
+      - ${AGENT_ZERO_INSTRUMENTS_DIR:-./data/agent-zero/instruments}:/a0/instruments
+      - ${AGENT_ZERO_LOG_DIR:-./data/agent-zero/logs}:/a0/logs
     profiles: ["agents"]
     networks: [pmoves]
 
   archon:
-    build: ./services/archon
+    build:
+      context: .
+      dockerfile: ./services/archon/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
       - PORT=8091
       - NATS_URL=${NATS_URL:-nats://nats:4222}
-    depends_on: [nats]
+    depends_on:
+      - nats
+      - postgrest
+      - postgres
     ports: ["8091:8091"]
     profiles: ["agents"]
     networks: [pmoves]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   mesh-agent:
     build: ./services/mesh-agent
@@ -423,7 +445,9 @@ services:
     networks: [pmoves]
 
   publisher-discord:
-    build: ./services/publisher-discord
+    build:
+      context: .
+      dockerfile: ./services/publisher-discord/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
@@ -443,7 +467,7 @@ services:
       - JELLYFIN_URL=${JELLYFIN_URL}
       - JELLYFIN_API_KEY=${JELLYFIN_API_KEY}
       - JELLYFIN_USER_ID=${JELLYFIN_USER_ID}
-      - SUPA_REST_URL=${SUPA_REST_URL:-http://postgrest:3000}
+      - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
     ports: ["8093:8093"]
     profiles: ["orchestration"]
     networks: [pmoves]

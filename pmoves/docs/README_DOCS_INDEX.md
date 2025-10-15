@@ -1,5 +1,5 @@
 # PMOVES v5 • Documentation Index
-_Last updated: 2025-10-05_
+_Last updated: 2025-10-13_
 
 - **Creator Pipeline** — `CREATOR_PIPELINE.md`
 - **ComfyUI End‑to‑End** — `COMFYUI_END_TO_END.md`
@@ -10,8 +10,12 @@ _Last updated: 2025-10-05_
 - **Render Completion Webhook** — `RENDER_COMPLETION_WEBHOOK.md`
 - **Presign Service** — `COMFYUI_MINIO_PRESIGN.md`
 - **Smoke Tests** — `SMOKETESTS.md`
+- **Local CI Checklists** — `LOCAL_CI_CHECKS.md`
+- **Archon Updates + Supabase wiring** — `archonupdateforpmoves.md`
+- **Archon Service README** — `pmoves/services/archon/README.md`
 - **n8n Setup (Supabase→Agent Zero→Discord)** — `N8N_SETUP.md`
 - **Supabase→Discord Playbook** — `SUPABASE_DISCORD_AUTOMATION.md`
+- **Tailnet + Discord Deployment** — `TAILSCALE_DISCORD_RUNBOOK.md`
 - **M2 Validation Guide** — `M2_VALIDATION_GUIDE.md`
 - **n8n Quick Checklist (wiki)** — `N8N_CHECKLIST.md`
 - **PMOVES v5.12 Task Backlog** — `context/pmoves_v_5.12_tasks.md`

@@ -64,7 +64,45 @@ YT_INDEX_LEXICAL = os.environ.get("YT_INDEX_LEXICAL", "true").lower() == "true"
 # Auto-tune segmentation thresholds based on content profile
 YT_SEG_AUTOTUNE = os.environ.get("YT_SEG_AUTOTUNE", "true").lower() == "true"
 
+DEFAULT_ANDROID_UA = "Mozilla/5.0 (Linux; Android 12; Pixel 5 Build/SP2A.220405.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/101.0.4951.41 Mobile Safari/537.36"
+YT_PLAYER_CLIENT = (os.environ.get("YT_PLAYER_CLIENT") or "android").strip()
+YT_USER_AGENT = os.environ.get("YT_USER_AGENT") or DEFAULT_ANDROID_UA
+YT_FORCE_IPV4 = os.environ.get("YT_FORCE_IPV4", "true").lower() == "true"
+try:
+    YT_EXTRACTOR_RETRIES = int(os.environ.get("YT_EXTRACTOR_RETRIES", "2"))
+except ValueError:
+    YT_EXTRACTOR_RETRIES = 2
+YT_COOKIES = os.environ.get("YT_COOKIES")
+
 _nc: Optional[NATS] = None
+
+def _with_ytdlp_defaults(opts: Dict[str, Any]) -> Dict[str, Any]:
+    """Add hardened defaults so youtube-dl works without manual cookies."""
+    merged = dict(opts)
+    extractor_args = dict(merged.get('extractor_args') or {})
+    youtube_args = dict(extractor_args.get('youtube') or {})
+    if YT_PLAYER_CLIENT:
+        clients = list(youtube_args.get('player_client') or [])
+        if YT_PLAYER_CLIENT not in clients:
+            youtube_args['player_client'] = [YT_PLAYER_CLIENT] + clients
+    if youtube_args:
+        extractor_args['youtube'] = youtube_args
+    if extractor_args:
+        merged['extractor_args'] = extractor_args
+
+    headers = dict(merged.get('http_headers') or {})
+    if YT_USER_AGENT and not headers.get('User-Agent'):
+        headers['User-Agent'] = YT_USER_AGENT
+    if headers:
+        merged['http_headers'] = headers
+
+    if YT_COOKIES and not merged.get('cookiefile'):
+        merged['cookiefile'] = YT_COOKIES
+    if YT_FORCE_IPV4:
+        merged['force_ipv4'] = True
+    if YT_EXTRACTOR_RETRIES >= 0 and 'extractor_retries' not in merged:
+        merged['extractor_retries'] = YT_EXTRACTOR_RETRIES
+    return merged
 
 def s3_client():
     endpoint_url = MINIO_ENDPOINT if "://" in MINIO_ENDPOINT else f"{'https' if MINIO_SECURE else 'http'}://{MINIO_ENDPOINT}"
@@ -160,7 +198,7 @@ def supa_get(table: str, match: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
 def yt_info(body: Dict[str,Any] = Body(...)):
     url = body.get('url')
     if not url: raise HTTPException(400, 'url required')
-    ydl_opts = { 'quiet': True, 'noprogress': True, 'skip_download': True }
+    ydl_opts = _with_ytdlp_defaults({'quiet': True, 'noprogress': True, 'skip_download': True})
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         wanted = {k: info.get(k) for k in ('id','title','uploader','duration','webpage_url')}
@@ -173,14 +211,14 @@ def yt_download(body: Dict[str,Any] = Body(...)):
     if not url: raise HTTPException(400, 'url required')
     tmpd = tempfile.mkdtemp(prefix='yt-')
     outtmpl = os.path.join(tmpd, '%(id)s.%(ext)s')
-    ydl_opts = {
+    ydl_opts = _with_ytdlp_defaults({
         'outtmpl': outtmpl,
         'format': body.get('format') or 'bestvideo+bestaudio/best',
         'merge_output_format': 'mp4',
         'writethumbnail': True,
         'quiet': True,
         'noprogress': True,
-    }
+    })
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -289,7 +327,7 @@ def yt_ingest(body: Dict[str,Any] = Body(...)):
 # -------------------- Playlist / Channel ingestion --------------------
 
 def _extract_entries(url: str) -> List[Dict[str,Any]]:
-    ydl_opts = { 'quiet': True, 'noprogress': True, 'skip_download': True, 'extract_flat': True }
+    ydl_opts = _with_ytdlp_defaults({'quiet': True, 'noprogress': True, 'skip_download': True, 'extract_flat': True})
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         entries = info.get('entries') or []

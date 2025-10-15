@@ -1,5 +1,7 @@
 # Local Development & Networking
 
+Refer to `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` for the consolidated list of setup scripts, Make targets, and Supabase workflows that pair with the service and port notes below.
+
 ## Services and Ports
 - qdrant: 6333 (internal name `qdrant`)
 - meilisearch: 7700 (internal name `meilisearch`)
@@ -32,6 +34,37 @@ Manual notes: Create `.env` (or start with `.env.example`) and include keys from
 - `MEDIA_VIDEO_FRAMES_BUCKET` (optional) to store extracted video frames separately from the source bucket; defaults to the
   incoming media bucket when unset. Use `MEDIA_VIDEO_FRAMES_PREFIX` to customize the object key prefix (defaults to
   `media-video/frames`).
+
+## External-Mode (reuse existing infra)
+If you already run Neo4j, Meilisearch, Qdrant, or Supabase elsewhere, you can prevent PMOVES from starting local containers:
+
+1. Set flags in `.env.local`:
+   ```
+   EXTERNAL_NEO4J=true
+   EXTERNAL_MEILI=true
+   EXTERNAL_QDRANT=true
+   EXTERNAL_SUPABASE=true
+   ```
+2. Ensure the corresponding URLs/keys in `.env.local` point at your instances.
+3. Run `make up` (Compose profiles skip local services automatically).
+
+## GPU Enablement
+For media/AI components you can enable GPU or VAAPI:
+- Install NVIDIA Container Toolkit (or expose `/dev/dri` for Intel/VAAPI).
+- Start with: `make up-gpu`
+- The overrides in `docker-compose.gpu.yml` add device reservations to `media-video` and `jellyfin-bridge`.
+Notes:
+- Verify drivers on the host (`nvidia-smi` or `/dev/dri` presence).
+- Service logs will indicate whether acceleration was detected.
+
+## Backups & Restore
+- **Backup:** `make backup` → `backups/<timestamp>/`
+  - Postgres SQL dump, Qdrant snapshot request JSON, MinIO mirror (requires `mc` alias inside minio), Meili dump handle.
+- **Restore (outline):**
+  1. `docker compose down`
+  2. Restore Postgres via `psql < postgres.sql`
+  3. Restore Qdrant using the snapshot (import via API or replace snapshot dir)
+  4. Mirror MinIO folder back; re-seed Meili from dump file via Meili admin.
 
 Defaults baked into compose:
 - `MINIO_ENDPOINT` defaults to `minio:9000` for in-network access.
@@ -118,6 +151,9 @@ OpenAI-compatible presets:
   7. Authenticated render-webhook insert (uses `RENDER_WEBHOOK_SHARED_SECRET` or `change_me`).
   8. `studio_board` latest row returned via PostgREST.
   9. Hi-RAG v2 query returns hits.
+  10. Agent Zero `/healthz` reports the JetStream controller running.
+  11. Generated `geometry.cgp.v1` packet posts successfully to `/geometry/event`.
+  12. ShapeStore jump + calibration report respond for that packet.
 - Successful runs exit with code `0` and print `Smoke tests passed.` Any failure stops the script and surfaces the failing check.
 
 ## Health Checks
@@ -192,7 +228,8 @@ docker run --name n8n --rm -it \
 
 ## Notes
 
-- A local Postgres + PostgREST are included. `render-webhook` points to `http://postgrest:3000` by default; override `SUPA_REST_URL` in `.env` to target your self‑hosted instance.
+- A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the Supabase CLI network host `http://api.supabase.internal:8000/rest/v1`). Host-side scripts continue to use `SUPA_REST_URL` (`http://127.0.0.1:54321/rest/v1`). Override both if you point the stack at a remote Supabase instance. When the Supabase CLI stack is running, `make up` auto-runs the `supabase-bootstrap` helper so schema migrations and seeds are replayed before smoke tests.
+- Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` + `neo4j/cypher/*.cypher` scripts wire in the CHIT mind-map aliases. Run `make neo4j-bootstrap` (or rely on `make up` once the helper is hooked in; requires `python3` on the host) after launching `pmoves-neo4j-1` to populate the base graph.
 - For Cataclysm Provisioning, the stable network name `pmoves-net` allows cross‑stack service discovery.
 - Clean up duplicate .env keys: `make env-dedupe` (keeps last occurrence, writes `.env.bak`).
 

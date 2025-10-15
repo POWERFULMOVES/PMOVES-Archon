@@ -1,3 +1,66 @@
+# PMOVES top-level Makefile
+
+# -------- External-mode → Compose profiles ----------
+# If EXTERNAL_* is true, we skip the corresponding local service profile.
+# Profiles are defined on services in docker-compose.yml.
+compose_profiles = data,workers,gateway
+ifeq ($(EXTERNAL_NEO4J),true)
+  neo4j_profile :=
+else
+  neo4j_profile := ,neo4j-local
+endif
+ifeq ($(EXTERNAL_MEILI),true)
+  meili_profile :=
+else
+  meili_profile := ,meili-local
+endif
+ifeq ($(EXTERNAL_QDRANT),true)
+  qdrant_profile :=
+else
+  qdrant_profile := ,qdrant-local
+endif
+ifeq ($(EXTERNAL_SUPABASE),true)
+  supa_profile :=
+else
+  supa_profile := ,supabase-local
+endif
+COMPOSE_PROFILES ?= $(compose_profiles)$(neo4j_profile)$(meili_profile)$(qdrant_profile)$(supa_profile)
+export COMPOSE_PROFILES
+
+PYTHON ?= python3
+BOOTSTRAP_FLAGS ?=
+
+# -------- Updates ----------
+.PHONY: update
+update:  ## Pull repo + images, recreate stack
+	@git pull --rebase
+	@docker compose pull --quiet
+	@docker compose up -d
+	@echo "✔ Updated & reconciled containers."
+
+# -------- Backups / Restore helpers ----------
+.PHONY: backup restore
+BACKUP_DIR ?= backups/$$(date +%Y%m%d_%H%M%S)
+backup: ## Dump Postgres, snapshot Qdrant, mirror MinIO bucket, Meili dump (best-effort)
+	@mkdir -p "$(BACKUP_DIR)"
+	@echo "→ Backing up Postgres…"
+	-@docker compose exec -T postgres pg_dump -U $$POSTGRES_USER -d $$POSTGRES_DB > "$(BACKUP_DIR)/postgres.sql"
+	@echo "→ Snapshotting Qdrant…"
+	-@curl -fsS "http://localhost:6333/collections/$$QDRANT_COLLECTION/snapshots" -X POST -H 'content-type: application/json' -d '{}' > "$(BACKUP_DIR)/qdrant_snapshot.json"
+	@echo "→ Mirroring MinIO bucket '$(MINIO_BUCKET)' (requires mc alias 'local')…"
+	-@docker compose exec -T minio mc mirror --overwrite local/$$MINIO_BUCKET "$(BACKUP_DIR)/minio_$$MINIO_BUCKET"
+	@echo "→ Dumping Meilisearch…"
+	-@curl -fsS "http://localhost:7700/dumps" -X POST -H "X-Meili-API-Key: $$MEILI_MASTER_KEY" -d '{}' > "$(BACKUP_DIR)/meili_dump.json"
+	@echo "✔ Backup written to: $(BACKUP_DIR)"
+
+restore: ## See docs/LOCAL_DEV.md for restore steps
+	@echo "See docs/LOCAL_DEV.md (Restore) for step-by-step instructions."
+
+# -------- GPU profile ----------
+.PHONY: up-gpu
+up-gpu: ## Start with optional GPU accelerations where supported
+	@docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu up -d
+	@echo "✔ Stack started with GPU profile."
 
 .PHONY: up down clean up-workers up-yt up-media up-jellyfin up-nats ps supabase-up supabase-stop supabase-clean supa-extract-remote env-setup env-check
 .PHONY: discord-ping discord-ping-ps demo-content-published health-publisher-discord up-agents health-agent-zero health-jellyfin-bridge seed-approval seed-approval-ps m2-preflight evidence-stamp evidence-stamp-ps evidence-log evidence-log-ps m2-seed-demo n8n-webhook-demo
@@ -5,23 +68,37 @@
 # Pin a stable Docker Compose project name so make targets
 # always operate on the same stack regardless of cwd/path.
 PROJECT ?= pmoves
+export PROJECT
+
+JELLYFIN_AI_BASE ?= jellyfin-ai
+export JELLYFIN_AI_BASE
 # Supabase provider: 'cli' for Supabase CLI stack, 'compose' for docker-compose stack
 SUPA_PROVIDER ?= cli
 
 # Data services differ by provider: with CLI we don't run Postgres/PostgREST here
-ifeq ($(SUPA_PROVIDER),cli)
-DATA_SERVICES := qdrant neo4j minio meilisearch presign
-else
-DATA_SERVICES := qdrant neo4j minio meilisearch postgres postgrest presign
-endif
-up:
+DATA_SERVICES := minio presign
 
-	docker compose -p $(PROJECT) --profile data up -d $(DATA_SERVICES)
-	docker compose -p $(PROJECT) --profile data --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker
-	$(MAKE) up-yt
-	$(MAKE) up-jellyfin
-ifneq ($(SUPA_PROVIDER),cli)
-	$(MAKE) supabase-up
+ifeq ($(EXTERNAL_QDRANT),true)
+else
+DATA_SERVICES += qdrant
+endif
+
+ifeq ($(EXTERNAL_NEO4J),true)
+else
+DATA_SERVICES += neo4j
+endif
+
+ifeq ($(EXTERNAL_MEILI),true)
+else
+DATA_SERVICES += meilisearch
+endif
+
+ifeq ($(SUPA_PROVIDER),cli)
+else
+ifeq ($(EXTERNAL_SUPABASE),true)
+else
+DATA_SERVICES += postgres postgrest
+endif
 endif
 
 down:
@@ -124,6 +201,36 @@ env-check:
 	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
 	- bash scripts/env_check.sh || true
 
+.PHONY: supabase-bootstrap
+supabase-bootstrap:
+	@if docker ps --format '{{.Names}}' | grep -q '^supabase_db_pmoves$$'; then \
+	  echo "→ Supabase CLI stack detected; applying schema + seed SQL"; \
+	  set -eu; \
+	  for f in supabase/initdb/*.sql; do \
+	    echo "   • Init $$f"; \
+	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  done; \
+	  for f in supabase/migrations/*.sql; do \
+	    echo "   • Migration $$f"; \
+	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  done; \
+	  if [ -f db/v5_12_grounded_personas.sql ]; then \
+	    echo "   • Schema db/v5_12_grounded_personas.sql"; \
+	    cat db/v5_12_grounded_personas.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  fi; \
+	  if [ -f db/v5_12_seed.sql ]; then \
+	    echo "   • Seed db/v5_12_seed.sql"; \
+	    cat db/v5_12_seed.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	  fi; \
+	  echo "✔ Supabase schema + seeds applied."; \
+	else \
+	  echo "↷ Supabase CLI stack not running (supabase_db_pmoves missing); skipping Supabase bootstrap."; \
+	fi
+
+.PHONY: neo4j-bootstrap
+neo4j-bootstrap:
+	@bash scripts/neo4j_bootstrap.sh
+
 .PHONY: smoke-webhook-ci
 smoke-webhook-ci:
 	@echo "Render-webhook smoke (dry-run by default). Use LIVE=1 to POST."
@@ -158,18 +265,33 @@ discord-ping-ps:
 .PHONY: smoke
 smoke:
 	@which jq >/dev/null 2>&1 || (echo "jq is required for smoke tests" && exit 1)
-	@echo "[1/9] Qdrant ready..." && curl -sf http://localhost:6333/ready >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[2/9] Meilisearch ready..." && curl -sf http://localhost:7700/health >/dev/null && echo OK || (echo WARN: skipping; true)
-	@echo "[3/9] Neo4j UI..." && curl -sf http://localhost:7474 >/dev/null && echo OK || (echo WARN: UI not reachable; true)
-	@echo "[4/9] presign health..." && curl -sf http://localhost:8088/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[5/9] render-webhook health..." && curl -sf http://localhost:8085/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[6/9] PostgREST reachable..." && curl -sf http://localhost:3000 >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[7/9] Insert via render-webhook..." && curl -sf -X POST http://localhost:8085/comfy/webhook \
+	@echo "[1/12] Qdrant ready..." && curl -sf http://localhost:6333/readyz >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[2/12] Meilisearch ready..." && curl -sf http://localhost:7700/health >/dev/null && echo OK || (echo WARN: skipping; true)
+	@echo "[3/12] Neo4j UI..." && curl -sf http://localhost:7474 >/dev/null && echo OK || (echo WARN: UI not reachable; true)
+	@echo "[4/12] presign health..." && curl -sf http://localhost:8088/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[5/12] render-webhook health..." && curl -sf http://localhost:8085/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
+	@REST_BASE="$${SUPA_REST_URL:-http://127.0.0.1:54321/rest/v1}"; \
+	 APIKEY="$${SUPABASE_ANON_KEY:-sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH}"; \
+	 echo "[6/12] PostgREST reachable..." && curl -sf "$${REST_BASE}/it_errors?select=id&limit=1" -H "apikey: $$APIKEY" >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[7/12] Insert via render-webhook..." && curl -sf -X POST http://localhost:8085/comfy/webhook \
 	 -H "Content-Type: application/json" \
 	 -H "Authorization: Bearer $${RENDER_WEBHOOK_SHARED_SECRET:-change_me}" \
 	 -d '{"bucket":"outputs","key":"demo.png","s3_uri":"s3://outputs/demo.png","presigned_get":null,"title":"Demo","namespace":"pmoves","author":"local","tags":["demo"],"auto_approve":false}' >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[8/9] Verify studio_board row..." && curl -sf "http://localhost:3000/studio_board?order=id.desc&limit=1" | jq -e '.[0].title != null' >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[9/9] Hi-RAG v2 query..." && curl -sf localhost:8087/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && echo OK || (echo FAIL && exit 1)
+	@REST_BASE="$${SUPA_REST_URL:-http://127.0.0.1:54321/rest/v1}"; \
+	 APIKEY="$${SUPABASE_ANON_KEY:-sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH}"; \
+	 echo "[8/12] Verify studio_board row..." && curl -sf "$${REST_BASE}/studio_board?order=id.desc&limit=1" -H "apikey: $$APIKEY" | jq -e '.[0].title != null' >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[9/12] Hi-RAG v2 query..." && curl -sf localhost:8087/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "[10/12] Agent Zero health..." && curl -sf http://localhost:8080/healthz | jq -e '.nats.connected == true' >/dev/null && echo OK || (echo FAIL && exit 1)
+	@CID=$$(uuidgen | tr 'A-Z' 'a-z' | cut -d- -f1); \
+	 POINT_ID="p.smoke.$${CID}"; \
+	 CONST_ID="c.smoke.$${CID}"; \
+	 TMP=$$(mktemp); \
+	 REF_ID="yt:smoke-$${CID}"; \
+	 export RUN_ID="$${CID}" POINT_ID="$${POINT_ID}" CONST_ID="$${CONST_ID}" REF_ID="$$REF_ID"; \
+	 python3 -c 'import json, os, sys; obj={"type":"geometry.cgp.v1","data":{"spec":"chit.cgp.v0.1","meta":{"source":"smoke-test","namespace":"pmoves","run_id":os.environ["RUN_ID"]},"super_nodes":[{"id":"sn.smoke","constellations":[{"id":os.environ["CONST_ID"],"summary":"smoke geometry validation","radial_minmax":[0.05,0.85],"spectrum":[0.08,0.12,0.18,0.22,0.18,0.12,0.07,0.03],"anchor":[0.52,-0.41,0.23,0.11],"points":[{"id":os.environ["POINT_ID"],"modality":"video","ref_id":os.environ["REF_ID"],"t_start":12.5,"frame_idx":300,"proj":0.82,"conf":0.93,"text":"geometry smoke anchor"}]}]}]}}; json.dump(obj, sys.stdout)' > $$TMP; \
+	 echo "[11/12] Geometry event ingest..." && curl -sf http://localhost:8087/geometry/event -H 'content-type: application/json' -d @$${TMP} >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
+	 echo "[12/12] Geometry jump & calibration..." && curl -sf "http://localhost:8087/shape/point/$${POINT_ID}/jump" | jq -e --arg ref "$$REF_ID" '.locator.ref_id == $$ref' >/dev/null && curl -sf http://localhost:8087/geometry/calibration/report -H 'content-type: application/json' -d "$$(jq -c '.data' $$TMP)" | jq -e '.constellations != null' >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
+	 rm -f $$TMP
 	@echo "Smoke tests passed."
 
 .PHONY: smoke-rerank
@@ -272,25 +394,72 @@ smoke-langextract:
 	@make load-jsonl FILE=$(PWD)/.tmp_extracted.jsonl NAMESPACE=pmoves
 	@rm -f .tmp_extracted.jsonl
 
+.PHONY: smoke-archon
+smoke-archon:
+	@which jq >/dev/null 2>&1 || (echo "jq is required for smoke-archon" && exit 1)
+	@bash -c 'set -euo pipefail; \
+	ARCHON_URL="$${ARCHON_HEALTH_URL:-http://localhost:8091/healthz}"; \
+	printf "[Archon] GET %s\n" "$$ARCHON_URL"; \
+	resp=$$(curl -fsS "$$ARCHON_URL"); \
+	status=$$(printf "%s" "$$resp" | jq -r ".status // empty"); \
+	if [ "$$status" != "ok" ]; then \
+	  echo "Archon health degraded or unavailable (status=$$status)"; \
+	  exit 1; \
+	fi; \
+	printf "%s\n" "$$resp"'
+
+.PHONY: chit-contract-check
+chit-contract-check:
+	@bash "$(CURDIR)/../scripts/check_chit_contract.sh"
+
+.PHONY: jellyfin-verify
+jellyfin-verify:
+	@bash -c 'set -euo pipefail; \
+	 if [ -f env.jellyfin-ai ]; then set -a; . env.jellyfin-ai; set +a; fi; \
+	 python3 "$(CURDIR)/../scripts/check_jellyfin_credentials.py"'
+
+.PHONY: up-jellyfin-ai
+up-jellyfin-ai:
+	@test -f env.jellyfin-ai || cp env.jellyfin-ai.example env.jellyfin-ai
+	@mkdir -p $(JELLYFIN_AI_BASE)/config $(JELLYFIN_AI_BASE)/cache $(JELLYFIN_AI_BASE)/media $(JELLYFIN_AI_BASE)/output
+	@mkdir -p $(JELLYFIN_AI_BASE)/neo4j/data $(JELLYFIN_AI_BASE)/neo4j/logs $(JELLYFIN_AI_BASE)/neo4j/import $(JELLYFIN_AI_BASE)/neo4j/plugins
+	@mkdir -p $(JELLYFIN_AI_BASE)/qwen/models $(JELLYFIN_AI_BASE)/qwen/cache
+	@mkdir -p $(JELLYFIN_AI_BASE)/logs $(JELLYFIN_AI_BASE)/redis
+	@echo "Starting Jellyfin AI stack..."
+	@JELLYFIN_AI_BASE=$(JELLYFIN_AI_BASE) docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.jellyfin-ai.yml up -d --force-recreate \
+		jellyfin jellyfin-neo4j jellyfin-qwen-audio jellyfin-redis jellyfin-audio-processor jellyfin-api-gateway jellyfin-dashboard
+	@echo "✓ Jellyfin AI stack started successfully!"
+	@echo ""
+	@echo "Services:"
+	@echo "  - Jellyfin Media Server:  http://localhost:8096"
+	@echo "  - Dashboard:              http://localhost:8400"
+	@echo "  - API Gateway:            http://localhost:8300"
+	@echo "  - Ollama (Qwen2-Audio):   http://localhost:11434"
+	@echo "  - Neo4j Browser:          bolt://localhost:7687"
+	@echo ""
+	@echo "Note: Qwen2-Audio model is already pulled and ready to use!"
+
+
 .PHONY: flight-check
 flight-check:
-	@if [ "$(OS)" = "Windows_NT" ]; then \
-		pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1 ; \
-	else \
-		bash scripts/env_check.sh ; \
-	fi
+ifeq ($(OS),Windows_NT)
+	@pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
+else
+	@bash scripts/env_check.sh
+endif
 
 .PHONY: flight-check-retro
 flight-check-retro:
 	@echo "Installing retro flightcheck deps (uv preferred, fallback to pip)" && \
-	( command -v uv >/dev/null 2>&1 && uv pip install -q -r tools/flightcheck/requirements.txt || python -m pip install -q -r tools/flightcheck/requirements.txt ) && \
-	python tools/flightcheck/retro_flightcheck.py
+	( command -v uv >/dev/null 2>&1 && uv pip install -q -r tools/flightcheck/requirements.txt || $(PYTHON) -m pip install -q -r tools/flightcheck/requirements.txt ) && \
+	$(PYTHON) tools/flightcheck/retro_flightcheck.py
 
 .PHONY: preflight
 preflight:
 	@echo "Running PMOVES preflight checks..."
-	@python tools/flightcheck/retro_flightcheck.py --quick || true
-	@python tools/flightcheck/retro_flightcheck.py --theme neon --beep
+	@$(PYTHON) scripts/bootstrap_env.py --check
+	@$(PYTHON) tools/flightcheck/retro_flightcheck.py --quick || true
+	@$(PYTHON) tools/flightcheck/retro_flightcheck.py --theme neon --beep || true
 
 .PHONY: env-dedupe
 env-dedupe:
@@ -313,6 +482,10 @@ help:
 	@echo "  mindmap-seed     Load CHIT demo constellation into Neo4j"
 	@echo "  mindmap-smoke    Query /mindmap using the seeded constellation"
 	@echo "  smoke-langextract Extract chunks via langextract and load"
+	@echo "  smoke-archon     Check Archon healthz endpoint (requires NATS + Supabase)"
+	@echo "  jellyfin-verify  Validate Jellyfin credentials and branding"
+	@echo "  up-jellyfin-ai   Launch the optional Jellyfin AI media stack overlay"
+	@echo "  chit-contract-check Run local CHIT contract grep (mirrors CI)"
 	@echo "  flight-check     Run environment preflight (deps, ports, .env)"
 	@echo "  flight-check-retro Retro-styled Rich CLI preflight"
 	@echo "  env-dedupe       Remove duplicate keys from .env (keeps last, writes .bak)"
@@ -346,6 +519,10 @@ setup:
 	else \
 		bash scripts/codex_bootstrap.sh $${CONDA_ENV:-pmoves-ai} ; \
 	fi
+
+.PHONY: bootstrap
+bootstrap:
+	@$(PYTHON) scripts/bootstrap_env.py $(BOOTSTRAP_FLAGS)
 
 .PHONY: supabase-migrate
 supabase-migrate:
@@ -394,7 +571,7 @@ mcp-archon:
 
 .PHONY: mesh-up
 mesh-up:
-	docker compose --profile agents up -d nats mesh-agent
+	docker compose --profile agents --profile data up -d nats mesh-agent
 
 .PHONY: mesh-handshake
 mesh-handshake:
@@ -417,7 +594,7 @@ yt-emit-smoke:
 	  echo "[YT] Ingest" && curl -sS -X POST http://localhost:8077/yt/ingest -H 'content-type: application/json' -d '{"url":"$(URL)","namespace":"pmoves","bucket":"assets"}' | jq -e '.ok==true' >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  echo "[YT] Emit (chunks+CGP)" && curl -sS -X POST http://localhost:8077/yt/emit -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"namespace\":\"pmoves\"}" | tee .tmp_emit.json | jq -e '.ok==true and .chunks>=1 and (.upserted|tonumber) >= 1' >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  echo "[YT] Profile (if autotune)" && jq -r '.profile // "(none)"' .tmp_emit.json; \
-	  echo "[Geometry] Jump point 0" && curl -sS http://localhost:8087/shape/point/p:yt:$$VID:0/jump | jq -e '.locator.modality=="video" and .locator.ref_id==$$VID' >/dev/null && echo OK || (echo FAIL && exit 1); \
+	  echo "[Geometry] Jump point 0" && curl -sS http://localhost:8087/shape/point/p:yt:$$VID:0/jump | jq -e ".locator.modality==\"video\" and .locator.ref_id==\"$${VID}\"" >/dev/null && echo OK || (echo FAIL && exit 1); \
 	  rm -f .tmp_info.json
 
 .PHONY: yt-playlist-smoke

@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,6 +15,25 @@ RUN apt-get update \
         curl \
         ca-certificates \
         gnupg \
+        libnss3 \
+        libnspr4 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libxkbcommon0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libxss1 \
+        libxtst6 \
+        libasound2 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgtk-3-0 \
+        fonts-liberation \
+        fonts-unifont \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
@@ -22,6 +41,8 @@ RUN apt-get update \
     && corepack prepare yarn@stable --activate \
     && corepack prepare pnpm@latest --activate \
     && rm -rf /var/lib/apt/lists/*
+
+ARG ARCHON_GIT_REF=main
 
 # Default configuration values (override at runtime)
 ARG SUPABASE_URL_DEFAULT=https://your-project.supabase.co
@@ -52,13 +73,20 @@ ENV SUPABASE_URL=${SUPABASE_URL_DEFAULT} \
     MCP_CREDENTIALS_PATH=${MCP_CREDENTIALS_PATH_DEFAULT} \
     ARCHON_FORM=POWERFULMOVES \
     AGENT_FORMS_DIR=/app/configs/agents/forms \
-    ARCHON_UI_STATIC_DIR=/app/static/archon-ui
+    ARCHON_UI_STATIC_DIR=/app/static/archon-ui \
+    ARCHON_VENDOR_ROOT=/app/vendor/archon
 
-COPY requirements.txt ./
+# Pull the upstream Archon sources (vanilla build) to vendor path
+RUN git clone --depth 1 --branch "${ARCHON_GIT_REF}" https://github.com/coleam00/Archon.git /app/vendor/archon
+
+COPY services/archon/requirements.txt ./requirements.txt
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
-COPY . .
+# Pre-install Playwright browsers (Chromium) so crawl workflows succeed out of the box.
+RUN python -m playwright install chromium
+
+COPY services /app/services
 
 # Prepare directories used at runtime
 RUN mkdir -p /app/static/archon-ui /app/config/mcp
@@ -79,4 +107,4 @@ RUN if [ -d "$ARCHON_UI_DIR" ]; then \
     fi
 
 EXPOSE 8090
-CMD ["python", "main.py"]
+CMD ["python", "-m", "services.archon.main"]

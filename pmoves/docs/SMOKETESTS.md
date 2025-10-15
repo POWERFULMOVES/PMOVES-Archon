@@ -20,6 +20,11 @@ This guide covers preflight wiring, starting the core stack, and running the loc
 2. Set shared secrets (change these):
    - `PRESIGN_SHARED_SECRET`
    - `RENDER_WEBHOOK_SHARED_SECRET`
+   - Supabase REST endpoints:
+     - `SUPA_REST_URL=http://127.0.0.1:54321/rest/v1` (host-side smoke harness + curl snippets)
+     - `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1` (compose services targeting the Supabase CLI stack)
+   - With the Supabase CLI stack running, `make up` will replay all schema + seed SQL before the smoke harness executes. You can re-run it manually via `make supabase-bootstrap`.
+   - If Neo4j is running (`pmoves-neo4j-1`), seed the CHIT mind-map aliases via `make neo4j-bootstrap` so `/mindmap/{id}` resolves during geometry checks.
 3. Buckets: ensure MinIO has buckets you plan to use (defaults: `assets`, `outputs`). You can create buckets via the MinIO Console at `http://localhost:9001` if needed.
 
 ## 2) Preflight (Recommended)
@@ -39,6 +44,10 @@ Useful health checks:
 - PostgREST: `curl http://localhost:3000`
 - Hi‑RAG v2 stats: `curl http://localhost:8087/hirag/admin/stats`
 - Discord Publisher: `curl http://localhost:8092/healthz`
+
+### Optional GPU smoke
+- Start with `make up-gpu`, then re-run health checks.
+- Media/video services should log detection of GPU/VAAPI where available.
 
 ### Discord Publisher (content.published.v1)
 
@@ -79,7 +88,15 @@ asyncio.run(main())
 PY
 ```
 
-Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags. Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
+Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags.
+
+- If the payload includes `duration`, the embed shows it as `H:MM:SS` (e.g., `0:05:32`).
+- A `thumbnail_url` on the payload or its `meta` block overrides auto-selected cover art thumbnails.
+- Jellyfin items emit deep links that append `&startTime=<seconds>` when timestamps (`start_time`, `start`, `t`) are present.
+- Tags are quoted ( `` `tag` `` ) and capped at the first twelve entries so Discord renders them cleanly.
+- When a summary is present alongside other description content, the remainder appears in a `Summary` field (truncated to Discord's limits) so operators can confirm spillover handling.
+
+Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
 - `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
@@ -90,16 +107,21 @@ Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-What the smoke covers:
+What the smoke covers now (12 checks):
 1) Qdrant ready (6333)
-2) Meilisearch health (7700, warned if missing)
-3) Neo4j UI reachable (7474, warned if not)
+2) Meilisearch health (7700, warning only)
+3) Neo4j UI reachable (7474, warning only)
 4) Presign health (8088)
 5) Render Webhook health (8085)
 6) PostgREST reachable (3000)
 7) Insert a demo row via Render Webhook
 8) Verify a `studio_board` row exists via PostgREST
 9) Run a Hi-RAG v2 query (8087)
+10) Agent Zero `/healthz` reports the JetStream controller running
+11) POST a generated `geometry.cgp.v1` packet to `/geometry/event`
+12) Confirm the ShapeStore locator + calibration report via `/shape/point/{id}/jump` and `/geometry/calibration/report`
+
+## 6) Geometry Bus (CHIT) — Extended Deep Dive
 
 ### Mindmap Graph (Neo4j)
 1. Seed demo nodes for `/mindmap`: `make mindmap-seed` (requires the `neo4j` service running).
@@ -178,7 +200,15 @@ What the smoke covers:
      -d @cgp.json
    ```
 
-Expected: 200s; locator shows `{ "modality":"video","ref_id":"yt123","t":12.5,"frame":300 }`.
+   Expected: 200s; locator shows `{ "modality":"video","ref_id":"yt123","t":12.5,"frame":300 }`.
+
+7. Mind-map query (requires `make neo4j-bootstrap`):
+   ```bash
+   python docs/pmoves_chit_all_in_one/pmoves_all_in_one/pmoves_chit_graph_plus_mindmap/scripts/mindmap_query.py \
+     --base http://localhost:8087 \
+     --cid <constellation_id>
+   ```
+   Substitute `<constellation_id>` with one of the seeded IDs (e.g., from the CSV). A JSON payload with `items` confirms Neo4j has the CHIT alias graph available.
 
 ## 7) Live Geometry UI + WebRTC
 
@@ -214,6 +244,7 @@ Optional smoke targets:
 - `make smoke-presign-put` — end‑to‑end presign PUT and upload
 - `make smoke-rerank` — query with `use_rerank=true` (provider optional)
 - `make smoke-langextract` — extract chunks from XML via `langextract` and load
+- `make smoke-archon` — hit `http://localhost:8091/healthz` and ensure Archon reports `status: "ok"` (requires NATS + Supabase CLI stack)
 
 ## Troubleshooting
 - Port in use: change the host port in `docker-compose.yml` or stop the conflicting process.
@@ -298,6 +329,8 @@ HTTP endpoints checked:
 - Outgoing `content.published.v1` envelopes now include the source `description`, `tags`, and merged `meta` fields, plus optional
   `public_url`/`jellyfin_item_id` whenever Jellyfin confirms a library refresh.
 - Configure `MEDIA_LIBRARY_PUBLIC_BASE_URL` to advertise HTTP paths for the downloaded artifacts.
+- Regression coverage now includes a unit test that simulates a MinIO download failure and asserts the publisher emits the
+  `content.publish.failed.v1` envelope with merged metadata and audit context (`test_handle_download_failed_emits_failure_envelope`).
 
 ## Playlist/Channel Ingestion
 

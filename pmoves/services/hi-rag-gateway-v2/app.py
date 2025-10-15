@@ -1,5 +1,5 @@
 
-import os, time, math, json, logging, re, sys, contextlib
+import os, time, math, json, logging, re, sys, contextlib, ipaddress
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Body, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect
@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Distance, VectorParams, PointStruct
+import uuid
 from sentence_transformers import SentenceTransformer
 from FlagEmbedding import FlagReranker
 from rapidfuzz import fuzz
@@ -51,7 +52,10 @@ SUPABASE_SERVICE_KEY = (
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 SUPABASE_REALTIME_URL = os.environ.get("SUPABASE_REALTIME_URL") or os.environ.get("REALTIME_URL")
 SUPABASE_REALTIME_KEY = (
-    SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY or os.environ.get("REALTIME_ANON_KEY")
+    os.environ.get("SUPABASE_REALTIME_KEY")
+    or os.environ.get("REALTIME_ANON_KEY")
+    or SUPABASE_SERVICE_KEY
+    or SUPABASE_ANON_KEY
 )
 GEOMETRY_CACHE_WARM_LIMIT = int(os.environ.get("GEOMETRY_CACHE_WARM_LIMIT", "64"))
 GEOMETRY_REALTIME_BACKOFF = float(os.environ.get("GEOMETRY_REALTIME_BACKOFF", "5.0"))
@@ -59,6 +63,7 @@ GEOMETRY_REALTIME_BACKOFF = float(os.environ.get("GEOMETRY_REALTIME_BACKOFF", "5
 TAILSCALE_ONLY = os.environ.get("TAILSCALE_ONLY","false").lower()=="true"
 TAILSCALE_ADMIN_ONLY = os.environ.get("TAILSCALE_ADMIN_ONLY","false").lower()=="true"
 TAILSCALE_CIDRS = [c.strip() for c in os.environ.get("TAILSCALE_CIDRS","100.64.0.0/10").split(",") if c.strip()]
+TRUSTED_PROXY_SOURCES = [c.strip() for c in os.environ.get("HIRAG_TRUSTED_PROXIES", "").split(",") if c.strip()]
 
 HTTP_PORT = int(os.environ.get("HIRAG_HTTP_PORT","8086"))
 NAMESPACE_DEFAULT = os.environ.get("INDEXER_NAMESPACE","pmoves")
@@ -337,15 +342,29 @@ async def _geometry_realtime_worker(ws_url: str, api_key: str) -> None:
 
     while True:
         full_url = ws_url
+        if full_url.rstrip('/').endswith('/realtime/v1'):
+            full_url = full_url.rstrip('/') + '/websocket'
         if "apikey=" not in full_url:
             sep = "&" if "?" in full_url else "?"
-            full_url = f"{full_url}{sep}apikey={api_key}&vsn=2.0.0"
+            full_url = f"{full_url}{sep}apikey={api_key}&vsn=1.0.0"
+        headers = {}
+        if SUPABASE_REALTIME_KEY:
+            headers["Authorization"] = f"Bearer {SUPABASE_REALTIME_KEY}"
         try:
-            async with websockets.connect(full_url, ping_interval=20, ping_timeout=20, max_queue=None) as ws:
+            async with websockets.connect(
+                full_url,
+                ping_interval=20,
+                ping_timeout=20,
+                max_queue=None,
+                extra_headers=headers or None,
+            ) as ws:
                 join_payload = {
                     "topic": "realtime:geometry.cgp.v1",
                     "event": "phx_join",
-                    "payload": {"config": {"broadcast": {"ack": False, "self": True}}},
+                    "payload": {
+                        "config": {"broadcast": {"ack": False, "self": True}},
+                        "access_token": api_key,
+                    },
                     "ref": "1",
                 }
                 await ws.send(json.dumps(join_payload))
@@ -465,11 +484,50 @@ def _load_codebook(path: str):
         logger.exception("codebook load error")
         return []
 
+def _parse_trusted_proxies(raw_entries):
+    networks = []
+    for raw in raw_entries:
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                networks.append(ipaddress.ip_network(entry, strict=False))
+            else:
+                ip_obj = ipaddress.ip_address(entry)
+                cidr = "32" if isinstance(ip_obj, ipaddress.IPv4Address) else "128"
+                networks.append(ipaddress.ip_network(f"{ip_obj}/{cidr}", strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy entry: %s", entry)
+    return networks
+
+
+_TRUSTED_PROXY_NETWORKS = _parse_trusted_proxies(TRUSTED_PROXY_SOURCES)
+
+
+def _trusted_proxy(host: Optional[str]) -> bool:
+    if not host or not _TRUSTED_PROXY_NETWORKS:
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(host)
+    except ValueError:
+        logger.debug("Request client host is not a valid IP: %s", host)
+        return False
+    return any(ip_obj in network for network in _TRUSTED_PROXY_NETWORKS)
+
+
 def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
+    peer_ip = request.client.host if request.client else None
+    if peer_ip and _trusted_proxy(peer_ip):
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            candidate = xff.split(",")[0].strip()
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                logger.debug("Ignoring invalid X-Forwarded-For entry: %s", candidate)
+    return peer_ip or "127.0.0.1"
 
 def _ip_in_cidrs(ip: str, cidrs):
     import ipaddress
@@ -1059,7 +1117,8 @@ def hirag_upsert_batch(req: UpsertReq = Body(...), _=Depends(require_admin_tails
         if isinstance(extra, dict):
             for k, v in extra.items():
                 payload.setdefault(k, v)
-        points.append(PointStruct(id=cid, vector=vec, payload=payload))
+        qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_URL, cid))
+        points.append(PointStruct(id=qdrant_id, vector=vec, payload=payload))
 
     try:
         if points:
