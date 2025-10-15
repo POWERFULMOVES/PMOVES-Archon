@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import json
 import sys
@@ -15,6 +16,7 @@ for candidate in (ROOT, PMOVES_ROOT):
     if candidate_str not in sys.path:
         sys.path.insert(0, candidate_str)
 
+from pmoves.services.common.telemetry import PublisherMetrics
 from pmoves.services.publisher import publisher
 
 
@@ -193,6 +195,77 @@ def test_request_jellyfin_refresh_webhook_http_error(monkeypatch):
 
     assert publisher.METRICS.refresh_attempts == attempts_before + 1
     assert publisher.METRICS.refresh_failures == failures_before + 1
+
+
+def test_metrics_server_serves_json_payloads():
+    original_metrics = publisher.METRICS
+    original_host = publisher.METRICS_HOST
+    original_port = publisher.METRICS_PORT
+
+    async def _exercise() -> None:
+        server: asyncio.AbstractServer | None = None
+        try:
+            publisher.METRICS = PublisherMetrics()
+            publisher.METRICS.record_download_success()
+            publisher.METRICS.record_refresh_attempt()
+            publisher.METRICS.record_refresh_success()
+            publisher.METRICS.record_turnaround(12.5)
+            publisher.METRICS.record_approval_latency(5.0)
+            publisher.METRICS.record_engagement({"views": 10})
+            publisher.METRICS.record_cost({"usd": 1.5})
+
+            publisher.METRICS_HOST = "127.0.0.1"
+            publisher.METRICS_PORT = 0
+
+            server = await publisher.start_metrics_server()
+            sockets = server.sockets or []
+            assert sockets, "metrics server did not expose any sockets"
+            sockname = sockets[0].getsockname()
+            if isinstance(sockname, tuple):
+                port = sockname[1]
+            else:
+                port = sockname
+            host = "127.0.0.1"
+
+            async def _fetch(path: str) -> bytes:
+                reader, writer = await asyncio.open_connection(host, port)
+                request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+                writer.write(request.encode())
+                await writer.drain()
+                data = await reader.read()
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return data
+
+            async def _assert_json_response(path: str) -> dict:
+                raw_response = await _fetch(path)
+                header, body = raw_response.split(b"\r\n\r\n", 1)
+                status_line = header.split(b"\r\n", 1)[0].decode()
+                assert "200 OK" in status_line
+                payload = json.loads(body.decode())
+                assert isinstance(payload, dict)
+                return payload
+
+            metrics_payload = await _assert_json_response("/metrics")
+            metrics_json_payload = await _assert_json_response("/metrics.json")
+
+            for payload in (metrics_payload, metrics_json_payload):
+                assert payload["downloads"] == 1
+                assert payload["refresh_attempts"] == 1
+                assert payload["refresh_success"] == 1
+                assert payload["engagement_totals"]["views"] == 10.0
+                assert payload["cost_totals"]["usd"] == 1.5
+        finally:
+            if server is not None:
+                server.close()
+                await server.wait_closed()
+            publisher._METRICS_SERVER = None
+            publisher.METRICS_HOST = original_host
+            publisher.METRICS_PORT = original_port
+            publisher.METRICS = original_metrics
+
+    asyncio.run(_exercise())
 
 
 def test_lookup_jellyfin_item_handles_http_error(monkeypatch):
