@@ -88,7 +88,15 @@ asyncio.run(main())
 PY
 ```
 
-Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags. Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
+Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags.
+
+- If the payload includes `duration`, the embed shows it as `H:MM:SS` (e.g., `0:05:32`).
+- A `thumbnail_url` on the payload or its `meta` block overrides auto-selected cover art thumbnails.
+- Jellyfin items emit deep links that append `&startTime=<seconds>` when timestamps (`start_time`, `start`, `t`) are present.
+- Tags are quoted ( `` `tag` `` ) and capped at the first twelve entries so Discord renders them cleanly.
+- When a summary is present alongside other description content, the remainder appears in a `Summary` field (truncated to Discord's limits) so operators can confirm spillover handling.
+
+Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
 - `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
@@ -312,6 +320,8 @@ HTTP endpoints checked:
 - Outgoing `content.published.v1` envelopes now include the source `description`, `tags`, and merged `meta` fields, plus optional
   `public_url`/`jellyfin_item_id` whenever Jellyfin confirms a library refresh.
 - Configure `MEDIA_LIBRARY_PUBLIC_BASE_URL` to advertise HTTP paths for the downloaded artifacts.
+- Regression coverage now includes a unit test that simulates a MinIO download failure and asserts the publisher emits the
+  `content.publish.failed.v1` envelope with merged metadata and audit context (`test_handle_download_failed_emits_failure_envelope`).
 
 ## Playlist/Channel Ingestion
 
