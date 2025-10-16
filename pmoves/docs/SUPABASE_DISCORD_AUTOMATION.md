@@ -88,11 +88,11 @@ Perform the following steps in order to validate the pipeline:
 | Step | Status | Notes |
 | --- | --- | --- |
 | Dry-run webhook ping | ✅ (2025-10-14) | Validated end-to-end using the `mock-discord` container and the live `publisher-discord` service; webhook received enriched embed payload. |
-| Supabase approval trigger | ⚙️ In progress | Use `make seed-approval` helper; a dedicated automation run with real n8n polling remains to be scheduled. |
+| Supabase approval trigger | ⚙️ In progress | `studio_board` row id 38 seeded (`status='approved'`, `meta.publish_event_sent_at IS NULL`) awaiting poller pickup. |
 | Verify Agent Zero controller health | ✅ (2025-10-14) | `GET /healthz` confirms JetStream-connected controller; publish requests succeed (`make demo-content-published`). |
-| Enable `approval_poller` workflow | ⏳ Pending | Requires n8n credentials import; plan captured in this document, activation deferred until secrets available. |
-| Enable `echo_publisher` workflow | ⏳ Pending | Blocked on prior step; Discord embed already verified via manual publish. |
-| Supabase audit verification | ⏳ Pending | To be rerun alongside the n8n activation so `studio_board.meta.publish_event_sent_at` updates can be recorded. |
+| Enable `approval_poller` workflow | ⚠️ Blocked | Workflow ID `WrWVyXYBJbQbyaDN` active, yet cron trigger never fires; `execution_entity` remains empty. |
+| Enable `echo_publisher` workflow | ⚠️ Blocked | Activation deferred until poller executions appear; manual embed path already validated. |
+| Supabase audit verification | ⚠️ Blocked | Depends on poller updating `meta.publish_event_sent_at`; currently stuck at `NULL`. |
 | Deactivate workflows | ⏳ Pending | Execute after the live activation run is recorded. |
 
 > **Follow-up**: Next session should import the n8n flows, wire credentials, and run a full poller → publisher cycle against Supabase so `studio_board` audit fields update with real timestamps/screenshots.
@@ -101,6 +101,7 @@ Perform the following steps in order to validate the pipeline:
 - **403 from Agent Zero** — check `AGENT_ZERO_EVENTS_TOKEN` and ensure the shared secret matches the server configuration.
 - **Discord rate limits** — limit embed updates to <5/minute per webhook. n8n logs include X-RateLimit headers for inspection.
 - **Supabase polling misses rows** — ensure the filter includes `meta->>'publish_event_sent_at' IS NULL` and the poller runs with a consistent `since` cursor.
+- **Cron workflows never trigger** — confirm n8n is running via `n8n start` (not an ad-hoc CLI command), set `EXECUTIONS_MODE=regular` with runners disabled, and inspect `execution_entity` for new rows; restarting with task runners enabled (`N8N_RUNNERS_ENABLED=true`) resolved similar idle schedules in 1.115.x.
 - **Embed rendering issues** — the `content.published.v1` schema supports `embeds[0].thumbnail_url`; verify the payload includes accessible URLs.
 
 ## Related References

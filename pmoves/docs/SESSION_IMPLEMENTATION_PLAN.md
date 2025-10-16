@@ -124,22 +124,22 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | Step | Timestamp (UTC) | Evidence Link/Note |
 | --- | --- | --- |
 
-| agent-zero health OK |  |  |
-| jellyfin-bridge health OK |  |  |
-| publisher-discord health OK |  |  |
-| Discord webhook ping successful |  |  |
-| n8n approval_poller imported + creds set |  |  |
-| Preflight checks pass (Env/SQL/Tests) |  |  |
-| Webhook smoke (dry) reviewed |  |  |
-| Webhook smoke (live) returns 200 |  |  |
-| Publisher metrics visible (/metrics.json) |  |  |
-| Discord embed formatter tests pass |  |  |
-| n8n echo_publisher imported + creds set |  |  |
-| n8n activated (poller → echo publisher) |  |  |
-| Supabase row seeded (status=approved) |  |  |
-| Agent Zero received content.publish.approved.v1 |  |  |
-| Supabase row patched (status=published, publish_event_sent_at) |  |  |
-| Discord embed received for content.published.v1 |  |  |
+| agent-zero health OK | 2025-10-16T22:14:12Z | `make m2-preflight` → Agent Zero `/healthz` reports `nats.connected=true`. |
+| jellyfin-bridge health OK | — | Not exercised during this session. |
+| publisher-discord health OK | 2025-10-16T22:18:05Z | `make health-publisher-discord` shows `webhook_success=1` against `mock-discord`. |
+| Discord webhook ping successful | 2025-10-16T22:18:12Z | POST `/publish` test delivered to `mock-discord`; logged via publisher container. |
+| n8n approval_poller imported + creds set | 2025-10-16T22:30:36Z | `docker exec pmoves-n8n-1 n8n import:workflow --input=/tmp/approval_poller.json --activate`. |
+| Preflight checks pass (Env/SQL/Tests) | 2025-10-16T22:13:40Z | `make m2-preflight` completed without errors. |
+| Webhook smoke (dry) reviewed | — | Outstanding. |
+| Webhook smoke (live) returns 200 | 2025-10-16T22:18:18Z | Manual `/publish` call returned HTTP 200 with embed payload. |
+| Publisher metrics visible (/metrics.json) | — | Not captured this run. |
+| Discord embed formatter tests pass | — | Deferred; depends on poller completion. |
+| n8n echo_publisher imported + creds set | 2025-10-16T22:31:41Z | `n8n list:workflow` confirms `PMOVES • Content Published → Discord v1` active. |
+| n8n activated (poller → echo publisher) | 2025-10-16T22:20:00Z | Activation logs present; no executions recorded (cron scheduler idle—even `Debug Cron` workflow `CCtEGP3jHXZEUu3P` never fires). |
+| Supabase row seeded (status=approved) | 2025-10-16T22:11:47Z | `studio_board` row id 38 seeded via Supabase REST with `status='approved'`. |
+| Agent Zero received content.publish.approved.v1 | — | Blocked by inactive poller. |
+| Supabase row patched (status=published, publish_event_sent_at) | — | Blocked by inactive poller. |
+| Discord embed received for content.published.v1 | — | Blocked by inactive poller. |
 
 | Discord embed render (sample payload) |  | `cb3c36` |
 
@@ -197,6 +197,7 @@ The following checklist captures what could be validated within the hosted Codex
 
 ### Follow-up Guardrails & Work Items (Identified 2025-10-23)
 
+- Investigate why active n8n cron workflows never enter the `execution_entity` table; confirm the instance is running in regular mode (not CLI), review `EXECUTIONS_MODE`/runner settings, and capture scheduler logs for the runbook.
 - Provision a reproducible local automation profile that bundles Supabase, Agent Zero, and n8n so the activation checklist can be executed without manual service orchestration.
 - Add mock credentials or a dedicated staging webhook to `.env.example` to clarify which secrets must be sourced before running the workflows; document rotation expectations.
 - Automate evidence capture (timestamps, log snapshots) through a scriptable checklist to reduce manual copy/paste during validation sessions.
