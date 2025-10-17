@@ -88,7 +88,15 @@ asyncio.run(main())
 PY
 ```
 
-Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags. Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
+Expected: the Discord channel receives a rich embed with the Smoke Story title, namespace, published path, thumbnail, and tags.
+
+- If the payload includes `duration`, the embed shows it as `H:MM:SS` (e.g., `0:05:32`).
+- A `thumbnail_url` on the payload or its `meta` block overrides auto-selected cover art thumbnails.
+- Jellyfin items emit deep links that append `&startTime=<seconds>` when timestamps (`start_time`, `start`, `t`) are present.
+- Tags are quoted ( `` `tag` `` ) and capped at the first twelve entries so Discord renders them cleanly.
+- When a summary is present alongside other description content, the remainder appears in a `Summary` field (truncated to Discord's limits) so operators can confirm spillover handling.
+
+Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
 - `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
@@ -115,7 +123,13 @@ What the smoke covers now (12 checks):
 
 ## 6) Geometry Bus (CHIT) — Extended Deep Dive
 
-The smoke harness already exercises the ingest/jump/calibration flow with a synthetic CGP. Use the following manual walkthrough when you want to debug real packets, sign/encrypt payloads, or explore the decoders:
+### Mindmap Graph (Neo4j)
+1. Seed demo nodes for `/mindmap`: `make mindmap-seed` (requires the `neo4j` service running).
+2. Fetch the seeded constellation: `make mindmap-smoke`.
+   - Expected: JSON payload with `items` containing the `8c1b7a8c-7b38-4a6b-9bc3-3f1fdc9a1111` constellation points/media.
+   - If you see `Neo4j unavailable`, confirm the container is healthy and `NEO4J_PASSWORD` matches the password you supplied when first starting the container.
+
+## 6) Geometry Bus (CHIT) — End-to-end
 
 1. Create minimal CGP payload `cgp.json`:
    ```json
@@ -206,7 +220,10 @@ The smoke harness already exercises the ingest/jump/calibration flow with a synt
 5. Click “Send Current CGP” to share the last geometry over the DataChannel; add a passphrase to sign the CGP capsule.
 6. Toggle “Encrypt anchors” and set a passphrase to AES‑GCM encrypt constellation anchors client‑side before sending; the receiving gateway can decrypt if `CHIT_DECRYPT_ANCHORS=true`.
 
-## 8) Mesh Handshake (NATS)
+### Quick DB smoke (Supabase)
+ - `make smoke-geometry-db` — verifies the seeded demo constellation is reachable via PostgREST (`constellations`, `shape_points`, and `shape_index`). Ensure `SUPABASE_REST_URL` or `SUPA_REST_URL` is exported; defaults to `http://localhost:3000`.
+ 
+ ## 8) Mesh Handshake (NATS)
 
 1. Start mesh: `make mesh-up` (starts NATS + mesh-agent).
 2. In the UI, click “Send Signed CGP → Mesh”. This calls the gateway, which publishes to `mesh.shape.handshake.v1`.
@@ -312,6 +329,8 @@ HTTP endpoints checked:
 - Outgoing `content.published.v1` envelopes now include the source `description`, `tags`, and merged `meta` fields, plus optional
   `public_url`/`jellyfin_item_id` whenever Jellyfin confirms a library refresh.
 - Configure `MEDIA_LIBRARY_PUBLIC_BASE_URL` to advertise HTTP paths for the downloaded artifacts.
+- Regression coverage now includes a unit test that simulates a MinIO download failure and asserts the publisher emits the
+  `content.publish.failed.v1` envelope with merged metadata and audit context (`test_handle_download_failed_emits_failure_envelope`).
 
 ## Playlist/Channel Ingestion
 

@@ -51,6 +51,7 @@ This working session establishes the concrete implementation tasks needed to clo
   3. Run the loader via cypher-shell: `cat pmoves/neo4j/cypher/002_load_person_aliases.cypher | docker exec -i pmoves-neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD"` (adjust container name/credentials for local setups).
   4. Capture the returned `persona_slug`, `alias`, and `confidence` rows in the session log for validation.
 - **Next iteration hooks**: Extend the CSV with Jellyfin export columns (`jellyfin_item_id`, `season`, etc.) once data exports are scheduled, and wire automated validation into `services/graph-linker` migrations.
+- **Mindmap smoke wiring**: `pmoves/neo4j/cypher/003_seed_chit_mindmap.cypher` seeds the basketball demo constellation powering `/mindmap/{constellation_id}`. With the stack running, execute `make mindmap-seed` then `make mindmap-smoke` to verify Neo4j connectivity; the workflow is documented in `pmoves/docs/SMOKETESTS.md`.
 
 #### 3.1.2 Relation extraction requirements (feeds `services/hi-rag-gateway`, `services/retrieval-eval`)
 - **Inputs**:
@@ -124,22 +125,22 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | Step | Timestamp (UTC) | Evidence Link/Note |
 | --- | --- | --- |
 
-| agent-zero health OK | 2025-10-16T22:14:12Z | `make m2-preflight` → Agent Zero `/healthz` reports `nats.connected=true`. |
-| jellyfin-bridge health OK | — | Not exercised during this session. |
-| publisher-discord health OK | 2025-10-16T22:18:05Z | `make health-publisher-discord` shows `webhook_success=1` against `mock-discord`. |
-| Discord webhook ping successful | 2025-10-16T22:18:12Z | POST `/publish` test delivered to `mock-discord`; logged via publisher container. |
-| n8n approval_poller imported + creds set | 2025-10-16T22:30:36Z | `docker exec pmoves-n8n-1 n8n import:workflow --input=/tmp/approval_poller.json --activate`. |
-| Preflight checks pass (Env/SQL/Tests) | 2025-10-16T22:13:40Z | `make m2-preflight` completed without errors. |
-| Webhook smoke (dry) reviewed | — | Outstanding. |
-| Webhook smoke (live) returns 200 | 2025-10-16T22:18:18Z | Manual `/publish` call returned HTTP 200 with embed payload. |
-| Publisher metrics visible (/metrics.json) | — | Not captured this run. |
-| Discord embed formatter tests pass | — | Deferred; depends on poller completion. |
-| n8n echo_publisher imported + creds set | 2025-10-16T22:31:41Z | `n8n list:workflow` confirms `PMOVES • Content Published → Discord v1` active. |
-| n8n activated (poller → echo publisher) | 2025-10-16T22:20:00Z | Activation logs present; no executions recorded (cron scheduler idle—even `Debug Cron` workflow `CCtEGP3jHXZEUu3P` never fires). |
-| Supabase row seeded (status=approved) | 2025-10-16T22:11:47Z | `studio_board` row id 38 seeded via Supabase REST with `status='approved'`. |
-| Agent Zero received content.publish.approved.v1 | — | Blocked by inactive poller. |
-| Supabase row patched (status=published, publish_event_sent_at) | — | Blocked by inactive poller. |
-| Discord embed received for content.published.v1 | — | Blocked by inactive poller. |
+| agent-zero health OK |  |  |
+| jellyfin-bridge health OK |  |  |
+| publisher-discord health OK |  |  |
+| Discord webhook ping successful |  |  |
+| n8n approval_poller imported + creds set |  |  |
+| Preflight checks pass (Env/SQL/Tests) |  |  |
+| Webhook smoke (dry) reviewed |  |  |
+| Webhook smoke (live) returns 200 |  |  |
+| Publisher metrics visible (/metrics.json) |  | Automated via `pytest pmoves/services/publisher/tests -k metrics` (`test_metrics_server_serves_json_payloads`). |
+| Discord embed formatter tests pass |  |  |
+| n8n echo_publisher imported + creds set |  |  |
+| n8n activated (poller → echo publisher) |  |  |
+| Supabase row seeded (status=approved) |  |  |
+| Agent Zero received content.publish.approved.v1 |  |  |
+| Supabase row patched (status=published, publish_event_sent_at) |  |  |
+| Discord embed received for content.published.v1 |  |  |
 
 | Discord embed render (sample payload) |  | `cb3c36` |
 
@@ -171,6 +172,7 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | gateway emitted `geometry.cgp.v1` | _2025-10-07T00:06:48Z_ | Tail `services/gateway/logs/*.log` – observed envelope with `constellation_id` + `shape_id`. |
 | ShapeStore warm (gateway) | _2025-10-07T00:06:53Z_ | `ShapeStore.warm_from_db` log confirms cache hydrate from PostgREST (`limit=64`). |
 | PostgREST verification | _2025-10-07T00:07:05Z_ | `GET /pmoves_core.shape_index?select=shape_id,updated_at&order=updated_at.desc&limit=5` returns cached CGP IDs matching log entries. |
+| Seed smoke | _todo_ | `make smoke-geometry-db` confirms seeded anchors/constellations/shape points via PostgREST. |
 
 ## 2025-09-30 – Rollout Attempt Notes (Codex environment)
 
