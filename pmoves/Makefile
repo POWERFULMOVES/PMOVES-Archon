@@ -147,7 +147,10 @@ up-agents:
 
 .PHONY: up-n8n
 up-n8n:
-	docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.n8n.yml up -d n8n
+	@env_flags=""; \
+	 if [ -f .env ]; then env_flags="--env-file .env"; fi; \
+	 if [ -f .env.local ]; then env_flags="$$env_flags --env-file .env.local"; fi; \
+	 docker compose $$env_flags -p $(PROJECT) -f docker-compose.yml -f docker-compose.n8n.yml up -d n8n n8n-runners
 
 # Status helper
 ps:

@@ -195,28 +195,22 @@ OpenAI-compatible presets:
 
 ## n8n (Docker) Quick Start
 
-- Bring up n8n: `make up-n8n` → UI at `http://localhost:5678`
+- Bring up n8n: `make up-n8n` → UI at `http://localhost:5678` (launches `n8n` and the `n8n-runners` sidecar)
 - Env inside n8n (prewired in compose override):
   - `SUPABASE_REST_URL=http://host.docker.internal:54321/rest/v1` (Supabase CLI)
   - `SUPABASE_SERVICE_ROLE_KEY=<paste service role key>`
   - `AGENT_ZERO_BASE_URL=http://agent-zero:8080`
   - `DISCORD_WEBHOOK_URL` + `DISCORD_WEBHOOK_USERNAME`
+  - `N8N_RUNNERS_AUTH_TOKEN=<shared secret>` (same value powers the sidecar connection; stash in `.env.local` and rotate if leaked)
 - Import flows from `pmoves/n8n/flows/*.json` and keep inactive until secrets are set.
 - Activate poller then echo publisher; verify Discord receives an embed.
 
 ### Alternative: one‑liner docker run (Windows/Linux)
 
+> **Note:** one-off `docker run` commands only support manual executions. For cron triggers, rely on the compose stack so the runners sidecar can attach.
+
 ```sh
-docker run --name n8n --rm -it \
-  -p 5678:5678 \
-  --network pmoves-net \
-  -e N8N_PORT=5678 -e N8N_PROTOCOL=http -e N8N_HOST=localhost -e WEBHOOK_URL=http://localhost:5678 \
-  -e SUPABASE_REST_URL=http://host.docker.internal:54321/rest/v1 \
-  -e SUPABASE_SERVICE_ROLE_KEY="<service_role_key>" \
-  -e AGENT_ZERO_BASE_URL=http://agent-zero:8080 \
-  -e DISCORD_WEBHOOK_URL="<discord_webhook_url>" \
-  -e DISCORD_WEBHOOK_USERNAME="PMOVES Publisher" \
-  n8nio/n8n:latest
+docker compose --project-name pmoves -f pmoves/docker-compose.n8n.yml up n8n n8n-runners
 ```
 
 ## Avatars & Realtime (full Supabase)
