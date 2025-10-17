@@ -76,7 +76,9 @@ services:
     profiles: ["data"]
     networks: [pmoves]
   hi-rag-gateway:
-    build: ./services/hi-rag-gateway
+    build:
+      context: ./services
+      dockerfile: hi-rag-gateway/Dockerfile
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
@@ -103,8 +105,10 @@ services:
     depends_on:
       qdrant:
         condition: service_started
+        required: false
       neo4j:
         condition: service_healthy
+        required: false
     networks: [pmoves]
   retrieval-eval:
     build: ./services/retrieval-eval
