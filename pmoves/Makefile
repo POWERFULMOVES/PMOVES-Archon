@@ -425,6 +425,7 @@ chit-contract-check:
 .PHONY: jellyfin-verify
 jellyfin-verify:
 	@bash -c 'set -euo pipefail; \
+	 if [ -f .env ]; then set -a; . .env; set +a; fi; \
 	 if [ -f env.jellyfin-ai ]; then set -a; . env.jellyfin-ai; set +a; fi; \
 	 python3 "$(CURDIR)/../scripts/check_jellyfin_credentials.py"'
 

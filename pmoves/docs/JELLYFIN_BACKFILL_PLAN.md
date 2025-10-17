@@ -114,3 +114,49 @@ Add `--dry-run` and batching before production use.
 - Should we log backfill runs in a dedicated audit table?  
 - How do we handle assets that no longer exist in Jellyfin?  
 - Do we resend Discord embeds for every backfilled asset or only update Supabase metadata?
+
+---
+
+## Implementation Status
+
+**Updated: 2025-10-17**
+
+### Completed
+
+- ✅ Jellyfin server operational (v10.10.7) on port 8096
+- ✅ Device ID persisted correctly in `jellyfin-ai/config/data/data/device.txt`
+- ✅ Published server URL configured via `JELLYFIN_PUBLISHED_URL`
+- ✅ Web UI accessible and cache clear utility created
+- ✅ Docker compose volume mounts configured for persistence
+
+### Blocked/In Progress
+
+- ⚠️ **JELLYFIN_API_KEY** not set - requires user creation and API key generation
+- ⚠️ **JELLYFIN_USER_ID** not set - obtained during user setup
+- ⚠️ No published content in `studio_board` yet (empty result set)
+- 🔄 Backfill script (`pmoves/scripts/backfill_jellyfin_metadata.py`) needs implementation
+
+### Next Steps
+
+1. **Create Jellyfin admin user**:
+   - Access <http://localhost:8096> and complete initial setup wizard
+   - Create admin user account
+   - Navigate to Dashboard → API Keys → Create new key for "PMOVES Backfill"
+   - Copy API key and user ID to `.env`
+
+2. **Implement backfill script**:
+
+   ```bash
+   touch pmoves/scripts/backfill_jellyfin_metadata.py
+   chmod +x pmoves/scripts/backfill_jellyfin_metadata.py
+   ```
+
+3. **Test with sample data**:
+   - Create test content in studio_board with `status='published'`
+   - Run backfill script in dry-run mode
+   - Verify payload structure matches `content.published.v1` schema
+
+4. **Execute production backfill**:
+   - Run with `--limit 25` to batch process
+   - Monitor Discord webhook for embed delivery
+   - Verify Supabase metadata updates
