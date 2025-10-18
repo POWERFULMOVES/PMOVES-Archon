@@ -1,5 +1,5 @@
 # PMOVES v5 • Documentation Index
-_Last updated: 2025-10-13_
+_Last updated: 2025-10-18_
 
 - **Creator Pipeline** — `CREATOR_PIPELINE.md`
 - **ComfyUI End‑to‑End** — `COMFYUI_END_TO_END.md`
@@ -12,7 +12,7 @@ _Last updated: 2025-10-13_
 - **Smoke Tests** — `SMOKETESTS.md`
 - **Local CI Checklists** — `LOCAL_CI_CHECKS.md`
 - **Archon Updates + Supabase wiring** — `archonupdateforpmoves.md`
-- **Archon Service README** — `pmoves/services/archon/README.md`
+- **Archon Service README** — `../services/archon/README.md`
 - **n8n Setup (Supabase→Agent Zero→Discord)** — `N8N_SETUP.md`
 - **Supabase→Discord Playbook** — `SUPABASE_DISCORD_AUTOMATION.md`
 - **Tailnet + Discord Deployment** — `TAILSCALE_DISCORD_RUNBOOK.md`
@@ -42,3 +42,11 @@ _Last updated: 2025-10-13_
 - [x] `RENDER_COMPLETION_WEBHOOK.md`
 
 - **Next Steps** — current plan: [`NEXT_STEPS.md`](NEXT_STEPS.md); archive: [`NEXT_STEPS_2025-09-08`](archive/NEXT_STEPS_2025-09-08.md)
+
+## Health + Finance Integrations
+- Compose bundle (Wger + Firefly III): `WGER - Firefly iii compose -integrations/`
+- Service guides: see `../services/wger/README.md` and `../services/firefly-iii/README.md`
+
+## Service Docs Index
+
+- Full per‑service guides live under `pmoves/docs/services/`. Start here: [`../services/README.md`](../services/README.md)
