@@ -42,6 +42,12 @@ MINIO_SECURE = (os.environ.get("MINIO_SECURE","false").lower() == "true")
 DEFAULT_BUCKET = os.environ.get("YT_BUCKET","assets")
 DEFAULT_NAMESPACE = os.environ.get("INDEXER_NAMESPACE","pmoves")
 SUPA = os.environ.get("SUPA_REST_URL","http://postgrest:3000")
+SUPA_SERVICE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_SERVICE_KEY")
+    or os.environ.get("SUPABASE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
+)
 NATS_URL = (os.environ.get("NATS_URL") or "").strip()
 YT_NATS_ENABLE = os.environ.get("YT_NATS_ENABLE", "false").lower() == "true"
 FFW_URL = os.environ.get("FFW_URL","http://ffmpeg-whisper:8078")
@@ -159,7 +165,10 @@ def base_prefix(video_id: str):
 
 def supa_insert(table: str, row: Dict[str,Any]):
     try:
-        r = requests.post(f"{SUPA}/{table}", headers={'content-type':'application/json'}, data=json.dumps(row), timeout=20)
+        headers = {'content-type': 'application/json'}
+        if SUPA_SERVICE_KEY:
+            headers.update({'apikey': SUPA_SERVICE_KEY, 'Authorization': f"Bearer {SUPA_SERVICE_KEY}"})
+        r = requests.post(f"{SUPA}/{table}", headers=headers, data=json.dumps(row), timeout=20)
         r.raise_for_status(); return r.json()
     except Exception:
         return None
@@ -169,7 +178,10 @@ def supa_upsert(table: str, row: Dict[str,Any], on_conflict: Optional[str]=None)
         url = f"{SUPA}/{table}"
         if on_conflict:
             url += f"?on_conflict={on_conflict}"
-        r = requests.post(url, headers={'content-type':'application/json','prefer':'resolution=merge-duplicates'}, data=json.dumps(row), timeout=20)
+        headers = {'content-type': 'application/json', 'prefer': 'resolution=merge-duplicates'}
+        if SUPA_SERVICE_KEY:
+            headers.update({'apikey': SUPA_SERVICE_KEY, 'Authorization': f"Bearer {SUPA_SERVICE_KEY}"})
+        r = requests.post(url, headers=headers, data=json.dumps(row), timeout=20)
         r.raise_for_status(); return r.json()
     except Exception:
         return None
@@ -184,7 +196,10 @@ def supa_update(table: str, match: Dict[str,Any], patch: Dict[str,Any]):
             else:
                 qs.append(f"{k}=eq.{json.dumps(v)}")
         url = f"{SUPA}/{table}?" + "&".join(qs)
-        r = requests.patch(url, headers={'content-type':'application/json'}, data=json.dumps(patch), timeout=20)
+        headers = {'content-type': 'application/json'}
+        if SUPA_SERVICE_KEY:
+            headers.update({'apikey': SUPA_SERVICE_KEY, 'Authorization': f"Bearer {SUPA_SERVICE_KEY}"})
+        r = requests.patch(url, headers=headers, data=json.dumps(patch), timeout=20)
         r.raise_for_status(); return r.json()
     except Exception:
         return None
@@ -198,7 +213,10 @@ def supa_get(table: str, match: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
             else:
                 qs.append(f"{k}=eq.{json.dumps(v)}")
         url = f"{SUPA}/{table}?" + "&".join(qs)
-        r = requests.get(url, timeout=20)
+        headers: Dict[str, str] = {}
+        if SUPA_SERVICE_KEY:
+            headers.update({'apikey': SUPA_SERVICE_KEY, 'Authorization': f"Bearer {SUPA_SERVICE_KEY}"})
+        r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status(); return r.json()
     except Exception:
         return None
@@ -681,6 +699,20 @@ def _normalise(values: List[float]) -> List[float]:
 
 def _build_cgp(video_id: str, chunks: List[Dict[str,Any]], title: Optional[str], namespace: str) -> Dict[str,Any]:
     pack = get_builder_pack(namespace, 'video')
+    if not pack:
+        # Fallback to direct Supabase lookup when the shared helper is unavailable in-container.
+        packs = supa_get(
+            'geometry_parameter_packs',
+            {
+                'namespace': namespace,
+                'modality': 'video',
+                'pack_type': 'cg_builder',
+                'status': 'active',
+            },
+        ) or []
+        if isinstance(packs, list) and packs:
+            packs.sort(key=lambda row: row.get('created_at') or '', reverse=True)
+            pack = packs[0]
     params = (pack or {}).get('params') or {}
 
     nbins = int(params.get('bins') or 32)
@@ -784,9 +816,12 @@ def yt_smoke_seed_pack(body: Dict[str, Any] = Body({})):
         'fitness': body.get('fitness') or 0.9,
     }
     try:
+        headers = {'content-type': 'application/json', 'prefer': 'return=representation'}
+        if SUPA_SERVICE_KEY:
+            headers.update({'apikey': SUPA_SERVICE_KEY, 'Authorization': f"Bearer {SUPA_SERVICE_KEY}"})
         resp = requests.post(
             f"{SUPA}/geometry_parameter_packs",
-            headers={'content-type': 'application/json', 'prefer': 'return=representation'},
+            headers=headers,
             data=json.dumps(payload),
             timeout=20,
         )
