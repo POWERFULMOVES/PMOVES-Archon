@@ -406,14 +406,19 @@ def yt_playlist(body: Dict[str,Any] = Body(...)):
     job_id = _job_create('playlist', {'url': url, 'namespace': ns, 'bucket': bucket, 'count': len(entries)})
     if job_id: _job_update(job_id, 'running')
     results = []
+    # Resolve rate limit per-call to respect runtime env overrides in tests
+    try:
+        rate_limit = float(os.environ.get('YT_RATE_LIMIT', str(YT_RATE_LIMIT)))
+    except Exception:
+        rate_limit = YT_RATE_LIMIT
     for i, e in enumerate(entries):
         vid_url = f"https://www.youtube.com/watch?v={e['id']}" if len(e['id']) == 11 else e['id']
         if job_id: _item_upsert(job_id, e['id'], 'running', None, {'title': e.get('title')})
         r = _ingest_one(vid_url, ns, bucket)
         results.append({'id': e['id'], **r})
         if job_id: _item_upsert(job_id, e['id'], 'completed' if r.get('ok') else 'failed', r.get('error'))
-        if YT_RATE_LIMIT > 0:
-            time.sleep(YT_RATE_LIMIT)
+        if rate_limit > 0:
+            time.sleep(rate_limit)
     if job_id: _job_update(job_id, 'completed')
     return {'ok': True, 'job_id': job_id, 'count': len(results), 'results': results}
 
