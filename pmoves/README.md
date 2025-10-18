@@ -32,6 +32,7 @@
 - `make up-yt` — YouTube ingest stack if you want to start it separately.
 - `make up-nats` — spins up the NATS broker and updates `.env.local` with `YT_NATS_ENABLE=true` and the default connection URL. Required before enabling the agents profile.
 - Additional helpers: `make ps`, `make down`, `make clean`. See `docs/MAKE_TARGETS.md` for the full catalogue.
+- Open Notebook workspace: `make notebook-up` starts the Streamlit UI (8502) and REST API (5055) defined in `docker-compose.open-notebook.yml`. Populate `.env.local` with `OPEN_NOTEBOOK_API_URL` (defaults to `http://localhost:5055`) plus either `OPEN_NOTEBOOK_PASSWORD` or `OPEN_NOTEBOOK_API_TOKEN` before launching. Use `make notebook-logs` for live output and `make notebook-down` to stop the container while preserving data in `pmoves/data/open-notebook/`.
 
 ### Dev Environment (Conda + Windows/macOS/Linux)
 
@@ -55,6 +56,8 @@ Services
 - `render-webhook` (8085): ComfyUI completion → Supabase Studio. See `docs/RENDER_COMPLETION_WEBHOOK.md`.
 - `langextract` (8084): Core extraction service (text/XML → chunks, errors). See `docs/LANGEXTRACT.md`.
 - `extract-worker` (8083): Ingests LangExtract output to Qdrant/Meili and Supabase.
+- `notebook-sync` (8095): Polls the Open Notebook REST API, normalizes payloads, and pushes them through LangExtract + extrac
+t-worker to keep Qdrant/Meili/Supabase aligned.
 - Agents (profile `agents`): `nats`, `agent-zero` (8080), `archon` (8091) — opt-in.
 
 Notes
