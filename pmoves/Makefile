@@ -314,6 +314,18 @@ smoke-rerank:
 	curl -s localhost:8087/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7, "use_rerank": true}' | jq .
 	@echo "If used_rerank=false, ensure internet/model access, or set RERANK_ENABLE=false."
 
+.PHONY: retrieval-eval-smoke
+retrieval-eval-smoke:
+	@set -eu; \
+	DATASETS=$$(ls services/retrieval-eval/datasets/*.jsonl 2>/dev/null || true); \
+	if [ -z "$$DATASETS" ]; then \
+	  echo "No retrieval-eval datasets found under services/retrieval-eval/datasets/."; \
+	  exit 1; \
+	fi; \
+	for ds in $$DATASETS; do \
+	  echo "→ Evaluating $$ds"; \
+	  $(PYTHON) services/retrieval-eval/evaluate.py "$$ds" --no-query-details; \
+	done
 .PHONY: eval-jsonl
 eval-jsonl:
 	@if [ -z "$(FILE)" ]; then echo "Usage: make eval-jsonl FILE=/abs/path/queries.jsonl [K=10]"; exit 1; fi
