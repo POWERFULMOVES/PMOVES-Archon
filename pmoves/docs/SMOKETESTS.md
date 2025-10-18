@@ -99,7 +99,7 @@ Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-What the smoke covers now (12 checks):
+What the smoke covers now (13 checks):
 1) Qdrant ready (6333)
 2) Meilisearch health (7700, warning only)
 3) Neo4j UI reachable (7474, warning only)
@@ -110,8 +110,9 @@ What the smoke covers now (12 checks):
 8) Verify a `studio_board` row exists via PostgREST
 9) Run a Hi-RAG v2 query (8087)
 10) Agent Zero `/healthz` reports the JetStream controller running
-11) POST a generated `geometry.cgp.v1` packet to `/geometry/event`
-12) Confirm the ShapeStore locator + calibration report via `/shape/point/{id}/jump` and `/geometry/calibration/report`
+11) Seed an active geometry builder pack via `pmoves-yt`
+12) Build a CGP through `pmoves-yt` and assert the emitted meta includes the pack id
+13) Confirm Geometry Bus ingest, ShapeStore jump, and calibration report via `/geometry/event`, `/shape/point/{id}/jump`, and `/geometry/calibration/report`
 
 ## 6) Geometry Bus (CHIT) — Extended Deep Dive
 
@@ -262,8 +263,8 @@ Steps
 - What it checks:
   - /yt/info yields a valid `video_id`
   - /yt/ingest downloads, extracts audio, transcribes (faster-whisper)
-  - /yt/emit segments transcript into chunks and posts them to /hirag/upsert-batch; emits CGP to /geometry/event
-  - /shape/point/p:yt:<id>:0/jump returns a valid video locator
+  - /yt/emit segments transcript into chunks and posts them to /hirag/upsert-batch; emits CGP to /geometry/event (now with geometry pack metadata when available)
+  - /shape/point/p:yt:{id}:0/jump returns a valid video locator
 
 Optional
 - Summarize with Gemma (Ollama default):
