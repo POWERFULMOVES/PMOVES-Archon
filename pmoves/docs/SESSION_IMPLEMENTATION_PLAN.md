@@ -37,12 +37,14 @@ This working session establishes the concrete implementation tasks needed to clo
 - 2025-10-12T21:56:33Z — `make -C pmoves yt-emit-smoke URL=https://www.youtube.com/watch?v=dQw4w9WgXcQ` (lyrics profile) completed cleanly; geometry jump assertion passed with the new jq string comparison.
 - 2025-10-13T01:04:09Z — `make -C pmoves smoke-archon` succeeded after pointing `SUPABASE_URL` to `http://postgrest:3000` and restarting the Supabase CLI stack; Archon healthz reports `{"status":"ok","service":"archon"}`.
 - 2025-10-13T01:55:00Z — Rebuilt `pmoves-archon` image with `playwright` Chromium preinstalled and switched `SUPABASE_URL` to the Supabase CLI gateway (`http://host.docker.internal:54321`) so the vendor Archon backend initializes successfully.
+- 2025-10-18T03:04:28Z — Rebuilt `pmoves-archon` with the expanded Supabase client shim, applied `GRANT` permissions on `public.archon_prompts`, and verified the prompt loader logs `Loaded 2 prompts into memory` after `docker compose --profile agents --profile orchestration up -d archon`.
 
 ## 3. Broader Roadmap Prep (M3–M5)
 
 ### 3.1 Graph & Retrieval (Milestone M3)
 
 #### 3.1.1 Alias dataset & loader drafting
+
 - **Dataset location**: `pmoves/neo4j/datasets/person_aliases_seed.csv` now tracks canonical persona slugs, preferred display names, alias strings, provenance, and seed confidence. Initial rows cover POWERFULMOVES/DARKXSIDE handles gathered from community submissions and Jellyfin exports.
 - **Cypher loader**: `pmoves/neo4j/cypher/002_load_person_aliases.cypher` ingests the CSV, creating/refreshing `Persona` and `Alias` nodes plus `HAS_ALIAS` edges with optional confidence metadata and timestamps.
 - **Execution steps**:
@@ -53,6 +55,7 @@ This working session establishes the concrete implementation tasks needed to clo
 - **Next iteration hooks**: Extend the CSV with Jellyfin export columns (`jellyfin_item_id`, `season`, etc.) once data exports are scheduled, and wire automated validation into `services/graph-linker` migrations.
 
 #### 3.1.2 Relation extraction requirements (feeds `services/hi-rag-gateway`, `services/retrieval-eval`)
+
 - **Inputs**:
   - Jellyfin enriched metadata (title, summary, tags, people credits).
   - Agent Zero conversation transcripts with turn-level timestamps.
@@ -68,6 +71,7 @@ This working session establishes the concrete implementation tasks needed to clo
 - **Tooling**: evaluate spaCy dependency parser for baseline relation candidates, with OpenAI function-calling fallback when spaCy confidence <0.6. Results flow into `services/retrieval-eval` notebooks for scoring before backfilling Neo4j.
 
 #### 3.1.3 Reranker parameter sweep & persona publish gate
+
 - **Datasets**: combine Agent Zero Q&A transcripts, Jellyfin synopsis embeddings, and retrieval-eval hard negatives (see `pmoves/datasets/retrieval_eval/...`).
 - **Toggles under test**: `HIRAG_RERANKER__MODEL` (qwen2 vs jina v2), `HIRAG_RERANKER__USE_CHATML`, `HIRAG_RERANKER__MAX_CONTEXT`, and prompt temperature overrides surfaced in `services/hi-rag-gateway` feature flags.
 - **Execution loop**:
@@ -79,10 +83,12 @@ This working session establishes the concrete implementation tasks needed to clo
 - **Tooling updates**: add CLI helper (`scripts/reranker_sweep.py`) to orchestrate MinIO uploads + manifest stamping, and extend `services/hi-rag-gateway` configs to surface new toggle values.
 
 ### 3.2 Formats & Scale (Milestone M4)
+
 - Document prerequisites for DOCX/PPTX ingestion (LibreOffice container image, conversion queue) and assign research spikes.
 - Specify GPU passthrough and Tailscale policy updates required for Proxmox deployment bundles.
 
 ### 3.3 Studio & Ops (Milestone M5)
+
 - Capture Studio approval UI requirements (Supabase quick-view, moderation controls) to inform backlog grooming.
 - List CI/CD gating targets: retrieval-eval coverage thresholds, artifact retention policy, backup cadence.
 
@@ -104,13 +110,15 @@ This working session establishes the concrete implementation tasks needed to clo
 - [ ] Confirm Supabase RLS hardening research tasks have owners and deadlines noted in the project tracker.
 
 ### Follow-up issues for scheduling
+
 - **Data exports**: Schedule Jellyfin metadata and MinIO transcript dumps needed for expanded alias coverage and relation extraction labeling (owner: Data Ops).
 - **Labeling sprint**: Book 1-day annotation block with community reviewers to generate 50 gold relations for retrieval-eval metrics (owner: Community manager).
 - **Tooling uplift**: Ticket `scripts/reranker_sweep.py` implementation and hi-rag-gateway config surfacing; link to reranker sweep milestone.
 
 ---
 
-**References**
+### References
+
 - `pmoves/docs/SUPABASE_DISCORD_AUTOMATION.md`
 - `pmoves/docs/NEXT_STEPS.md`
 - `pmoves/docs/ROADMAP.md`
@@ -131,6 +139,9 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | n8n approval_poller imported + creds set | 2025-10-17T15:23:02Z | `n8n import:workflow --input=/tmp/approval_poller.json --activate` after JSON normalization. |
 | n8n owner + API key rotated | 2025-10-17T16:34:47Z | Created owner user, generated `PMOVES-N8N` API key, updated `.env`/`.env.local`, and force-recreated n8n containers. |
 | Preflight checks pass (Env/SQL/Tests) | 2025-10-16T22:13:40Z | `make m2-preflight` completed without errors. |
+| Jellyfin credential smoke (`make jellyfin-verify`) | 2025-10-18T02:15:27Z | Script now autofixes `ScrollBehavior` display prefs for Kodi/web clients; `/Users/{id}/Views` timeout still observed on baseline stack. |
+| Jellyfin stack rebuilt via `make up-jellyfin-ai` | 2025-10-18T02:29:56Z | Followed Kodi rollout guide: composed down existing services, restarted stack, reran `make jellyfin-verify` (still warns on `/Views` timeout, but ScrollBehavior patched). |
+| Full smoke harness (`make smoke`) | 2025-10-18T02:15:27Z | 13/13 steps pass (Meilisearch UI warning expected); baseline captured prior to Jellyfin/Kodi rebuild. |
 | Webhook smoke (dry) reviewed | — | Outstanding. |
 | Webhook smoke (live) returns 200 | 2025-10-16T22:18:18Z | Manual `/publish` call returned HTTP 200 with embed payload. |
 | Publisher metrics visible (/metrics.json) | — | Not captured this run. |
@@ -139,6 +150,7 @@ Use this section to capture evidence as steps are executed. Attach screenshots/l
 | n8n activated (poller → echo publisher) | 2025-10-17T15:25:46Z | Container restart logged activation for both workflows; scheduler still idle (0 executions). |
 | Supabase REST URL correction | 2025-10-17T16:45:30Z | Set `SUPABASE_REST_URL=http://host.docker.internal:54321/rest/v1` in `.env.local` so n8n container can reach Supabase CLI (was `localhost`, causing connection refused). |
 | Supabase row seeded (status=approved) | 2025-10-17T15:20:52Z | `bash tools/seed_studio_board.sh "Automation Live Demo" s3://outputs/demo/live.png` created row id 39. |
+| Archon prompt loader ok | 2025-10-18T03:04:28Z | `docker compose --profile agents --profile orchestration logs archon` shows Supabase fetch success and prompt count (2). |
 | Agent Zero received content.publish.approved.v1 | — | Blocked by inactive poller. |
 | Supabase row patched (status=published, publish_event_sent_at) | — | Blocked by inactive poller. |
 | Discord embed received for content.published.v1 | — | Blocked by inactive poller. |
