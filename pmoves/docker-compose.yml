@@ -149,7 +149,7 @@ services:
     restart: unless-stopped
     env_file: [.env, .env.local]
     environment:
-      - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
+      - SUPA_REST_URL=${SUPA_REST_URL:-http://host.docker.internal:54321/rest/v1}
       - DEFAULT_NAMESPACE=${INDEXER_NAMESPACE:-pmoves}
       - RENDER_WEBHOOK_SHARED_SECRET=${RENDER_WEBHOOK_SHARED_SECRET}
       - RENDER_AUTO_APPROVE=${RENDER_AUTO_APPROVE:-false}
@@ -157,6 +157,7 @@ services:
     profiles: ["orchestration","workers"]
     networks: [pmoves]
     extra_hosts:
+      - "postgrest:host-gateway"
       - "host.docker.internal:host-gateway"
 
   extract-worker:
@@ -556,4 +557,4 @@ volumes:
   notebook-sync-data: {}
 networks:
   pmoves:
-    name: pmoves-net
+    name: pmoves-stack
