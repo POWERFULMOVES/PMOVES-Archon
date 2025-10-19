@@ -248,6 +248,7 @@ docker run --name n8n --rm -it \
 ## Notes
 
 - A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the Supabase CLI network host `http://api.supabase.internal:8000/rest/v1`). Host-side scripts continue to use `SUPA_REST_URL` (`http://127.0.0.1:54321/rest/v1`). Override both if you point the stack at a remote Supabase instance. When the Supabase CLI stack is running, `make up` auto-runs the `supabase-bootstrap` helper so schema migrations and seeds are replayed before smoke tests.
+- Realtime DNS fallback: if `hi-rag-gateway-v2` finds `SUPABASE_REALTIME_URL` is set but its hostname doesn’t resolve inside the container (e.g., `api.supabase.internal` not shared on the compose network), it now auto-derives a working websocket endpoint from `SUPA_REST_INTERNAL_URL`/`SUPA_REST_URL` (host‑gateway safe). To force an explicit target, set `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1/websocket` in `.env.local`.
 - Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` + `neo4j/cypher/*.cypher` scripts wire in the CHIT mind-map aliases. Run `make neo4j-bootstrap` (or rely on `make up` once the helper is hooked in; requires `python3` on the host) after launching `pmoves-neo4j-1` to populate the base graph.
 - For Cataclysm Provisioning, the stable network name `pmoves-net` allows cross‑stack service discovery.
 - Clean up duplicate .env keys: `make env-dedupe` (keeps last occurrence, writes `.env.bak`).

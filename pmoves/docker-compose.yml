@@ -354,6 +354,8 @@ services:
       - SUPA_REST_URL=${SUPA_REST_URL:-http://host.docker.internal:54321/rest/v1}
       - SUPABASE_REALTIME_URL=${SUPABASE_REALTIME_URL:-ws://host.docker.internal:54321/realtime/v1/websocket}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports: ["8086:8086"]
     profiles: ["workers","gateway"]
     depends_on:
@@ -426,6 +428,12 @@ services:
       - SENTENCE_MODEL=${SENTENCE_MODEL:-all-MiniLM-L6-v2}
       - INDEXER_NAMESPACE=${INDEXER_NAMESPACE:-pmoves}
       - ALPHA=${ALPHA:-0.7}
+      # Reranker: default to Qwen on GPU build
+      - RERANK_ENABLE=${RERANK_ENABLE:-true}
+      - RERANK_MODEL=${RERANK_MODEL:-Qwen/Qwen3-Reranker-4B}
+      - RERANK_TOPN=${RERANK_TOPN:-50}
+      - RERANK_K=${RERANK_K:-10}
+      - RERANK_FUSION=${RERANK_FUSION:-mul}
       - USE_MEILI=${USE_MEILI:-false}
       - MEILI_URL=${MEILI_URL:-http://meilisearch:7700}
       - MEILI_API_KEY=${MEILI_MASTER_KEY}
@@ -446,6 +454,9 @@ services:
       - PGUSER=${POSTGRES_USER:-pmoves}
       - PGPASSWORD=${POSTGRES_PASSWORD:-pmoves}
       - PGDATABASE=${POSTGRES_DB:-pmoves}
+      - SUPA_REST_URL=${SUPA_REST_URL:-http://host.docker.internal:54321/rest/v1}
+      - SUPABASE_REALTIME_URL=${SUPABASE_REALTIME_URL:-ws://host.docker.internal:54321/realtime/v1/websocket}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
     deploy:
       resources:
         reservations:
@@ -460,6 +471,8 @@ services:
       neo4j:
         condition: service_healthy
     networks: [pmoves]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # Agents profile (opt-in): NATS broker + Agent Zero + Archon
   nats:
