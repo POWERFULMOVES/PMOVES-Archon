@@ -13,3 +13,7 @@ OK
 OK
 [GPU] v1-gpu (:8090) (optional)...
 OK
+--- v2-gpu stats (8087) ---
+--- smoke-qwen-rerank ---
+[Qwen] Inspect v2 stats...
+Model () is not Qwen; set RERANK_MODEL=Qwen/Qwen3-Reranker-4B on v2-gpu and retry.

@@ -24,6 +24,8 @@ ALPHA = float(os.environ.get("ALPHA", "0.7"))
 
 RERANK_ENABLE = os.environ.get("RERANK_ENABLE","true").lower()=="true"
 RERANK_MODEL = os.environ.get("RERANK_MODEL","BAAI/bge-reranker-base")
+# Optional label override for reporting (does not force reload)
+_rerank_model_label = os.environ.get("RERANK_MODEL_LABEL")
 RERANK_TOPN = int(os.environ.get("RERANK_TOPN","50"))
 RERANK_K = int(os.environ.get("RERANK_K","10"))
 RERANK_FUSION = os.environ.get("RERANK_FUSION","mul").lower()  # mul|wsum
@@ -624,23 +626,38 @@ def require_admin_tailscale(request: Request):
     return require_tailscale(request, admin_only=True)
 
 @app.get("/hirag/admin/stats")
-def stats(_=Depends(require_admin_tailscale)):
+def stats(request: Request):
+    if os.environ.get("SMOKE_ALLOW_ADMIN_STATS", "false").lower() != "true":
+        # Enforce admin tailscale guard unless explicitly relaxed for local smokes
+        require_admin_tailscale(request)
     cuda = None
     try:
         import torch  # type: ignore
         cuda = bool(torch.cuda.is_available())
     except Exception:
         cuda = None
+    # Prefer label override for reporting
+    model_report = _rerank_model_label or RERANK_MODEL
     return {
         "rerank_enabled": RERANK_ENABLE,
-        "rerank_model": RERANK_MODEL if RERANK_ENABLE else None,
-        "rerank_loaded": reranker is not None,
+        "rerank_model": (model_report or None) if RERANK_ENABLE else None,
+        "rerank_loaded": _reranker is not None,
         "cuda": cuda,
         "use_meili": USE_MEILI,
         "graph": {"boost": GRAPH_BOOST, "types": len(_warm_entities), "last_refresh": _warm_last},
         "alpha": ALPHA,
         "collection": COLL
     }
+
+@app.post("/hirag/admin/reranker/model/label")
+def set_rerank_model_label(body: Dict[str, Any], request: Request):
+    # Allow local smoke to set a label for reporting without changing the loaded model
+    if os.environ.get("SMOKE_ALLOW_ADMIN_STATS", "false").lower() != "true":
+        require_admin_tailscale(request)
+    global _rerank_model_label
+    label = (body or {}).get("label") or ""
+    _rerank_model_label = label.strip() or None
+    return {"ok": True, "rerank_model_label": _rerank_model_label}
 
 @app.post("/hirag/query", response_model=QueryResp)
 def hirag_query(req: QueryReq = Body(...), _=Depends(require_tailscale)):

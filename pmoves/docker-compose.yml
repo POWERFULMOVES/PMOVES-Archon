@@ -336,7 +336,7 @@ services:
       - RERANK_TOPN=${RERANK_TOPN:-50}
       - RERANK_K=${RERANK_K:-10}
       - RERANK_FUSION=${RERANK_FUSION:-mul}
-      - USE_MEILI=${USE_MEILI:-true}
+      - USE_MEILI=true
       - MEILI_URL=${MEILI_URL:-http://meilisearch:7700}
       - MEILI_API_KEY=${MEILI_MASTER_KEY}
       - USE_OLLAMA_EMBED=${USE_OLLAMA_EMBED:-false}
