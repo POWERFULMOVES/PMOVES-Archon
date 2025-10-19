@@ -60,6 +60,32 @@ restore: ## See docs/LOCAL_DEV.md for restore steps
 	@echo "See docs/LOCAL_DEV.md (Restore) for step-by-step instructions."
 
 # -------- GPU profile ----------
+<<<<<<< HEAD
+=======
+.PHONY: up-gpu
+up-gpu: ## Start with optional GPU accelerations where supported
+	@docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu up -d
+	@echo "✔ Stack started with GPU profile."
+
+.PHONY: up down clean up-workers up-yt up-media up-jellyfin up-nats ps supabase-up supabase-stop supabase-clean supa-extract-remote env-setup env-check
+.PHONY: discord-ping discord-ping-ps demo-content-published health-publisher-discord up-agents health-agent-zero health-jellyfin-bridge seed-approval seed-approval-ps m2-preflight evidence-stamp evidence-stamp-ps evidence-log evidence-log-ps m2-seed-demo n8n-webhook-demo
+.PHONY: notebook-up notebook-down notebook-logs
+
+# Pin a stable Docker Compose project name so make targets
+# always operate on the same stack regardless of cwd/path.
+PROJECT ?= pmoves
+export PROJECT
+
+NOTEBOOK_COMPOSE ?= docker-compose.open-notebook.yml
+NOTEBOOK_PROJECT ?= $(PROJECT)-notebook
+
+JELLYFIN_AI_BASE ?= jellyfin-ai
+export JELLYFIN_AI_BASE
+# Supabase provider: 'cli' for Supabase CLI stack, 'compose' for docker-compose stack
+SUPA_PROVIDER ?= cli
+
+# Data services differ by provider: with CLI we don't run Postgres/PostgREST here
+>>>>>>> origin/main
 DATA_SERVICES := minio presign
 
 ifeq ($(EXTERNAL_QDRANT),true)
@@ -86,6 +112,7 @@ DATA_SERVICES += postgres postgrest
 endif
 endif
 
+<<<<<<< HEAD
 POSTGRES_SCALE_FLAGS :=
 ifeq ($(EXTERNAL_SUPABASE),true)
   ifneq ($(SUPA_PROVIDER),compose)
@@ -100,11 +127,22 @@ up:
 	@docker compose -p $(PROJECT) --profile data --profile workers --profile agents --profile orchestration up -d $(strip $(POSTGRES_SCALE_FLAGS))
 
 
+=======
+>>>>>>> origin/main
 down:
 	docker compose -p $(PROJECT) down
 
 clean:
 	docker compose -p $(PROJECT) down -v --remove-orphans
+
+notebook-up: ## Launch the Open Notebook stack alongside pmoves-net
+	docker compose -p $(NOTEBOOK_PROJECT) -f $(NOTEBOOK_COMPOSE) up -d open-notebook
+
+notebook-down: ## Stop the Open Notebook container and remove its resources
+	docker compose -p $(NOTEBOOK_PROJECT) -f $(NOTEBOOK_COMPOSE) down
+
+notebook-logs: ## Follow logs for the Open Notebook service
+	docker compose -p $(NOTEBOOK_PROJECT) -f $(NOTEBOOK_COMPOSE) logs -f open-notebook
 
 # Bring only worker services (ensures data deps are active)
 up-workers:
@@ -343,6 +381,18 @@ smoke-rerank:
 	curl -s localhost:8086/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7, "use_rerank": true}' | jq .
 	@echo "If used_rerank=false, ensure internet/model access, or set RERANK_ENABLE=false."
 
+.PHONY: retrieval-eval-smoke
+retrieval-eval-smoke:
+	@set -eu; \
+	DATASETS=$$(ls services/retrieval-eval/datasets/*.jsonl 2>/dev/null || true); \
+	if [ -z "$$DATASETS" ]; then \
+	  echo "No retrieval-eval datasets found under services/retrieval-eval/datasets/."; \
+	  exit 1; \
+	fi; \
+	for ds in $$DATASETS; do \
+	  echo "→ Evaluating $$ds"; \
+	  $(PYTHON) services/retrieval-eval/evaluate.py "$$ds" --no-query-details; \
+	done
 .PHONY: eval-jsonl
 eval-jsonl:
 	@if [ -z "$(FILE)" ]; then echo "Usage: make eval-jsonl FILE=/abs/path/queries.jsonl [K=10]"; exit 1; fi
@@ -379,6 +429,16 @@ smoke-pdf:
 	  -d '{"bucket":"assets","key":"pdfs/sample.pdf","namespace":"pmoves","doc_id":"pdf:sample","publish_events":false}' \
 	  | jq -e '.ingest.chunks >= 1' >/dev/null && echo OK || (echo FAIL && exit 1)
 	@echo "PDF ingest smoke passed."
+
+.PHONY: mindmap-seed
+mindmap-seed:
+	@echo "Seeding Neo4j with CHIT mindmap demo data..."
+	docker compose -p $(PROJECT) exec neo4j cypher-shell -a bolt://localhost:7687 -u $${NEO4J_USER:-neo4j} -p $${NEO4J_PASSWORD:-neo4j} -f /cypher/003_seed_chit_mindmap.cypher
+
+.PHONY: mindmap-smoke
+mindmap-smoke:
+	@echo "Querying /mindmap demo constellation..."
+	python scripts/mindmap_query.py --base $${MINDMAP_BASE:-http://localhost:8000} --cid $${MINDMAP_CONSTELLATION_ID:-8c1b7a8c-7b38-4a6b-9bc3-3f1fdc9a1111} --limit $${MINDMAP_LIMIT:-5}
 
 .PHONY: seed-data
 seed-data:
@@ -526,6 +586,8 @@ help:
 	@echo "  export-jsonl     Export namespace to JSONL (OUT=/abs/path)"
 	@echo "  smoke-presign-put Test presign PUT and upload"
 	@echo "  smoke-pdf        Upload and index a sample PDF via pdf-ingest"
+	@echo "  mindmap-seed     Load CHIT demo constellation into Neo4j"
+	@echo "  mindmap-smoke    Query /mindmap using the seeded constellation"
 	@echo "  smoke-langextract Extract chunks via langextract and load"
 	@echo "  smoke-archon     Check Archon healthz endpoint (requires NATS + Supabase)"
 	@echo "  jellyfin-verify  Validate Jellyfin credentials and branding"
@@ -540,6 +602,7 @@ help:
 	@echo "  venv-min         Create a minimal .venv and install tools/requirements-minimal.txt"
 	@echo "  supabase-migrate Apply supabase/migrations/*.sql via docker compose"
 	@echo "  smoke-geometry   Post a CGP, jump a point, decode text, and run calibration"
+	@echo "  smoke-geometry-db Validate seeded geometry rows via PostgREST"
 	@echo "  codebook-gen     Generate structured_dataset.jsonl from a source JSONL"
 	@echo "  mcp-agent-zero   Run Agent Zero MCP stdio shim (FORM=CREATOR|RESEARCHER|POWERFULMOVES)"
 	@echo "  mcp-archon       Run Archon MCP stdio shim (FORM=...)"
@@ -586,6 +649,19 @@ smoke-geometry:
 	@echo "[4/4] POST /geometry/calibration/report" && curl -sf http://localhost:8086/geometry/calibration/report -H 'content-type: application/json' -d @.tmp_cgp.json | jq -e '.constellations|length>=1' >/dev/null && echo OK || (echo FAIL && rm -f .tmp_cgp.json && exit 1)
 	@rm -f .tmp_cgp.json
 	@echo "Geometry smoke passed."
+
+.PHONY: smoke-geometry-db
+smoke-geometry-db:
+	@which jq >/dev/null 2>&1 || (echo "jq is required for smoke-geometry-db" && exit 1)
+	@SUPA_URL=${SUPABASE_REST_URL:-${SUPA_REST_URL:-http://localhost:3000}} ; \
+	 CONST_ID=8c1b7a8c-7b38-4a6b-9bc3-3f1fdc9a1111 ; \
+	 echo "[1/3] GET $SUPA_URL/constellations?id=eq.$CONST_ID" ; \
+	 curl -sf "$SUPA_URL/constellations" --get --data-urlencode "id=eq.$CONST_ID" --data-urlencode "select=id,summary,meta" | jq -e 'length==1' >/dev/null && echo OK || (echo FAIL && exit 1) ; \
+	 echo "[2/3] GET $SUPA_URL/shape_points?constellation_id=eq.$CONST_ID" ; \
+	 curl -sf "$SUPA_URL/shape_points" --get --data-urlencode "constellation_id=eq.$CONST_ID" --data-urlencode "select=id,modality,ref_id,t_start,t_end,proj,conf" | jq -e 'map(select(.modality=="video"))|length>=1' >/dev/null && echo OK || (echo FAIL && exit 1) ; \
+	 echo "[3/3] GET $SUPA_URL/shape_index?shape_id=eq.$CONST_ID" ; \
+	 curl -sf "$SUPA_URL/shape_index" --get --data-urlencode "shape_id=eq.$CONST_ID" --data-urlencode "select=loc_hash,meta" | jq -e 'length>=2' >/dev/null && echo OK || (echo FAIL && exit 1)
+	@echo "Geometry DB smoke passed."
 
 .PHONY: codebook-gen
 codebook-gen:

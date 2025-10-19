@@ -1,6 +1,10 @@
 # Repository Directory Map
 
+<<<<<<< HEAD
 _Last updated: 2025-10-18_
+=======
+_Last updated: 2025-10-21_
+>>>>>>> origin/main
 
 This document captures the current layout of the `PMOVES.AI` repository to help new contributors find key resources quickly. The tree below is trimmed to a maximum depth of two levels (root → child → grandchild) to balance detail and readability.
 
@@ -256,6 +260,7 @@ PY
 │   │   ├── media-audio/
 │   │   ├── media-video/
 │   │   ├── mesh-agent/
+│   │   ├── notebook-sync/
 │   │   ├── n8n/
 │   │   ├── pdf-ingest/
 │   │   ├── pmoves-yt/
