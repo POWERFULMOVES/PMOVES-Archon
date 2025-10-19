@@ -17,6 +17,8 @@ python -m pip install -r services/publisher/requirements.txt \
 pytest -q services/publisher/tests \
         services/pmoves-yt/tests \
         services/publisher-discord/tests
+
+Tip: run per-service in separate virtualenvs if resolver conflicts occur. The repo includes underscore import shims so tests can import `pmoves.services.pmoves_yt` and `pmoves.services.publisher_discord` reliably.
 ```
 
 Keep the virtualenv around so re-runs before each push are quick (`pytest …`).
