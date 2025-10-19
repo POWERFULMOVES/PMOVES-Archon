@@ -33,6 +33,24 @@ Smoke
 curl -sS -H "Authorization: Bearer $FIREFLY_ACCESS_TOKEN" "$FIREFLY_BASE_URL/api/v1/transactions?limit=1" | jq '.data[0] | {journal_id: .id, description: .attributes.description}'
 ```
 
+Supabase quick checks
+- Upsert a synthetic transaction (dev only):
+```
+curl -sS -X POST "$SUPA_REST_URL/finance_transactions" \
+  -H "content-type: application/json" \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Prefer: resolution=merge-duplicates" \
+  -d '{"namespace":"pmoves","source":"firefly","external_id":"demo-1","occurred_at":"2025-10-18T00:00:00Z","amount":12.34,"currency":"USD","description":"demo"}' | jq
+```
+- Verify insert:
+```
+curl -sS "$SUPA_REST_URL/finance_transactions?external_id=eq.demo-1" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" | jq '.[0]'
+```
+
+Workflow activation (n8n)
+- Set env in compose or n8n credentials: `FIREFLY_BASE_URL`, `FIREFLY_ACCESS_TOKEN`, `SUPA_REST_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+- Import and activate `Finance Firefly Sync (stub)` and run a manual execution. Expect rows in `finance_*` and an event on `finance.transactions.ingested.v1`.
+
 Integration Review (PMOVES)
 - Storage: `finance.transactions`, `finance.accounts`, `finance.budgets` in Supabase.
 - Events: `finance.transactions.ingested.v1` emitted on new data to trigger analytics.
@@ -44,4 +62,3 @@ Related Plans/Docs
 Next Steps
 - Define Supabase schemas + RLS for finance domains.
 - Add reconciliation job to dedupe/merge recurring transactions.
-
