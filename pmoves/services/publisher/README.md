@@ -106,6 +106,10 @@ queues or manual approval load.
 See `pmoves/docs/TELEMETRY_ROI.md` for step-by-step guidance on charting the
 rollup tables and pairing them with Discord delivery telemetry.
 
+## Geometry Bus (CHIT) Integration
+
+- No direct CHIT endpoints. It may include geometry-derived metadata (e.g., jump locators) if upstream payloads carry them.
+
 ## Jellyfin Credential Smoke
 
 Before relying on the publisher, validate that the Jellyfin URL, API key, and

@@ -1,5 +1,5 @@
 # PMOVES v5 • Creator Pipeline (ComfyUI → MinIO → Webhook → Supabase → Indexer → Publisher)
-_Last updated: 2025-09-11_
+_Last updated: 2025-10-20_
 
 This doc shows the end‑to‑end creative flow from **ComfyUI** render to **Discord/Jellyfin** publish.
 
@@ -17,11 +17,11 @@ Before running ComfyUI graphs that upload into this pipeline, confirm the local 
 
 | Dependency | Install Script | Key Notes | Validate |
 | --- | --- | --- | --- |
-| **RVC Voice Conversion bundle** | [`PMOVES ART STUFF/RVC_INSTALLER.bat`](./PMOVES%20ART%20STUFF/RVC_INSTALLER.bat) | Script prompts for GPU target (`[1] NVIDIA` vs `[2] AMD/Intel`) and pulls the matching `RVC1006*.7z` from Hugging Face. Falls back to the NVIDIA archive if the prompt is skipped. Uses the system 7-Zip install to extract and launches `go-web.bat` on completion. | `nvidia-smi` (NVIDIA) or `wmic path win32_VideoController get name` (AMD/Intel) to confirm the GPU; `python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"` inside the RVC env to verify CUDA alignment. |
-| **7-Zip** | [`PMOVES ART STUFF/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat`](./PMOVES%20ART%20STUFF/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat) | `:ensure_7zip` checks `%PATH%`, `Program Files`, then silently installs `7z%SEVEN_VER%-x64.exe` if absent so other bundles (RVC, ComfyUI portable) can extract archives. | `"%ProgramFiles%\7-Zip\7z.exe" -h` or `7z --help` to verify CLI availability. |
-| **Git for Windows** | [`PMOVES ART STUFF/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat`](./PMOVES%20ART%20STUFF/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat) | `:ensure_git` installs `Git-%GIT_VER%-64-bit.exe` silently when `git --version` fails, ensuring ComfyUI custom nodes can be cloned. | `git --version` should return `2.45.0.windows.1` (or later). |
-| **Python 3.10 + uv** | [`PMOVES ART STUFF/VIBEVOICE-WEBUI_INSTALLER.bat`](./PMOVES%20ART%20STUFF/VIBEVOICE-WEBUI_INSTALLER.bat) | Requires a system Python 3.10 to create `.venv`, then installs `uv` before pinning `torch==2.7.0` (CUDA 12.8 wheels), `triton-windows`, and FlashAttention. Make sure PATH points at Python 3.10 (not 3.11+) before running. | `python --version` → `3.10.x`; `uv --version`; `python -m pip show torch` to confirm `2.7.0+cu128`. |
-| **FFmpeg (system-wide)** | [`PMOVES ART STUFF/FFMPEG-INSTALL AS ADMIN.bat`](./PMOVES%20ART%20STUFF/FFMPEG-INSTALL%20AS%20ADMIN.bat) | Must be launched from an **elevated** Windows shell—script checks `net session` and aborts without admin rights. Downloads the Gyan.dev essentials ZIP to `%USERPROFILE%\Documents\ffmpeg`, expands it, and appends `...\bin` to the machine PATH via PowerShell. | `ffmpeg -hide_banner` should print version info. If it fails, re-run the installer as admin or confirm `%PATH%` contains the FFmpeg `bin`. |
+| **RVC Voice Conversion bundle** | [`RVC_INSTALLER.bat`](../../creator/installers/RVC_INSTALLER.bat) | Script prompts for GPU target (`[1] NVIDIA` vs `[2] AMD/Intel`) and pulls the matching `RVC1006*.7z` from Hugging Face. Falls back to the NVIDIA archive if the prompt is skipped. Uses the system 7-Zip install to extract and launches `go-web.bat` on completion. | `nvidia-smi` (NVIDIA) or `wmic path win32_VideoController get name` (AMD/Intel) to confirm the GPU; `python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"` inside the RVC env to verify CUDA alignment. |
+| **7-Zip** | [`VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat`](../../creator/installers/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat) | `:ensure_7zip` checks `%PATH%`, `Program Files`, then silently installs `7z%SEVEN_VER%-x64.exe` if absent so other bundles (RVC, ComfyUI portable) can extract archives. | `"%ProgramFiles%\7-Zip\7z.exe" -h` or `7z --help` to verify CLI availability. |
+| **Git for Windows** | [`VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat`](../../creator/installers/VIBEVOICE-RVC-COMFYUI-MANAGER_AUTO_INSTALL.bat) | `:ensure_git` installs `Git-%GIT_VER%-64-bit.exe` silently when `git --version` fails, ensuring ComfyUI custom nodes can be cloned. | `git --version` should return `2.45.0.windows.1` (or later). |
+| **Python 3.10 + uv** | [`VIBEVOICE-WEBUI_INSTALLER.bat`](../../creator/installers/VIBEVOICE-WEBUI_INSTALLER.bat) | Requires a system Python 3.10 to create `.venv`, then installs `uv` before pinning `torch==2.7.0` (CUDA 12.8 wheels), `triton-windows`, and FlashAttention. Make sure PATH points at Python 3.10 (not 3.11+) before running. | `python --version` → `3.10.x`; `uv --version`; `python -m pip show torch` to confirm `2.7.0+cu128`. |
+| **FFmpeg (system-wide)** | [`FFMPEG-INSTALL AS ADMIN.bat`](../../creator/installers/FFMPEG-INSTALL%20AS%20ADMIN.bat) | Must be launched from an **elevated** Windows shell—script checks `net session` and aborts without admin rights. Downloads the Gyan.dev essentials ZIP to `%USERPROFILE%\Documents\ffmpeg`, expands it, and appends `...\bin` to the machine PATH via PowerShell. | `ffmpeg -hide_banner` should print version info. If it fails, re-run the installer as admin or confirm `%PATH%` contains the FFmpeg `bin`. |
 
 > ⚠️ If you rerun these scripts after a GPU driver upgrade or Python reinstall, delete any previously extracted portable folders so the silent installers can rehydrate cleanly.
 
@@ -32,10 +32,14 @@ Before running ComfyUI graphs that upload into this pipeline, confirm the local 
 - Run `uv pip list` inside the VibeVoice virtual environment to ensure uv-installed packages are resolvable before rendering or voice conversion nodes execute.
 
 ### Creative Tutorials & Automation Hooks
-- Tutorials and installers live under `pmoves/docs/PMOVES.AI PLANS/PMOVES ART STUFF/` (WAN Animate 2.2, Qwen Image Edit+, VibeVoice TTS, WAN installer notes). Follow them to seed ComfyUI graphs and audio pipelines before enabling the automations below.
-- n8n creative flows (see `pmoves/n8n/flows/wan_to_cgp.json`, `qwen_to_cgp.json`, `vibevoice_to_cgp.json`) monitor ComfyUI completions, run the associated scripts, and emit `content.publish.*` envelopes that the pipeline consumes. Ensure `WAN_ANIMATE_ROOT`, `QWEN_IMAGE_EDIT_ROOT`, `VIBEVOICE_ROOT`, and related env vars are captured via `make bootstrap`.
-- Persona-to-movie automation: combine WAN + VibeVoice flows with persona prompt templates (stored in Supabase `persona_prompts`) to storyboard, voice, and animate PMOVES avatars. These flows publish `content.publish.persona-film.v1` alongside `geometry.cgp.v1` packets so avatars sync with the geometry bus.
-- Scheduling: use n8n cron nodes to trigger daily persona drops, or call the HTTP webhook endpoints directly from the WAN tutorial CLI / ComfyUI manager scripts.
+- Tutorials and installers live under `pmoves/creator/` (WAN Animate 2.2, Qwen Image Edit+, VibeVoice TTS, WAN installer notes). Follow them to seed ComfyUI graphs and audio pipelines; they are prerequisites for the upcoming creative automations.
+- Shipping n8n flows live in `pmoves/n8n/flows/` today:
+  - `health_weekly_to_cgp.webhook.json` (Wger sync → `health.weekly.summary.v1`)
+  - `finance_monthly_to_cgp.webhook.json` (Firefly sync → `finance.monthly.summary.v1`)
+  - `wger_sync_to_supabase.json` and `firefly_sync_to_supabase.json` (baseline upsert helpers)
+- Creative WAN/Qwen/VibeVoice flows ship under `pmoves/n8n/flows/wan_to_cgp.webhook.json`, `qwen_to_cgp.webhook.json`, and `vibevoice_to_cgp.webhook.json`. Pair them with the tutorials so the ComfyUI outputs post straight into Supabase and hi-rag v2.
+- Persona-to-movie automation will combine WAN + VibeVoice flows with persona prompt templates (Supabase `persona_prompts`) to storyboard, voice, and animate PMOVES avatars. Until those flows land, use the tutorials plus `tools/integrations/events_to_cgp.py` to push manual CGPs for QA.
+- Scheduling: when flows are active, use n8n cron nodes or ComfyUI Manager webhooks to trigger daily persona drops.
 
 ## Services
 - Presign: `pmoves-v5/services/presign` (port 8088)
@@ -138,9 +142,10 @@ Node inputs:
 - **Publishing reminder:** Audio artifacts won’t auto-approve—double-check `RENDER_AUTO_APPROVE` or manually flip the Supabase row once the mix passes review. Jellyfin refresh uses the namespace path, so keep naming consistent before approving.
 
 ## Geometry Bus & Avatar Playback
-- Each creative publish emits a matching `geometry.cgp.v1` packet (see `services/common/cgp_mappers.py`) so constellations appear in the Geometry UI. Set `CHIT_PERSIST_DB=true` and supply Postgres creds if you want Supabase to store the packets for replay.
-- PMOVES avatars: populate the `persona_avatar` table with WAN Animate output paths (video/gif) and `geometry_constellation_id` values. The Geometry UI (`make -C pmoves web-geometry`) animates avatars while stepping through constellation nodes, letting reviewers and personas watch the geometry bus evolve.
-- Demo: trigger a WAN + VibeVoice flow via n8n, then open the Geometry UI, choose the persona avatar from the Avatars panel, and use jump links to watch the animated walkthrough driven by the newly published CGP.
+- Domain events (health + finance) already ship `geometry.cgp.v1` packets through `services/common/cgp_mappers.py`, so constellations appear in the Geometry UI as soon as the flows fire. Set `CHIT_PERSIST_DB=true` and supply Postgres creds if you want Supabase to store the packets for replay.
+- Creative webhooks (WAN/Qwen/VibeVoice) automatically transform payloads into `geometry.cgp.v1` packets via the n8n flows; use `tools/integrations/events_to_cgp.py` only for manual backfills or legacy payloads.
+- PMOVES avatars: the Supabase table `persona_avatar` (namespace, persona_slug, avatar URIs, geometry_constellation_id, meta) now ships via migration `2025-10-20_persona_avatar.sql`. Populate rows with WAN outputs and matching geometry IDs to light up the Avatars panel (`make -C pmoves web-geometry`). Coordinate with the Geometry UI repo on any additional columns before extending the schema.
+- Demo (current stack): trigger `make -C pmoves demo-health-cgp`, `make -C pmoves demo-finance-cgp`, and fire the creative webhooks (`wan-to-cgp`, `qwen-to-cgp`, `vibevoice-to-cgp`). Open the Geometry UI to inspect constellations with jump links. Record screenshots or CGP exports in `pmoves/docs/logs/` for regression tracking.
 
 ## Approve → Publish
 - In Supabase Studio, set `status=approved` (or use `RENDER_AUTO_APPROVE=true`).

@@ -46,3 +46,7 @@ The target iterates each JSONL and calls `python pmoves/services/retrieval-eval/
 3. Regenerate the JSONL queries with `export_notebooks.py` (see above) and store them under `datasets/`.
 4. Re-run `make retrieval-eval-smoke` to capture the new baseline metrics.
 5. Update the Roadmap/NEXT_STEPS checklists if the dataset scope or thresholds shift, and log the run metadata in `SESSION_IMPLEMENTATION_PLAN.md`.
+
+## Geometry Bus (CHIT) Integration
+
+- No direct CHIT endpoints. Operates over retrieval APIs; results can inform downstream constellation creation by other services.

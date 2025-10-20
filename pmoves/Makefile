@@ -195,6 +195,60 @@ up-n8n:
 ps:
 	 docker compose -p $(PROJECT) ps
 
+# -------- External stacks (forks / published images) ----------
+.PHONY: up-external up-external-wger up-external-firefly up-external-on up-external-jellyfin down-external
+up-external: ## Start all external stacks (Wger, Firefly, Open Notebook, Jellyfin)
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d
+
+up-external-wger: ## Start Wger on pmoves-net
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d wger
+
+up-external-firefly: ## Start Firefly III on pmoves-net
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d firefly
+
+up-external-on: ## Start Open Notebook on pmoves-net (external image)
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d open-notebook-ext
+
+up-external-jellyfin: ## Start Jellyfin on pmoves-net (external image)
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d jellyfin-ext
+
+down-external: ## Stop all external stacks
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml down
+
+.PHONY: package-pr-kits
+package-pr-kits: ## Package PR kits into dist/pr-kits/*.tar.gz
+	@mkdir -p dist/pr-kits
+	@for kit in wger firefly open-notebook jellyfin; do \
+	  tar -czf dist/pr-kits/$$kit.pr-kit.tgz -C pmoves/integrations/pr-kits/ $$kit; \
+	  echo "→ dist/pr-kits/$$kit.pr-kit.tgz"; \
+	done
+
+.PHONY: integrations-workspace
+integrations-workspace: ## Clone forks and apply PR kits into INTEGRATIONS_BASE (default: integrations-workspace/)
+	@bash pmoves/tools/integrations/bootstrap_workspace.sh "$${INTEGRATIONS_BASE:-integrations-workspace}"
+
+# ---- CHIT demo mappers (health/finance → CGP) ----
+.PHONY: demo-health-cgp demo-finance-cgp
+demo-health-cgp: ## Map sample health weekly summary to CGP and POST to gateway
+	@echo "→ Posting health.weekly.summary.v1 as CGP to $(HIRAG_URL:-?http://localhost:8086)"
+	@python pmoves/tools/events_to_cgp.py --file pmoves/contracts/samples/health.weekly.summary.v1.sample.json --post --gateway "$${HIRAG_URL:-http://localhost:8086}"
+
+demo-finance-cgp: ## Map sample finance monthly summary to CGP and POST to gateway
+	@echo "→ Posting finance.monthly.summary.v1 as CGP to $(HIRAG_URL:-?http://localhost:8086)"
+	@python3 pmoves/tools/events_to_cgp.py --file pmoves/contracts/samples/finance.monthly.summary.v1.sample.json --post --gateway "$${HIRAG_URL:-http://localhost:8086}"
+
+.PHONY: webhook-health-cgp webhook-finance-cgp
+webhook-health-cgp: ## Call n8n health weekly → CGP webhook (workflow must be active)
+	@curl -sS -X POST 'http://localhost:5678/webhook/health-cgp' -H 'content-type: application/json' -d '{}' | jq .
+
+webhook-finance-cgp: ## Call n8n finance monthly → CGP webhook (workflow must be active)
+	@curl -sS -X POST 'http://localhost:5678/webhook/finance-cgp' -H 'content-type: application/json' -d '{}' | jq .
+
 # Switch between local (CLI) and self-hosted Supabase by swapping .env.local
 .PHONY: supa-use-local supa-use-remote up-cli up-compose
 supa-use-local:
@@ -283,7 +337,29 @@ supabase-bootstrap:
 	  fi; \
 	  echo "✔ Supabase schema + seeds applied."; \
 	else \
-	  echo "↷ Supabase CLI stack not running (supabase_db_pmoves missing); skipping Supabase bootstrap."; \
+	  if docker ps --format '{{.Names}}' | grep -q '^pmoves-postgres-1$$'; then \
+	    echo "→ Compose Postgres detected; applying schema + seed SQL"; \
+	    set -eu; \
+	    for f in supabase/initdb/*.sql; do \
+	      echo "   • Init $$f"; \
+	      cat "$$f" | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
+	    done; \
+	    for f in supabase/migrations/*.sql; do \
+	      echo "   • Migration $$f"; \
+	      cat "$$f" | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
+	    done; \
+	    if [ -f db/v5_12_grounded_personas.sql ]; then \
+	      echo "   • Schema db/v5_12_grounded_personas.sql"; \
+	      cat db/v5_12_grounded_personas.sql | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
+	    fi; \
+	    if [ -f db/v5_12_seed.sql ]; then \
+	      echo "   • Seed db/v5_12_seed.sql"; \
+	      cat db/v5_12_seed.sql | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
+	    fi; \
+	    echo "✔ Supabase (compose) schema + seeds applied."; \
+	  else \
+	    echo "↷ No Supabase backend detected; skipping Supabase bootstrap."; \
+	  fi; \
 	fi
 
 .PHONY: neo4j-bootstrap
@@ -321,6 +397,7 @@ discord-ping:
 discord-ping-ps:
 	@pwsh -NoProfile -ExecutionPolicy Bypass -File pmoves/scripts/discord_ping.ps1 -Message "$(MSG)"
 
+
 .PHONY: smoke
 smoke:
 	@which jq >/dev/null 2>&1 || (echo "jq is required for smoke tests" && exit 1)
@@ -329,7 +406,8 @@ smoke:
 	@echo "[3/12] Neo4j UI..." && curl -sf http://localhost:7474 >/dev/null && echo OK || (echo WARN: UI not reachable; true)
 	@echo "[4/12] presign health..." && curl -sf http://localhost:8088/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
 	@echo "[5/12] render-webhook health..." && curl -sf http://localhost:8085/healthz >/dev/null && echo OK || (echo FAIL && exit 1)
-	@REST_BASE="$${SUPA_REST_URL:-http://127.0.0.1:54321/rest/v1}"; \
+	# Auto-detect PostgREST: prefer localhost:3000 when compose PostgREST is up, else use SUPA_REST_URL or CLI fallback
+	@REST_BASE="$$( if curl -sf http://localhost:3000 >/dev/null 2>&1; then echo http://localhost:3000/rest/v1; else echo "$${SUPA_REST_URL:-http://127.0.0.1:54321/rest/v1}"; fi )"; \
 	 APIKEY="$${SUPABASE_ANON_KEY:-sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH}"; \
 	 echo "[6/12] PostgREST reachable..." && curl -sf "$${REST_BASE}/it_errors?select=id&limit=1" -H "apikey: $$APIKEY" >/dev/null && echo OK || (echo FAIL && exit 1)
 	@echo "[7/12] Insert via render-webhook..." && curl -sf -X POST http://localhost:8085/comfy/webhook \
@@ -359,7 +437,10 @@ smoke:
 	done; \
 	if [ -z "$$GHPORT" ]; then echo "FAIL: geometry gateway not reachable on 8087 or 8086"; rm -f $$TMP; exit 1; fi; \
 	 echo "[11/12] Geometry event ingest..." && curl -sf http://localhost:$$GHPORT/geometry/event -H 'content-type: application/json' -d @$${TMP} >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
-	 echo "[12/12] Geometry jump & calibration..." && curl -sf "http://localhost:$$GHPORT/shape/point/$${POINT_ID}/jump" | jq -e --arg ref "$$REF_ID" '.locator.ref_id == $$ref' >/dev/null && curl -sf http://localhost:$$GHPORT/geometry/calibration/report -H 'content-type: application/json' -d "$$(jq -c '.data' $$TMP)" | jq -e '.constellations != null' >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
+	 echo "[12/14] Geometry jump & calibration..." && curl -sf "http://localhost:$$GHPORT/shape/point/$${POINT_ID}/jump" | jq -e --arg ref "$$REF_ID" '.locator.ref_id == $$ref' >/dev/null && curl -sf http://localhost:$$GHPORT/geometry/calibration/report -H 'content-type: application/json' -d "$$(jq -c '.data' $$TMP)" | jq -e '.constellations != null' >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
+
+	@echo "[13/14] Health weekly → CGP..." && python3 pmoves/tools/events_to_cgp.py --file pmoves/contracts/samples/health.weekly.summary.v1.sample.json --post --gateway "$${HIRAG_URL:-http://localhost:8086}" | tee .tmp_health_cgp_resp.json >/dev/null && jq -e '.ok==true' .tmp_health_cgp_resp.json >/dev/null && rm -f .tmp_health_cgp_resp.json && echo OK || (echo FAIL && exit 1)
+	@echo "[14/14] Finance monthly → CGP..." && python3 pmoves/tools/events_to_cgp.py --file pmoves/contracts/samples/finance.monthly.summary.v1.sample.json --post --gateway "$${HIRAG_URL:-http://localhost:8086}" | tee .tmp_finance_cgp_resp.json >/dev/null && jq -e '.ok==true' .tmp_finance_cgp_resp.json >/dev/null && rm -f .tmp_finance_cgp_resp.json && echo OK || (echo FAIL && exit 1)
 	 rm -f $$TMP
 	@echo "Smoke tests passed."
 

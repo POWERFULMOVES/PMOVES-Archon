@@ -22,6 +22,7 @@ Implemented (compose-managed)
 - [render-webhook](render-webhook/README.md)
 - [retrieval-eval](retrieval-eval/README.md)
  - [open-notebook](open-notebook/README.md)
+ - [neo4j](neo4j/README.md)
 
 Auxiliary / Libraries / Adapters
 - [agents](agents/README.md)
@@ -40,3 +41,4 @@ External Integrations (self-hosted stacks)
 Notes
 - Legacy directories kept for history: `agent_zero/` (underscore variant), `analysis-echo/`.
 - For environment setup and CI expectations, see the consolidated docs in [PMOVES.AI PLANS](../PMOVES.AI%20PLANS/README_DOCS_INDEX.md).
+ - CHIT/Geometry Bus is first‑class: each service page now indicates whether and how it exposes, publishes to, consumes, or defers CHIT interactions.

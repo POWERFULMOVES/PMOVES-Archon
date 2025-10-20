@@ -21,3 +21,14 @@ Env (clients)
 Make
 - `make up` starts neo4j (with healthcheck) before v2.
 - `make smoke` covers graph-warm and geometry checks.
+
+## Geometry Bus (CHIT) Integration
+- Role: Neo4j hosts the mind‑map alias graph used by CHIT for constellation context and UI drill‑downs.
+- How it’s used:
+  - v2 gateway warms entity aliases to improve retrieval and labels; mind‑map queries are exercised in `docs/SMOKETESTS.md` (Extended Deep Dive, Mindmap Graph).
+  - Geometry UI can link to mind‑map data for constellation overlays.
+- Not an HTTP CHIT endpoint itself; it backs the geometry bus with graph features.
+
+Related docs
+- UI flows: `docs/Unified and Modular PMOVES UI Design.md`
+- CHIT decoder/specs: `pmoves/docs/PMOVESCHIT/PMOVESCHIT_DECODERv0.1.md`

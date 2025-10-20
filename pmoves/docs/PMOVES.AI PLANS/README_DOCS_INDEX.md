@@ -22,9 +22,9 @@ _Last updated: 2025-10-18_
 - **PMOVES v5.12 Task Backlog** — `context/pmoves_v_5.12_tasks.md`
 
 ## Creative Tutorials (Automation Inputs)
-- Qwen Image Edit Plus — `PMOVES ART STUFF/qwen_image_edit_plus_tutorial.md`
-- WAN Animate 2.2 — `PMOVES ART STUFF/wan_animate_2.2_tutorial.md`
-- VibeVoice TTS — `PMOVES ART STUFF/vibevoice_tts_tutorial.md`
+- Qwen Image Edit Plus — `pmoves/creator/tutorials/qwen_image_edit_plus_tutorial.md`
+- WAN Animate 2.2 — `pmoves/creator/tutorials/wan_animate_2.2_tutorial.md`
+- VibeVoice TTS — `pmoves/creator/tutorials/vibevoice_tts_tutorial.md`
 These pair with UI frameworks in:
 - `docs/Unified and Modular PMOVES UI Design.md`
 - `docs/PMOVES Multimodal Communication Layer (“Flute”) – Architecture & Roadmap.md`

@@ -13,6 +13,7 @@ PMOVES.AI powers a distributed, multi-agent orchestration mesh built around Agen
 - [Supabase Service Guide](pmoves/docs/services/supabase/README.md) – CLI vs compose expectations, realtime wiring (`supabase start --network-id pmoves-net`), and how PMOVES consumes PostgREST/Realtime in both local and self-hosted deployments.
 - [PMOVES Docs Index](pmoves/docs/README_DOCS_INDEX.md) – Curated entry points into the pmoves-specific runbooks covering Creator Pipeline, ComfyUI flows, reranker configurations, and smoke tests.
 - [Service Docs Index](pmoves/docs/services/README.md) – Per‑service guides (overview, compose/ports, runbooks, smoke tests, and roadmap alignment).
+- [External Integrations Bring-Up](pmoves/docs/EXTERNAL_INTEGRATIONS_BRINGUP.md) – Wger, Firefly III, Open Notebook, and Jellyfin commands, token wiring, and port overrides for `make up-external`.
 - [Architecture Primer](docs/PMOVES_ARC.md) – Deep dive into mesh topology, service responsibilities, and evolution of the orchestration layers.
 - [Complete Architecture Map](pmoves/docs/context/PMOVES_COMPLETE_ARCHITECTURE.md) – Full-fidelity view of the latest integration mesh, including data planes and edge deployments.
 - [Multi-Agent Integration Guidelines](docs/PMOVES_Multi-Agent_System_Crush_CLI_Integration_and_Guidelines.md) – Operational patterns for coordinating Agent Zero, Archon, and automation hubs across environments.
@@ -20,11 +21,12 @@ PMOVES.AI powers a distributed, multi-agent orchestration mesh built around Agen
 - [Archon Updates for PMOVES](pmoves/docs/archonupdateforpmoves.md) – What changed in the October 2025 Archon bundle, how to wire the Supabase CLI stack, and the MCP/NATS expectations.
 - [Make Targets Reference](pmoves/docs/MAKE_TARGETS.md) – Command catalog for starting, stopping, and tailoring compose profiles (core data plane, media analyzers, Supabase modes, and agent bundles).
 
-**Creator pipeline references**
-- [WAN Animate 2.2 Tutorial](pmoves/docs/PMOVES.AI%20PLANS/PMOVES%20ART%20STUFF/wan_animate_2.2_tutorial.md) – Animated install/workflow guide for the WAN image-to-video stack (one-click installer, manual setup, RunPod notes).
-- [Qwen Image Edit+ Tutorial](pmoves/docs/PMOVES.AI%20PLANS/PMOVES%20ART%20STUFF/qwen_image_edit_plus_tutorial.md) – Step-by-step ComfyUI workflow for advanced image edits.
-- [VibeVoice TTS Tutorial](pmoves/docs/PMOVES.AI%20PLANS/PMOVES%20ART%20STUFF/vibevoice_tts_tutorial.md) – Voice cloning / TTS configuration for media outputs.
-- [WAN Animate Installation Scripts](pmoves/docs/PMOVES.AI%20PLANS/PMOVES%20ART%20STUFF/waninstall%20guide.md) – Reference for the animated installer bundle referenced in creative smokes.
+- **Creator bundle:** see [`pmoves/creator/`](pmoves/creator/README.md) for installers, tutorials, and ComfyUI workflows supporting WAN Animate, Qwen Image Edit+, and VibeVoice TTS. Key guides include:
+  - [WAN Animate 2.2 Tutorial](pmoves/creator/tutorials/wan_animate_2.2_tutorial.md)
+  - [Qwen Image Edit+ Tutorial](pmoves/creator/tutorials/qwen_image_edit_plus_tutorial.md)
+  - [VibeVoice TTS Tutorial](pmoves/creator/tutorials/vibevoice_tts_tutorial.md)
+  - [WAN Animate Installation Scripts](pmoves/creator/tutorials/waninstall%20guide.md)
+- [Creator Pipeline Runbook](pmoves/docs/PMOVES.AI%20PLANS/CREATOR_PIPELINE.md) – Current status of n8n automations (health/finance live, creative flows staging) plus geometry mapping and persona playback prep.
 
 ### Initial Setup & Tooling Flow
 1. **Environment bootstrap** – Walk through [pmoves/README.md](pmoves/README.md) to provision runtime prerequisites, copy `.env`, and populate secrets. Run `make bootstrap` (wrapping `python -m pmoves.scripts.bootstrap_env`) to capture Supabase CLI endpoints/keys (including Realtime), Wger and Firefly tokens, Open Notebook credentials, Discord/Jellyfin secrets, and regenerated shared passphrases.

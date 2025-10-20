@@ -46,6 +46,13 @@ echo "Contracts:"
 if [[ -f contracts/topics.json ]]; then
   if cat contracts/topics.json >/dev/null 2>&1; then
     echo "contracts/topics.json: valid"
+    # Ensure summary topics exist and schema files are present
+    need_topics=("health.weekly.summary.v1" "finance.monthly.summary.v1")
+    for t in "${need_topics[@]}"; do
+      if ! jq -e --arg T "$t" '.topics[$T]' contracts/topics.json >/dev/null 2>&1; then
+        echo "WARN: missing topic in topics.json: $t"
+      fi
+    done
   else
     echo "contracts/topics.json: invalid"
   fi
@@ -72,6 +79,10 @@ echo
 echo ".env status:"
 if [[ -f .env ]]; then echo ".env present:       true"; else echo ".env present:       false"; fi
 if [[ -f .env.example ]]; then echo ".env.example:       true"; else echo ".env.example:       false"; fi
+
+echo
+echo "Mappers:"
+if [[ -f tools/events_to_cgp.py ]]; then echo "events_to_cgp.py:   present"; else echo "events_to_cgp.py:   missing"; fi
 
 echo
 echo "Done."

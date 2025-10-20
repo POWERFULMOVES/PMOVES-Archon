@@ -20,6 +20,13 @@ _Last updated: 2025-10-14_
   - 2025-10-14: Agent Zero realtime listener (`python pmoves/tools/realtime_listener.py --topics content.published.v1 --max 1`) captured enriched payload, and `publisher-discord` delivered the Jellyfin-enriched embed to the mock webhook (see `docker logs mock-discord`).
 - [ ] Record step-by-step evidence in `SESSION_IMPLEMENTATION_PLAN.md` while executing the operational reminders list.
 
+### Using CHIT in Persona Prompts (New)
+- Reference constellations by ID in prompts and call Agent Zero MCP `geometry.jump` to fetch locators for deep links.
+- Example prompt fragment:
+  - “Using constellation `health.adh.2025-10-06..2025-10-12`, summarize adherence trends and link to Jellyfin at each jump locator.”
+- Evidence to capture:
+  - Prompt text, constellation IDs, and resulting Discord embeds/links.
+
 ### 2. Jellyfin Publisher Reliability
 - [x] Add a scheduled refresh or webhook trigger so Jellyfin libraries update after publisher runs; include cron/webhook settings in `services/publisher/README.md`.
 - [ ] Expand error/reporting hooks so failures surface with actionable messages (Jellyfin HTTP errors, dependency mismatches, asset gaps).
@@ -264,4 +271,3 @@ _Last updated: 2025-10-05_
 ---
 
 > Archived snapshot (2025-09-08): [NEXT_STEPS_2025-09-08](archive/NEXT_STEPS_2025-09-08.md)
-
