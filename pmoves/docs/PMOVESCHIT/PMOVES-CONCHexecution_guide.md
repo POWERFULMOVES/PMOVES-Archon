@@ -1,106 +1,87 @@
-# Complete Execution Guide
-## Downloading & Processing Consciousness Theories Database
+# PMOVES Consciousness Integration • Execution Guide
+_Last updated: 2025-10-20_
 
-### Prerequisites
+This guide operationalizes the consciousness knowledge harvest so it plugs cleanly into the current PMOVES stack (Supabase CLI runtime, Geometry Bus, CHIT playback, Evo Swarm).
+
+---
+
+## 0. Bring Up the Stack
+```bash
+make env-setup
+make supa-start
+make up
+make up-agents
+```
+
+Optional services:
+- `make up-n8n` (embedding automation)
+- `make notebook-up` (if Open Notebook enrichment is in play)
+- `make web-geometry` (visual confirmation once CGPs are published)
+
+---
+
+## 1. Harvest the Dataset
 ```powershell
-# Install required PowerShell modules
-Install-Module -Name Selenium -Force -Scope CurrentUser
+pwsh -File pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1
+pwsh -File pmoves/data/consciousness/Constellation-Harvest-Regularization/scripts/selenium-scraper.ps1
 ```
 
-### Step 1: Download Website Content
-```powershell
-# Navigate to your project directory
-cd "C:\Users\russe\Documents\GitHub\PMOVES.AI\pmoves\docs"
+Outputs live in `pmoves/data/consciousness/Constellation-Harvest-Regularization/` and include static HTML snapshots, research papers, discovery manifests, and helper scripts.
 
-# Run the main downloader script
-.\Constellation-Harvest-Regularization\consciousness-downloader.ps1
+---
 
-# This creates the full directory structure and downloads static content
-```
+## 2. Prepare Embeddings & Supabase Schema
+1. Generate chunked JSONL files under `processed-for-rag/embeddings-ready/` (PowerShell helper or custom tooling).
+2. Apply schema (Supabase CLI):
+   ```bash
+   supabase db execute --file pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
+   ```
+3. Import the n8n workflow to push embeddings:
+   - n8n UI → _Workflows → Import_ → select `processed-for-rag/supabase-import/n8n-workflow.json`
+   - Configure Hugging Face + Supabase credentials (respect `env.shared`).
 
-### Step 2: Extract Dynamic Content  
-```powershell
-# Run the Selenium scraper for dynamic JavaScript content
-.\Constellation-Harvest-Regularization\scripts\selenium-scraper.ps1
+---
 
-# This will take several minutes as it loads and extracts dynamic content
-```
+## 3. Publish Geometry / CHIT Artifacts
+1. Transform curated theory rows into CGP envelopes (custom mapper or manual script).
+2. Publish:
+   - `make mesh-handshake FILE=pmoves/data/consciousness/.../geometry_payload.json`
+   - or POST to Agent Zero `/events/publish` with a `geometry.consciousness.v1` envelope.
+3. Verify with:
+   - `make smoke-geometry`
+   - `make smoke-geometry-db`
+   - Geometry UI via `make web-geometry`
+4. Record constellation IDs & anchors in CHIT docs so demos can reference them.
 
-### Step 3: Process for RAG Integration
-```powershell
-# Process downloaded content for your Supabase + Hugging Face setup
-.\Constellation-Harvest-Regularization\rag-processor.ps1
+---
 
-# This chunks text and prepares data for embedding
-```
+## 4. Evo Swarm & Retrieval Alignment
+- Add consciousness namespaces to Evo Swarm (`env.shared` → `EVOSWARM_CONTENT_NAMESPACES=pmoves.consciousness`).
+- Restart agents (`make up-agents`).
+- Tail swarm meta events:
+  ```bash
+  python pmoves/tools/realtime_listener.py --topics geometry.swarm.meta.v1 --max 5
+  ```
+- Run `make smoke` and `make smoke-hirag-v1` to ensure retrieval pathways surface the new corpus.
 
-### Step 4: Set up Supabase Database
-```sql
--- In your Supabase SQL editor, run:
--- File: processed-for-rag/supabase-import/consciousness-schema.sql
+---
 
--- This creates tables with vector search capabilities
--- Includes hybrid search functions optimized for your 3584-dim embeddings
-```
+## 5. Evidence & Documentation
+- Log commands + timestamps in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
+- Archive supporting artifacts (JSONL samples, Supabase screenshots, Geometry UI captures) under `pmoves/docs/logs/`.
+- Update:
+  - `pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.md`
+  - `pmoves/docs/NEXT_STEPS.md` (mark tasks complete)
+  - `pmoves/docs/context/PMOVES_COMPLETE_ARCHITECTURE.md` (knowledge sources)
+  - `pmoves/docs/PMOVES.AI PLANS/FINAL_INTEGRATION_ROLLUP.md` (integration status)
 
-### Step 5: Generate Embeddings with n8n
-1. Import the workflow: `processed-for-rag/supabase-import/n8n-workflow.json`
-2. Configure your Hugging Face API node
-3. Set up Supabase connection
-4. Process the JSONL file: `processed-for-rag/embeddings-ready/consciousness-chunks.jsonl`
+---
 
-### Integration with Your Existing Setup
+## Quick Reference
+- Harvester script: `pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1`
+- Harvest base directory: `pmoves/data/consciousness/Constellation-Harvest-Regularization/`
+- Supabase CLI status: `make supa-status`
+- Geometry validation: `make smoke-geometry`, `make web-geometry`
+- Evo Swarm toggle: `EVOSWARM_CONTROLLER_ENABLED=true` (in `env.shared`)
 
-**Supabase Vector Store:**
-- Uses your existing 3584-dimension embeddings  
-- Compatible with pgvector and TimescaleDB
-- Hybrid search combines semantic + keyword matching
-
-**n8n Automation:**
-- Connects to your existing Hugging Face embeddings node
-- Feeds directly into your Supabase node
-- Processes consciousness theories alongside your YouTube transcripts
-
-**RAG Query Examples:**
-```sql
--- Semantic search for consciousness theories
-SELECT * FROM hybrid_search_consciousness(
-    'theories about AI consciousness',
-    your_query_embedding_vector,
-    0.7, -- semantic weight  
-    0.3, -- keyword weight
-    10   -- result limit
-);
-
--- Category-filtered search
-SELECT * FROM consciousness_theories 
-WHERE theory_category = 'Quantum-Theories'
-AND embedding <=> your_embedding < 0.5;
-```
-
-### File Structure Created
-```
-Constellation-Harvest-Regularization/
-├── website-mirror/          # Static HTML copies
-├── theories/               # Organized by category
-│   ├── Materialism-Theories/
-│   ├── Quantum-Theories/
-│   ├── Panpsychisms/
-│   └── ...
-├── research-papers/        # Academic papers (142-page main paper)
-├── data-exports/          # JSON/CSV structured data
-├── processed-for-rag/     # Ready for embedding
-│   ├── embeddings-ready/  # JSONL and CSV for Hugging Face
-│   └── supabase-import/   # Schema and workflow
-└── scripts/               # Automation scripts
-```
-
-### Benefits for Your RAG System
-- **Comprehensive Knowledge Base:** 500+ consciousness theories
-- **Structured Categories:** From materialist to idealist approaches  
-- **Academic Rigor:** Based on 142-page peer-reviewed paper
-- **AI-Relevant:** Direct implications for AI consciousness
-- **Hybrid Search Ready:** Optimized for your Supabase setup
-- **n8n Compatible:** Integrates with your existing automation
-
-This database will significantly enhance your RAG system's ability to answer questions about consciousness, AI development, and theoretical frameworks - perfect for the PMOVES.AI knowledge base!
+Keep this guide updated as ingestion scripts, CGP mappers, or automation targets evolve.
