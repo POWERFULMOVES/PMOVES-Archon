@@ -10,8 +10,8 @@ services:
       OPEN_NOTEBOOK_PASSWORD: ${OPEN_NOTEBOOK_PASSWORD:-}
       OPEN_NOTEBOOK_API_TOKEN: ${OPEN_NOTEBOOK_API_TOKEN:-}
     ports:
-      - "8503:8502"
-      - "5056:5055"
+      - "${OPEN_NOTEBOOK_UI_PORT:-8503}:8502"
+      - "${OPEN_NOTEBOOK_API_PORT:-5055}:5055"
     volumes:
       - ./data/open-notebook/notebook_data:/app/data
       - ./data/open-notebook/surreal_data:/mydata

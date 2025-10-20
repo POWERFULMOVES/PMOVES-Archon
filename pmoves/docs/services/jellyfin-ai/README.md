@@ -32,13 +32,19 @@ Integration Points
 - Supabase: event/log tables used by analyzer services and ingest workflows.
 - Jellyfin Bridge (HTTP helper): see `../jellyfin-bridge/README.md` for playback URL and webhook helpers.
 
+## Geometry Bus (CHIT) Integration
+- Publisher embeds `jellyfin_public_url` and timestamped deep links in `content.published.v1` events used alongside CHIT jump locators.
+- CHIT payloads can reference media points (`modality: video`, `ref_id: <jellyfin-id>`); the gateway’s jump endpoint returns locators that pair with Jellyfin share links.
+- See also: `pmoves/services/publisher/README.md` and `docs/SMOKETESTS.md` (Discord publisher section) for how geometry-derived metadata surfaces in embeds.
+
 Related Plans/Docs
 - PMOVES.AI PLANS: [JELLYFIN_BACKFILL_PLAN](../../PMOVES.AI%20PLANS/JELLYFIN_BACKFILL_PLAN.md)
 - PMOVES.AI PLANS: [JELLYFIN_BRIDGE_INTEGRATION](../../PMOVES.AI%20PLANS/JELLYFIN_BRIDGE_INTEGRATION.md)
 - PMOVES.AI PLANS: [JELLYFIN_YOUTUBE_INTEGRATION](../../PMOVES.AI%20PLANS/JELLYFIN_YOUTUBE_INTEGRATION.md)
 - PMOVES.AI PLANS: [JELLYFIN_YOUTUBE_STATUS](../../PMOVES.AI%20PLANS/JELLYFIN_YOUTUBE_STATUS.md)
+ - UI flows: `../../../docs/Unified and Modular PMOVES UI Design.md`
+ - CHIT decoder/specs: `../../PMOVESCHIT/PMOVESCHIT_DECODERv0.1.md`
 
 Next Steps
 - Document analyzer-side event schemas and how they feed Archon/Agent Zero.
 - Add troubleshooting for GPU transcodes and MinIO credential mismatches.
-

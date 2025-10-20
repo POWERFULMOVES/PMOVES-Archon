@@ -29,7 +29,7 @@ All services are attached to the `pmoves-net` Docker network. Internal URLs shou
 
 Quick start:
 - Windows without Make: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1`
-- With Make: `make env-setup` to interactively fill `.env` from `.env.example`, then `make env-check` to confirm nothing is missing.
+- With Make: `make env-setup` to interactively fill `.env` from `.env.example`, then run `make bootstrap` to capture Supabase CLI endpoints (including Realtime), Wger/Firefly/Open Notebook tokens, and regenerate secrets before `make env-check`.
 - Optional: install `direnv` and copy `pmoves/.envrc.example` to `pmoves/.envrc` for auto‑loading.
 
 See also: `docs/SECRETS.md` for optional secret provider integrations.
@@ -124,7 +124,7 @@ OpenAI-compatible presets:
   - Init once: `make supa-init`
   - Start: `make supa-start`
   - Use local endpoints: `make supa-use-local` then run `make supa-status` and paste keys into `.env.local`
-  - Bring up pmoves: `make up` (default `SUPA_PROVIDER=cli` skips Compose Postgres/PostgREST)
+- Bring up pmoves: `make up` (default `SUPABASE_RUNTIME=cli` skips Compose Postgres/PostgREST)
   - Stop CLI: `make supa-stop`
 
 - Self‑hosted remote:
@@ -134,7 +134,7 @@ OpenAI-compatible presets:
   - Run pmoves: `make up`
 
 - Compose alternative (lite Supabase):
-  - `SUPA_PROVIDER=compose make up` then `make supabase-up`
+- `SUPABASE_RUNTIME=compose make up` then `make supabase-up`
   - Stop: `make supabase-stop` or `make down`
 
 ### Flight Check (recommended)
@@ -216,7 +216,7 @@ OpenAI-compatible presets:
 
 - Bring up n8n: `make up-n8n` → UI at `http://localhost:5678`
 - Env inside n8n (prewired in compose override):
-  - `SUPABASE_REST_URL=http://host.docker.internal:54321/rest/v1` (Supabase CLI)
+  - `SUPABASE_REST_URL=http://host.docker.internal:65421/rest/v1` (Supabase CLI)
   - `SUPABASE_SERVICE_ROLE_KEY=<paste service role key>`
   - `AGENT_ZERO_BASE_URL=http://agent-zero:8080`
   - `DISCORD_WEBHOOK_URL` + `DISCORD_WEBHOOK_USERNAME`
@@ -230,7 +230,7 @@ docker run --name n8n --rm -it \
   -p 5678:5678 \
   --network pmoves-net \
   -e N8N_PORT=5678 -e N8N_PROTOCOL=http -e N8N_HOST=localhost -e WEBHOOK_URL=http://localhost:5678 \
-  -e SUPABASE_REST_URL=http://host.docker.internal:54321/rest/v1 \
+  -e SUPABASE_REST_URL=http://host.docker.internal:65421/rest/v1 \
   -e SUPABASE_SERVICE_ROLE_KEY="<service_role_key>" \
   -e AGENT_ZERO_BASE_URL=http://agent-zero:8080 \
   -e DISCORD_WEBHOOK_URL="<discord_webhook_url>" \
@@ -247,9 +247,9 @@ docker run --name n8n --rm -it \
 
 ## Notes
 
-- A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the Supabase CLI network host `http://api.supabase.internal:8000/rest/v1`). Host-side scripts continue to use `SUPA_REST_URL` (`http://127.0.0.1:54321/rest/v1`). Override both if you point the stack at a remote Supabase instance. When the Supabase CLI stack is running, `make up` auto-runs the `supabase-bootstrap` helper so schema migrations and seeds are replayed before smoke tests.
-- Realtime DNS fallback: if `hi-rag-gateway-v2` finds `SUPABASE_REALTIME_URL` is set but its hostname doesn’t resolve inside the container (e.g., `api.supabase.internal` not shared on the compose network), it now auto-derives a working websocket endpoint from `SUPA_REST_INTERNAL_URL`/`SUPA_REST_URL` (host‑gateway safe). To force an explicit target, set `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1/websocket` in `.env.local`.
-- Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` + `neo4j/cypher/*.cypher` scripts wire in the CHIT mind-map aliases. Run `make neo4j-bootstrap` (or rely on `make up` once the helper is hooked in; requires `python3` on the host) after launching `pmoves-neo4j-1` to populate the base graph.
+- A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the Supabase CLI gateway `http://host.docker.internal:65421/rest/v1`). Host-side scripts continue to use `SUPA_REST_URL` (`http://127.0.0.1:65421/rest/v1`). Override both if you point the stack at a remote Supabase instance. After launching the Supabase CLI stack, run `make bootstrap-data` (or `make supabase-bootstrap`) so schema migrations and seeds replay before smoke tests.
+- Realtime DNS fallback: if `hi-rag-gateway-v2` finds `SUPABASE_REALTIME_URL` is set but its hostname doesn’t resolve inside the container (e.g., `api.supabase.internal` not shared on the compose network), it now auto-derives a working websocket endpoint from `SUPA_REST_INTERNAL_URL`/`SUPA_REST_URL` (host‑gateway safe). To force an explicit target, set `SUPABASE_REALTIME_URL=ws://host.docker.internal:65421/realtime/v1` in `.env.local`.
+- Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` + `neo4j/cypher/*.cypher` scripts wire in the CHIT mind-map aliases. Run `make neo4j-bootstrap` after launching `pmoves-neo4j-1`, or rely on `make bootstrap-data` to run it automatically together with Supabase SQL and the Qdrant/Meili demo load.
 - For Cataclysm Provisioning, the stable network name `pmoves-net` allows cross‑stack service discovery.
 - Clean up duplicate .env keys: `make env-dedupe` (keeps last occurrence, writes `.env.bak`).
 

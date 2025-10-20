@@ -368,7 +368,7 @@ def check_docker_services():
 
 
 def check_repo_shape():
-    wanted = ["services", "contracts", "schemas", "supabase", "neo4j", "n8n", "comfyui", "datasets", "docs"]
+    wanted = ["services", "contracts", "schemas", "supabase", "neo4j", "n8n", "comfyui", "datasets", "docs", "tools"]
     table = Table(box=box.SIMPLE)
     table.add_column("path", style="magenta")
     table.add_column("exists")
@@ -376,6 +376,10 @@ def check_repo_shape():
         exists = (ROOT / d).exists()
         table.add_row(d, "yes" if exists else "no")
     console.print(table)
+    # Mapper helper presence
+    mapper = ROOT / "pmoves" / "tools" / "events_to_cgp.py"
+    status = "present" if mapper.exists() else "missing"
+    console.print(Panel(f"events_to_cgp.py: {status}", border_style=("green" if mapper.exists() else "red")))
 
 
 def check_contracts():
@@ -383,8 +387,35 @@ def check_contracts():
         console.print(Panel("contracts/topics.json: missing", border_style="red"))
         return
     try:
-        json.loads(CONTRACTS.read_text(encoding="utf-8"))
+        data = json.loads(CONTRACTS.read_text(encoding="utf-8"))
         console.print(Panel("contracts/topics.json: valid", border_style="green"))
+        # Extra: verify new summary topics are present and schemas exist
+        expect = {
+            "health.weekly.summary.v1": "schemas/health/weekly.summary.v1.schema.json",
+            "finance.monthly.summary.v1": "schemas/finance/monthly.summary.v1.schema.json",
+        }
+        missing: list[str] = []
+        bad_schema: list[str] = []
+        topics = data.get("topics", {}) if isinstance(data, dict) else {}
+        for t, spath in expect.items():
+            if t not in topics:
+                missing.append(t)
+                continue
+            schema_rel = topics.get(t, {}).get("schema") or spath
+            sp = CONTRACTS.parent / schema_rel
+            if not sp.exists():
+                bad_schema.append(f"{t} → {schema_rel}")
+        lines: list[str] = []
+        if missing:
+            lines.append("missing topics:")
+            lines.extend([f"- {t}" for t in missing])
+        if bad_schema:
+            lines.append("missing schema files:")
+            lines.extend([f"- {row}" for row in bad_schema])
+        if lines:
+            console.print(Panel("\n".join(lines), border_style="yellow", title="contracts: summary topics"))
+        else:
+            console.print(Panel("summary topics present (health/finance)", border_style="green", title="contracts"))
     except Exception as e:
         console.print(Panel(f"contracts/topics.json: invalid ({e})", border_style="red"))
 

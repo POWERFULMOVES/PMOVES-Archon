@@ -18,26 +18,34 @@ This guide covers preflight wiring, starting the core stack, and running the loc
      - `cp .env.example .env`
      - `cat env.presign.additions env.render_webhook.additions >> .env`
      - Optional: `cat env.hirag.reranker.additions env.hirag.reranker.providers.additions >> .env`
-2. Set shared secrets (change these):
+2. Start the Supabase CLI stack **before** running bootstrap or compose:
+   - `supabase start --network-id pmoves-net` (or `make supa-start` once `supabase/config.toml` exists)
+   - This keeps PostgREST + Realtime available so `make bootstrap` can pull fresh anon/service keys and websocket endpoints into `.env.local`.
+3. Set shared secrets (change these):
    - `PRESIGN_SHARED_SECRET`
    - `RENDER_WEBHOOK_SHARED_SECRET`
    - Supabase REST endpoints:
      - `SUPA_REST_URL=http://127.0.0.1:54321/rest/v1` (host-side smoke harness + curl snippets)
      - `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1` (compose services targeting the Supabase CLI stack)
-   - With the Supabase CLI stack running, `make up` will replay all schema + seed SQL before the smoke harness executes. You can re-run it manually via `make supabase-bootstrap`.
-   - If Neo4j is running (`pmoves-neo4j-1`), seed the CHIT mind-map aliases via `make neo4j-bootstrap` so `/mindmap/{id}` resolves during geometry checks.
-3. Buckets: ensure MinIO has buckets you plan to use (defaults: `assets`, `outputs`). You can create buckets via the MinIO Console at `http://localhost:9001` if needed.
+   - After the CLI stack is running, execute `make bootstrap-data` to apply Supabase SQL, seed Neo4j, and load the demo Qdrant/Meili corpus before smokes. Re-run components individually with `make supabase-bootstrap`, `make neo4j-bootstrap`, or `make seed-data` if you only need one layer.
+4. External integrations: copy tokens into `pmoves/.env.local` so the health/finance automations can run without errors.
+   - `WGER_API_TOKEN`, `WGER_BASE_URL=http://wger:8000`
+   - `FIREFLY_ACCESS_TOKEN`, `FIREFLY_BASE_URL=http://firefly:8080`
+   - `OPEN_NOTEBOOK_API_TOKEN`, `OPEN_NOTEBOOK_API_URL=http://open-notebook:5055`
+   - `JELLYFIN_API_KEY`, `JELLYFIN_URL=http://jellyfin:8096`
+   - Override ports before `make -C pmoves up-external` if your host is already using `8000`, `8080`, `8096`, or `8503` (for example, `export FIREFLY_PORT=8081` to free 8080). See `pmoves/docs/EXTERNAL_INTEGRATIONS_BRINGUP.md` for per-service bring-up notes.
+5. Buckets: ensure MinIO has buckets you plan to use (defaults: `assets`, `outputs`). You can create buckets via the MinIO Console at `http://localhost:9001` if needed.
 
 ## 2) Preflight (Recommended)
-- Cross‑platform: `make flight-check`
+- Cross‑platform: `make flight-check` (checks Docker, Supabase CLI + Realtime websocket, external integration env, and geometry migrations)
 - Windows direct script: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1`
 
 This checks tool availability, common ports, `.env` keys vs `.env.example`, and validates `contracts/topics.json`.
 
 ## 3) Start Core Stack
-- Start data + workers profile (v2 gateway):
+- Start data + workers profile (v2 gateway) after the Supabase CLI stack is online:
   - `make up`
-- Wait ~15–30s for services to become ready.
+- Wait ~15–30s for services to become ready. If you see `service missing` errors (Neo4j, Realtime, etc.), confirm the CLI stack is running and that `make up-external` completed successfully for Wger/Firefly/Open Notebook/Jellyfin.
 
 Useful health checks:
 - Presign: `curl http://localhost:8088/healthz`
@@ -100,27 +108,84 @@ Expected: the Discord channel receives a rich embed with the Smoke Story title, 
 Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
-- `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
+- `make seed-data` (loads small sample docs into Qdrant/Meilisearch; already invoked by `make bootstrap-data`)
 - Alternatively: `make load-jsonl FILE=$(pwd)/datasets/queries_demo.jsonl`
 
 ## 5) Run Smoke Tests
+
+### 5a) Core Stack
 Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-What the smoke covers now (12 checks):
-1) Qdrant ready (6333)
-2) Meilisearch health (7700, warning only)
-3) Neo4j UI reachable (7474, warning only)
-4) Presign health (8088)
-5) Render Webhook health (8085)
-6) PostgREST reachable (3000)
-7) Insert a demo row via Render Webhook
-8) Verify a `studio_board` row exists via PostgREST
-9) Run a Hi-RAG v2 query (8087)
-10) Agent Zero `/healthz` reports the JetStream controller running
-11) POST a generated `geometry.cgp.v1` packet to `/geometry/event`
-12) Confirm the ShapeStore locator + calibration report via `/shape/point/{id}/jump` and `/geometry/calibration/report`
+Checks (12):
+1. Qdrant ready (`6333`)
+2. Meilisearch health (`7700`, warning only)
+3. Neo4j UI reachable (`7474`, warning only)
+4. Presign health (`8088`)
+5. Render Webhook health (`8085`)
+6. PostgREST reachable (`3000`)
+7. Insert a demo row via Render Webhook
+8. Verify a `studio_board` row exists via PostgREST
+9. Run a Hi-RAG v2 query (`8087`)
+10. Agent Zero `/healthz` reports JetStream controller running
+11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
+12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
+
+### 5b) Workflow Automations
+Prereqs: Supabase CLI stack running (`supabase start --network-id pmoves-net`), `make bootstrap` secrets populated, `make up`, external services (`make -C pmoves up-external`), and `make up-n8n`.
+1. Import/activate domain flows (shipped in repo):
+   - `pmoves/n8n/flows/health_weekly_to_cgp.webhook.json`
+   - `pmoves/n8n/flows/finance_monthly_to_cgp.webhook.json`
+   - `pmoves/n8n/flows/wger_sync_to_supabase.json`
+   - `pmoves/n8n/flows/firefly_sync_to_supabase.json`
+2. Trigger health/finance CGP webhooks (IDs shown in n8n after activation):
+   ```bash
+   curl -X POST http://localhost:5678/webhook/<health-workflow-id>/webhook/health-cgp \
+     -H 'content-type: application/json' -d '{}'
+   curl -X POST http://localhost:5678/webhook/<finance-workflow-id>/webhook/finance-cgp \
+     -H 'content-type: application/json' -d '{}'
+   ```
+   Expect: `{"ok":true}` from n8n and CGP packets landing in Supabase via hi-rag gateway.
+3. Run the sync helpers directly when testing credentials:
+   - `make -C pmoves demo-health-cgp` (requires `WGER_API_TOKEN`)
+   - `make -C pmoves demo-finance-cgp` (requires `FIREFLY_ACCESS_TOKEN`)
+   Watch Supabase tables (`health_workouts`, `health_weekly_summaries`, `finance_transactions`, `finance_monthly_summaries`) and MinIO asset paths for inserts.
+4. Notebook sync smoke: `make -C pmoves up-open-notebook` (if using the local add-on) and ensure `OPEN_NOTEBOOK_API_*` envs resolve. `docker logs pmoves-notebook-sync-1` should show successful Supabase writes.
+
+### 5c) Creative Automations
+Prereqs: tutorials installed (`pmoves/creator/tutorials/`), Supabase CLI stack running, `make bootstrap` secrets populated, `make up`, external services (`make -C pmoves up-external`), and `make up-n8n`.
+1. Import/activate the creative webhook flows:
+   - `pmoves/n8n/flows/wan_to_cgp.webhook.json`
+   - `pmoves/n8n/flows/qwen_to_cgp.webhook.json`
+   - `pmoves/n8n/flows/vibevoice_to_cgp.webhook.json`
+2. Trigger WAN Animate after ComfyUI uploads the render:
+   ```bash
+   curl -X POST http://localhost:5678/webhook/wan-to-cgp \
+     -H 'content-type: application/json' \
+     -d '{
+       "title":"Persona teaser",
+       "namespace":"pmoves.art.darkxside",
+       "persona":"darkxside",
+       "workflow":"wan-animate-2.2",
+       "asset_url":"s3://outputs/comfy/wan/darkxside-teaser.mp4",
+       "reference_image":"s3://assets/personas/darkxside.png",
+       "reference_motion":"s3://assets/reference/teaser-source.mp4",
+       "prompt":"neo-noir alleyway reveal",
+       "tags":["workflow:wan-animate","medium:video"],
+       "duration_sec":12.5,
+       "fps":30
+     }'
+   ```
+   Expect: Supabase `studio_board` row (status `submitted` unless auto_approve=true) with creative metadata and a `geometry.cgp.v1` packet posted to hi-rag v2.
+3. Trigger Qwen Image Edit+ and VibeVoice runs with analogous payloads (`/webhook/qwen-to-cgp`, `/webhook/vibevoice-to-cgp`). Include `asset_url`, `prompt`/`script`, persona tags, and any reference assets. Confirm MinIO/Supabase paths match the tutorial outputs and that geometry constellations land with `workflow:qwen-image-edit-plus` / `workflow:vibevoice-tts` tags.
+4. Geometry UI (`make -C pmoves web-geometry`): filter constellations by namespace/persona to verify the render, edit, and audio clips appear with the correct metadata and jump links.
+
+### 5d) Persona Film End-to-End (next milestone)
+Persona film automation combines the creative flows above with Supabase tables (`persona_avatar`, `geometry_cgp_packets`) seeded with WAN outputs and audio narration. With the `persona_avatar` table now available (migration `2025-10-20_persona_avatar.sql`), the remaining work is wiring the UI + automation glue:
+1. Chain WAN + VibeVoice requests (steps above) with matching `persona` and `namespace`.
+2. Confirm n8n emits the geometry packets and that Supabase audit tables capture the creative assets.
+3. Geometry UI avatars animate the resulting constellations (`make -C pmoves web-geometry`) once avatar metadata is present.
 
 ## 6) Geometry Bus (CHIT) — Extended Deep Dive
 
@@ -219,6 +284,53 @@ What the smoke covers now (12 checks):
 4. Open the page in a second browser window; both connect to `public` room. Use Share Shape to send a `shape-hello` on the DataChannel.
 5. Click “Send Current CGP” to share the last geometry over the DataChannel; add a passphrase to sign the CGP capsule.
 6. Toggle “Encrypt anchors” and set a passphrase to AES‑GCM encrypt constellation anchors client‑side before sending; the receiving gateway can decrypt if `CHIT_DECRYPT_ANCHORS=true`.
+
+## 8) Health/Finance → CGP Demo (New)
+
+Use the mapper helper to turn summary events into CGPs and post them to the gateway.
+
+1. Ensure the v2 gateway is running on `:8086` or set `HIRAG_URL` to `http://localhost:8087` for GPU.
+2. Health weekly summary:
+   ```bash
+   make -C pmoves demo-health-cgp
+   ```
+   Expected: HTTP 200 from `/geometry/event`. Open the geometry UI and look for constellations `health.adh.*` and `health.load.*`.
+3. Finance monthly summary:
+   ```bash
+   make -C pmoves demo-finance-cgp
+   ```
+   Expected: HTTP 200 and constellations per category (e.g., `fin.Housing.<YYYY-MM>`). Use jump/labels to inspect spectra.
+
+### 8.1) n8n Webhook Variant (real data)
+
+1. Start n8n: `make -C pmoves up-n8n`
+2. Import flows (already in repo):
+   - `pmoves/n8n/flows/health_weekly_to_cgp.webhook.json`
+   - `pmoves/n8n/flows/finance_monthly_to_cgp.webhook.json`
+   Use the n8n UI or Public API (`/api/v1/workflows`) with `X-N8N-API-KEY`.
+3. Activate both flows in the UI (toggle Active). Production webhooks register only when the workflow is active.
+4. Trigger:
+   - Health: `curl -X POST http://localhost:5678/webhook/health-cgp -H 'content-type: application/json' -d '{}'`
+   - Finance: `curl -X POST http://localhost:5678/webhook/finance-cgp -H 'content-type: application/json' -d '{}'`
+5. Expect: `{"ok":true}` from the flow and `{"ok":true}` from `/geometry/event`. Verify persistence via PostgREST as above.
+
+### Optional: Persist CGPs to Postgres
+
+Enable gateway persistence and verify rows via PostgREST:
+
+1. Set env for `hi-rag-gateway-v2` and recreate:
+   ```bash
+   export CHIT_PERSIST_DB=true \
+     PGHOST=postgrest PGUSER=postgres PGPASSWORD=postgres PGDATABASE=postgres
+   make -C pmoves recreate-v2
+   ```
+2. Re-run the demo mappers (steps above).
+3. Verify tables via PostgREST:
+   ```bash
+   curl -s "http://localhost:3000/constellations?order=created_at.desc&limit=5" | jq '.[].summary'
+   curl -s "http://localhost:3000/shape_points?order=created_at.desc&limit=5" | jq '.[].id'
+   ```
+### Quick DB smoke (Supabase)
 
 ### Quick DB smoke (Supabase)
  - `make smoke-geometry-db` — verifies the seeded demo constellation is reachable via PostgREST (`constellations`, `shape_points`, and `shape_index`). Ensure `SUPABASE_REST_URL` or `SUPA_REST_URL` is exported; defaults to `http://localhost:3000`.

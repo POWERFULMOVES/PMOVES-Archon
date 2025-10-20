@@ -20,3 +20,9 @@ Environment variables:
 - `EVOSWARM_NAMESPACE` – optional namespace filter for CGPs.
 
 Further iterations will add the evolutionary fitness loop and publishing of parameter packs.
+
+## Geometry Bus (CHIT) Integration
+
+- Reads recent CGPs from PostgREST (`geometry_cgp_v1`, related tables) to compute fitness.
+- Publishes `geometry.swarm.meta.v1` via Agent Zero for the gateway to apply.
+- Environment: `SUPA_REST_URL`, `SUPABASE_SERVICE_ROLE_KEY`; optional `EVOSWARM_*` tunables.

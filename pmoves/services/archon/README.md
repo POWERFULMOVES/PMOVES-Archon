@@ -2,6 +2,10 @@
 
 Archon ships as a vendored upstream bundle (`pmoves/services/vendor/archon`) with extra tooling so it runs inside the PMOVES stack, talks to Supabase locally, and exposes MCP endpoints for Agent Zero and other clients.
 
+## Geometry Bus (CHIT) Integration
+
+- No direct CHIT endpoints. Archon operates over search/retrieval; CHIT packets are produced/consumed by the Hi‑RAG gateways.
+
 ## Prerequisites
 
 - **Supabase CLI stack** or compose provider running locally. The Archon wrapper rewrites Supabase URLs so `http://postgrest:3000` works when the CLI stack runs with `--network-id pmoves-net`.

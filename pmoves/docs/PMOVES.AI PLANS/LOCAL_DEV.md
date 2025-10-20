@@ -105,7 +105,7 @@ OpenAI-compatible presets:
   - Init once: `make supa-init`
   - Start: `make supa-start`
   - Use local endpoints: `make supa-use-local` then run `make supa-status` and paste keys into `.env.local`
-  - Bring up pmoves: `make up` (default `SUPA_PROVIDER=cli` skips Compose Postgres/PostgREST)
+- Bring up pmoves: `make up` (default `SUPABASE_RUNTIME=cli` skips Compose Postgres/PostgREST)
   - Stop CLI: `make supa-stop`
 
 - Self‑hosted remote:
@@ -115,7 +115,7 @@ OpenAI-compatible presets:
   - Run pmoves: `make up`
 
 - Compose alternative (lite Supabase):
-  - `SUPA_PROVIDER=compose make up` then `make supabase-up`
+- `SUPABASE_RUNTIME=compose make up` then `make supabase-up`
   - Stop: `make supabase-stop` or `make down`
 
 ### Flight Check (recommended)
@@ -222,8 +222,8 @@ docker compose --project-name pmoves -f pmoves/docker-compose.n8n.yml up n8n n8n
 
 ## Notes
 
-- A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the compose host `http://postgrest:3000`). Host-side scripts continue to use `SUPA_REST_URL` (`http://postgrest:3000`). Override both if you rely on the Supabase CLI (`http://127.0.0.1:54321/rest/v1` + `http://api.supabase.internal:8000/rest/v1`) or a remote Supabase instance. When the Supabase CLI stack is running, `make up` auto-runs the `supabase-bootstrap` helper so schema migrations and seeds are replayed before smoke tests.
-- Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` keeps the alias dictionary in sync while `neo4j/cypher/010_chit_geometry_fixture.cypher` and `011_chit_geometry_smoke.cypher` replay the curated CHIT constellation and confirm it spans multiple modalities. Run `make neo4j-bootstrap` (or `scripts/neo4j_bootstrap.sh`) after launching `pmoves-neo4j-1`; `make up` triggers the same helper automatically when the container is online.
+- A local Postgres + PostgREST are included. `render-webhook` and the other compose workers now honour `SUPA_REST_INTERNAL_URL` (defaults to the compose host `http://postgrest:3000`). Host-side scripts continue to use `SUPA_REST_URL` (`http://postgrest:3000`). Override both if you rely on the Supabase CLI (`http://127.0.0.1:65421/rest/v1` + `http://api.supabase.internal:8000/rest/v1`) or a remote Supabase instance. After starting the CLI stack, run `make bootstrap-data` (or the granular `make supabase-bootstrap`) so schema migrations and seeds replay before smoke tests.
+- Neo4j seeds: the bundled `neo4j/datasets/person_aliases_seed.csv` keeps the alias dictionary in sync while `neo4j/cypher/010_chit_geometry_fixture.cypher` and `011_chit_geometry_smoke.cypher` replay the curated CHIT constellation and confirm it spans multiple modalities. Run `make neo4j-bootstrap` standalone when you need only the graph seed, or rely on `make bootstrap-data` to chain Supabase SQL + Neo4j + Qdrant/Meili demo loads.
 - For Cataclysm Provisioning, the stable network name `pmoves-net` allows cross‑stack service discovery.
 - Clean up duplicate .env keys: `make env-dedupe` (keeps last occurrence, writes `.env.bak`).
 

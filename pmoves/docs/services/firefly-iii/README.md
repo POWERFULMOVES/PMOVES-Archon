@@ -6,6 +6,13 @@ Overview
 - Firefly III is a self-hosted personal finance manager with a REST API and personal access tokens.
 - In PMOVES, treat Firefly as a finance telemetry source for budgeting insights, spend summaries, and goal tracking.
 
+## Geometry Bus (CHIT) Integration
+- Current: No direct CHIT endpoints.
+- Planned: generate category/time-bucket constellations from normalized transactions to visualize spending clusters and trend anchors in the geometry UI.
+- Design references:
+  - UI: `../../../docs/Unified and Modular PMOVES UI Design.md`
+  - CHIT decoder/specs: `../../PMOVESCHIT/PMOVESCHIT_DECODERv0.1.md`
+
 Deployment
 - Reference bundle: `pmoves/docs/PMOVES.AI PLANS/WGER - Firefly iii compose -integrations/`
 - Quick start (with Wger + Firefly):
@@ -50,6 +57,7 @@ curl -sS "$SUPA_REST_URL/finance_transactions?external_id=eq.demo-1" -H "apikey:
 Workflow activation (n8n)
 - Set env in compose or n8n credentials: `FIREFLY_BASE_URL`, `FIREFLY_ACCESS_TOKEN`, `SUPA_REST_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
 - Import and activate `Finance Firefly Sync (stub)` and run a manual execution. Expect rows in `finance_*` and an event on `finance.transactions.ingested.v1`.
+ - Demo flow JSON: `pmoves/n8n/flows/finance_monthly_to_cgp.json` (manual trigger builds a monthly summary → maps to CGP → POSTs to gateway).
 
 Integration Review (PMOVES)
 - Storage: `finance.transactions`, `finance.accounts`, `finance.budgets` in Supabase.
@@ -58,6 +66,10 @@ Integration Review (PMOVES)
 
 Related Plans/Docs
 - Compose bundle and scripts: `PMOVES.AI PLANS/WGER - Firefly iii compose -integrations/`
+
+Next Steps — CHIT
+- Define `finance.monthly.summary.v1` events and a mapper to CGPs (anchors: categories; spectrum: budget variance; points: transactions or buckets). Render summaries in geometry UI and surface anomalies to agents.
+- Leverage Creator tutorials for artwork/voiceovers in generated artifacts (see `pmoves/creator/tutorials/*_tutorial.md`).
 
 Next Steps
 - Define Supabase schemas + RLS for finance domains.

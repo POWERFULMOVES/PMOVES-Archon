@@ -6,6 +6,7 @@ This guide aggregates the entry points that keep local environments consistent a
 
 ## Environment & Secrets
 - `make env-setup` → runs `scripts/env_setup.sh` (Bash) or `scripts/env_setup.ps1` (PowerShell) to merge `.env.example` with the secret snippets under `env.*.additions`. Use `make env-setup -- --yes` to accept defaults non-interactively.
+- `make bootstrap` → interactive secret capture (Supabase CLI endpoints/keys, Realtime websocket, Wger/Firefly/Open Notebook tokens, Discord/Jellyfin secrets). Re-run after `supabase start --network-id pmoves-net` or whenever external credentials change. Supports `BOOTSTRAP_FLAGS="--service supabase"` and `--accept-defaults` for targeted updates.
 - `make env-check` → calls `scripts/env_check.{sh,ps1}` for dependency checks, port collisions, and `.env` completeness.
   - CI runs the PowerShell preflight on Windows runners only; Linux contributors should run `scripts/env_check.sh` locally if they bypass Make.
 - `scripts/create_venv*.{sh,ps1}` → optional helpers to create/activate Python virtualenvs outside of Conda. Pass the environment name as the first argument on Bash, or `-Name` in PowerShell.
@@ -17,7 +18,11 @@ This guide aggregates the entry points that keep local environments consistent a
 - `make notebook-up` → launches the optional Open Notebook research workspace (Streamlit UI on 8502, REST API on 5055). Pair with `make notebook-logs` for tailing output and `make notebook-down` to stop it without removing data under `pmoves/data/open-notebook/`.
 - `make up-agents` → launches NATS, Agent Zero, Archon, Mesh Agent, and the Discord publisher. Run `make up-nats` first if `NATS_URL` is not configured.
 - `make ps`, `make down`, `make clean` → quick status, stop, and tear-down helpers pinned to the `pmoves` compose project.
-- `make flight-check` / `make flight-check-retro` → fast readiness sweep (Docker, env vars, contracts) via `tools/flightcheck/retro_flightcheck.py`.
+- `make flight-check` / `make flight-check-retro` → fast readiness sweep (Docker, env vars, contracts) via `tools/flightcheck/retro_flightcheck.py`. The checklist now verifies:
+  - Supabase CLI stack (PostgREST + **Realtime**) reachable on `pmoves-net`
+  - External integration env (`WGER_API_TOKEN`, `FIREFLY_ACCESS_TOKEN`, Open Notebook tokens)
+  - Geometry assets (`supabase/migrations/2025-10-20_geometry_cgp_views.sql` applied) and hi-rag gateway ports
+  - Optional bundles (Open Notebook bind mounts, Jellyfin bridge) with actionable warnings
 - Windows without GNU Make: `scripts/pmoves.ps1` replicates the same targets (`./scripts/pmoves.ps1 up`, `./scripts/pmoves.ps1 smoke`, etc.).
 
 ## Supabase Workflows
@@ -26,12 +31,15 @@ This guide aggregates the entry points that keep local environments consistent a
 - `make supa-start` / `make supa-stop` / `make supa-status` → lifecycle management for the CLI stack.
 - `make supa-use-local` → copies `.env.supa.local.example` into `.env.local` so services reference the CLI hostnames/ports.
 - TIP: to share networking with the compose services, run `supabase start --network-id pmoves-net` from `pmoves/`. Afterwards, update `.env.local` with the CLI-issued keys (`supabase status -o json`) and reapply `supabase/initdb/*.sql` so PostgREST, GoTrue, and Realtime expose the expected tables.
-- When the CLI stack is running (`supabase_db_pmoves` container), `make up` automatically invokes `supabase-bootstrap` which replays `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and the v5.12 schema/seed files under `db/` so your database stays current without manual psql loops.
+- Supabase SQL lives under `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and the v5.12 schema/seed files under `db/`; run `make supabase-bootstrap` (or the aggregate `make bootstrap-data`) whenever you reset the CLI stack or land new SQL.
+- Manual refresh: run `make supabase-bootstrap` after bumping SQL files or resetting the CLI stack. Expect output showing each init/migration file (“Init …”, “Migration …”, “Seed …”) and a final `✔ Supabase CLI schema + seeds applied.`.
+- One-shot data bring-up: `make bootstrap-data` chains the Supabase bootstrap, Neo4j seed, and Qdrant/Meili demo seed so a fresh workstation lands with all backing stores populated.
 - `make neo4j-bootstrap` copies the seed CSV (`neo4j/datasets/person_aliases_seed.csv`) into the live container and runs the Cypher scripts under `neo4j/cypher/` so the CHIT/mindmap graph always has baseline data. `make up` runs this helper after the Supabase bootstrap when `pmoves-neo4j-1` is online.
-- New in October 2025: containers now honour `SUPA_REST_INTERNAL_URL` (defaults to `http://api.supabase.internal:8000/rest/v1`) so compose services call the Supabase CLI stack directly. Host-side scripts continue to rely on `SUPA_REST_URL` (`http://127.0.0.1:54321/rest/v1`), so keep both values in sync when rotating credentials.
+- Qdrant/Meili demo corpus: `make seed-data` rebuilds `hi-rag-gateway-v2` (so the loader ships with the latest code) and executes `/app/scripts/seed_local.py`, reporting the number of vectors upserted (`Qdrant upserted: 3`, `Meili indexed: True` on the stock dataset). Useful after wiping volumes or onboarding a new machine. `make bootstrap-data` runs this automatically after Supabase/Neo4j.
+- New in October 2025: containers now honour `SUPA_REST_INTERNAL_URL` (defaults to `http://host.docker.internal:65421/rest/v1`) so compose services call the Supabase CLI stack directly. Host-side scripts continue to rely on `SUPA_REST_URL` (`http://127.0.0.1:65421/rest/v1`); keep both values in sync when rotating credentials.
 - December 2025 update: services that publish to Supabase (pmoves-yt, ffmpeg-whisper, hi-rag-gateway-v2) now also read `SUPABASE_URL` and `SUPABASE_KEY`. When you run `supabase start --network-id pmoves-net`, copy the CLI-issued service role key into both `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_KEY`, and set `SUPABASE_URL=http://api.supabase.internal:8000` inside `.env.local` so in-network containers hit the CLI proxy directly.
 - Compose alternative:
-  - `SUPA_PROVIDER=compose make up` → start core stack with compose Postgres/PostgREST.
+  - `SUPABASE_RUNTIME=compose make up` → start core stack with compose Postgres/PostgREST.
   - `make supabase-up` / `make supabase-stop` / `make supabase-clean` → manage GoTrue, Realtime, Storage, Studio sidecars.
 - Remote handoff:
   - `make supa-extract-remote` → pulls documented endpoints/keys into Markdown when you have remote Supabase credentials.

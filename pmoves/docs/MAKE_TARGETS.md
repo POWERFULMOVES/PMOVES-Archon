@@ -22,9 +22,36 @@ This file summarizes the most-used targets and maps them to what they do under d
 
 ## Open Notebook
 - `make up-open-notebook`
-  - Brings up Open Notebook attached to `pmoves-net`. UI http://localhost:8503, API :5056.
+  - Brings up Open Notebook attached to `pmoves-net`. UI http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}, API :${OPEN_NOTEBOOK_API_PORT:-5055}.
 - `make down-open-notebook`
   - Stops Open Notebook.
+
+## Supabase
+- `make supa-start`
+  - Wraps `supabase start --network-id pmoves-net` (Supabase CLI runtime). Uses the port overrides from `supabase/config.toml` (65421/65432/etc.).
+- `make supa-stop`
+  - Calls `supabase stop` to shut down the CLI stack.
+- `make supabase-up`
+  - Only relevant when `SUPABASE_RUNTIME=compose`; starts the GoTrue/Realtime/Storage shim defined in `docker-compose.supabase.yml`.
+- `make supabase-bootstrap`
+  - Replays `supabase/initdb/*.sql` + `supabase/migrations/*.sql` into whichever Postgres is active (CLI or compose) and re-seeds geometry/persona fixtures.
+
+## Agents, Media, and YT
+- `make up-agents`
+  - Starts NATS, Agent Zero, Archon, Mesh Agent, and publisher-discord.
+- `make up-media`
+  - Starts optional media analyzers (`media-video`, `media-audio`).
+- `make up-yt`
+  - Starts `ffmpeg-whisper` and `pmoves-yt` for ingest.
+- `make up-jellyfin`
+  - Starts the Jellyfin bridge only.
+- `make up-n8n`
+  - Launches the n8n automation UI (`http://localhost:5678`).
+
+## Logs and Single-Service Bring-up
+- Pattern for logs: `docker compose logs -f <service>`
+- Pattern to bring up one service: `docker compose up -d <service>`
+- Common services: `hi-rag-gateway-v2`, `hi-rag-gateway-v2-gpu`, `presign`, `render-webhook`, `langextract`, `extract-worker`, `publisher`, `publisher-discord`, `pmoves-yt`.
 
 ## Smokes
 - `make smoke`
@@ -36,6 +63,12 @@ This file summarizes the most-used targets and maps them to what they do under d
 - `make smoke-geometry-db`
   - Verifies seeded geometry rows via PostgREST.
 
+## CHIT Demo Mappers
+- `make demo-health-cgp`
+  - Converts `contracts/samples/health.weekly.summary.v1.sample.json` to a CGP and posts it to `HIRAG_URL/geometry/event`.
+- `make demo-finance-cgp`
+  - Converts `contracts/samples/finance.monthly.summary.v1.sample.json` to a CGP and posts it to `HIRAG_URL/geometry/event`.
+
 ## Realtime / Admin Notes
 - v2 derives Realtime WS URL from `SUPA_REST_URL`/`SUPA_REST_INTERNAL_URL` if `SUPABASE_REALTIME_URL` host is not resolvable in-container.
 - For local smokes, set `SMOKE_ALLOW_ADMIN_STATS=true` so `/hirag/admin/stats` is readable.
@@ -44,3 +77,8 @@ This file summarizes the most-used targets and maps them to what they do under d
 ## Networks
 - The stack uses external network `pmoves-net` to allow side stacks (e.g., Open Notebook) to attach.
 
+## External Integrations
+- `make up-external` – start Wger, Firefly III, Open Notebook, and Jellyfin from published images on `pmoves-net`.
+- `make up-external-wger` / `up-external-firefly` / `up-external-on` / `up-external-jellyfin` – bring up individually.
+- Images are configurable via env: `WGER_IMAGE`, `FIREFLY_IMAGE`, `OPEN_NOTEBOOK_IMAGE`, `JELLYFIN_IMAGE`.
+- See `pmoves/docs/EXTERNAL_INTEGRATIONS_BRINGUP.md` for linking your forks and publishing to GHCR.

@@ -37,6 +37,8 @@ curl -sS http://localhost:8090/hirag/query -H 'content-type: application/json' -
 
 Notes
 - v1 now supports optional reranking via CrossEncoder. v2 remains the preferred path for advanced features and UI.
+- Warm dictionary uses the same `keys(e)` guard as v2, so `Entity` nodes without a `type` field no longer trigger `UnknownPropertyKey` warnings at startup.
+- Need demo data? `make bootstrap-data` applies Supabase SQL, seeds Neo4j, and loads the shared Qdrant/Meili corpus before exercising the legacy gateway smokes.
 
 Related
 - v2: [hi-rag-gateway-v2](../hi-rag-gateway-v2/README.md)
