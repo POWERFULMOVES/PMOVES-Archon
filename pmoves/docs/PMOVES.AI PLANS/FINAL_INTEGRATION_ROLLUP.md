@@ -98,6 +98,14 @@ Dependencies: Jellyfin bridge (for playback URLs), presign service (signed uploa
 
 ## 6. External Integrations & Publisher Reliability
 
+- **Consciousness corpus**
+  - `make harvest-consciousness` (creates/updates dataset, processed artifacts, optional Supabase schema apply).
+  - Run Selenium scraper on a host with PowerShell/Chrome: `pwsh -File pmoves/data/consciousness/.../scripts/selenium-scraper.ps1`.
+  - Push embeddings via n8n workflow (`processed-for-rag/supabase-import/n8n-workflow.json`).
+  - Pull authoritative videos via PMOVES.YT: `make -C pmoves up-yt && make -C pmoves ingest-consciousness-yt`.
+  - Publish geometry sample (`consciousness-geometry-sample.json`) through Agent Zero or `make mesh-handshake`.
+  - Log evidence (chunk counts, Supabase rows, geometry IDs) in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
+
 - **Jellyfin**
   - `make jellyfin-verify`
   - Run metadata backfill (`python pmoves/services/publisher/scripts/backfill_published_metadata.py --apply`) after reviewing dry run output.

@@ -73,6 +73,8 @@ Follow this flow before running smokes or automation. Commands run from repo roo
 - Seed helpers: `make seed-approval`, `make seed-data`, `make mindmap-seed`
 - CI parity: `make chit-contract-check`, `make jellyfin-verify`, `pytest` via `make test-discord-format` etc.
 - Integration workspace helpers live in `pmoves/tools/integrations/*.sh|ps1` (bootstrap, import flows, push PRs).
+- Consciousness harvest: `make harvest-consciousness` (scaffolds dataset + processed artifacts)
+- Consciousness YouTube ingestion: `make ingest-consciousness-yt ARGS="--max 5"` (requires pmoves-yt)
 
 ## Creative Stack Notes
 - Installers / tutorials / workflows live under `pmoves/creator/`. Run the “One-Click Bring-Up Flow” before testing n8n creative webhooks (`wan_to_cgp`, `qwen_to_cgp`, `vibevoice_to_cgp`).

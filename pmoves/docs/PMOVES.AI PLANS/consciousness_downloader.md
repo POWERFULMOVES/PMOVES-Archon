@@ -20,11 +20,14 @@ All paths below are relative to the repository root.
 Generate the base directory structure and download static research artifacts.
 
 ```bash
-bash "pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.sh"
+make -C pmoves harvest-consciousness
 ```
 
-> Windows/PowerShell users can run the companion script:
-> `pwsh -File pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1`
+This target runs the bash helper, builds processed artifacts, and (if available) applies the Supabase schema automatically.
+
+> To re-run individual helpers:
+> - Bash: `bash "pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.sh"`
+> - PowerShell: `pwsh -File pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1`
 
 Outputs land under `pmoves/data/consciousness/Constellation-Harvest-Regularization/`:
 - `website-mirror/`, `theories/`, `categories/`, `subcategories/`
@@ -48,17 +51,32 @@ The scraper produces `data-exports/discovered-links.json` and refreshed HTML sna
 ## 3. Prepare Embedding Payloads
 1. Populate `processed-for-rag/embeddings-ready/` with chunked JSONL files (`consciousness-chunks.jsonl`).
    - Use the provided PowerShell helpers or adapt `pmoves/n8n` flows.
-2. Apply the Supabase schema for consciousness datasets:
+2. Apply the Supabase schema for consciousness datasets. Example (Supabase CLI runtime):
    ```bash
-   supabase db execute --file pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
+   supabase status --output env > supabase/.tmp_env
+   source supabase/.tmp_env
+   psql "$${SUPABASE_DB_URL}" -f pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
    ```
+   Adjust the command if you run Postgres via docker-compose (e.g., `docker compose exec postgres psql -U pmoves -d pmoves -f ...`).
 3. Import the n8n workflow to push embeddings:
    - `n8n` UI → Workflows → Import → `processed-for-rag/supabase-import/n8n-workflow.json`
    - Bind Hugging Face + Supabase credentials (respect `env.shared` secrets).
 
 ---
 
-## 4. Integrate with Geometry Bus & CHIT
+## 4. Pull Authoritative YouTube Videos
+1. Ensure pmoves-yt stack is running (`make -C pmoves up-yt` brings up pmoves-yt + ffmpeg-whisper).
+2. Run the ingestion helper (supports `--dry-run`):
+   ```bash
+   make -C pmoves ingest-consciousness-yt ARGS="--max 5"
+   ```
+   This searches YouTube via yt-dlp using chunk titles, then calls `/yt/ingest` and `/yt/emit` for each match. Results are stored in `processed-for-rag/supabase-import/consciousness-video-sources.json`.
+3. Inspect the mapping file and adjust entries if you prefer curated interviews (update `video_id`/`video_url` and rerun to emit geometry again).
+4. Verify MinIO now contains the downloaded media/transcripts for Jellyfin and Creator pipelines.
+
+---
+
+## 5. Integrate with Geometry Bus & CHIT
 1. Map curated theory rows into CGP packets (new mapper or manual pack builder).
 2. Publish via:
    - `make mesh-handshake FILE=pmoves/data/consciousness/.../geometry_payload.json`
@@ -70,7 +88,7 @@ The scraper produces `data-exports/discovered-links.json` and refreshed HTML sna
 
 ---
 
-## 5. Evo Swarm & Retrieval Hooks
+## 6. Evo Swarm & Retrieval Hooks
 - Add consciousness dataset namespaces to Evo Swarm controller defaults (`env.shared`, e.g., `EVOSWARM_CONTENT_NAMESPACES=pmoves.consciousness`).
 - Rerun `make up-agents` and verify `geometry.swarm.meta.v1` events include new packs.
 - Indexing/testing:
@@ -79,7 +97,7 @@ The scraper produces `data-exports/discovered-links.json` and refreshed HTML sna
 
 ---
 
-## 6. Evidence & Documentation
+## 7. Evidence & Documentation
 - Log each stage (commands, timestamps, outputs) in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
 - Archive raw captures under `pmoves/docs/logs/<date>_consciousness_harvest.txt`.
 - Update related docs:
@@ -89,7 +107,7 @@ The scraper produces `data-exports/discovered-links.json` and refreshed HTML sna
 
 ---
 
-## 7. Follow-on Enhancements
+## 8. Follow-on Enhancements
 - Automate CGP generation (add mapper to `pmoves/services/common/cgp_mappers.py`).
 - Build a `make consciousness-harvest` wrapper target to run steps 1–3.
 - Extend n8n flows to notify Agent Zero / Discord when new theories land.

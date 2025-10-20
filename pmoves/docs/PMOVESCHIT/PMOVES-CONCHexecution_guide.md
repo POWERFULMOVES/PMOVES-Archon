@@ -22,29 +22,35 @@ Optional services:
 
 ## 1. Harvest the Dataset
 ```bash
-bash "pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.sh"
-```
-
-```powershell
+make -C pmoves harvest-consciousness
 pwsh -File pmoves/data/consciousness/Constellation-Harvest-Regularization/scripts/selenium-scraper.ps1
 ```
 
-Outputs live in `pmoves/data/consciousness/Constellation-Harvest-Regularization/` and include static HTML snapshots, research papers, discovery manifests, and helper scripts.
+Outputs live in `pmoves/data/consciousness/Constellation-Harvest-Regularization/` and include static HTML snapshots, research papers, discovery manifests, and helper scripts. The make target wraps the bash helper and schema generation; run the PowerShell scraper on a host with Selenium/Chrome installed to capture dynamic content.
 
-> Windows-only alternative for step 1:  
-> `pwsh -File pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1`
+> Manual alternatives:
+> - Bash: `bash "pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.sh"`
+> - Windows: `pwsh -File pmoves/docs/PMOVES.AI PLANS/consciousness_downloader.ps1`
 
 ---
 
 ## 2. Prepare Embeddings & Supabase Schema
-1. Generate chunked JSONL files under `processed-for-rag/embeddings-ready/` (PowerShell helper or custom tooling).
-2. Apply schema (Supabase CLI):
+1. Generate chunked JSONL files under `processed-for-rag/embeddings-ready/` (PowerShell helper, make target, or custom tooling).
+2. Apply schema (Supabase CLI example):
    ```bash
-   supabase db execute --file pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
+   supabase status --output env > supabase/.tmp_env && source supabase/.tmp_env
+   psql "$${SUPABASE_DB_URL}" -f pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
    ```
+   *Compose runtime:* `docker compose -p pmoves exec postgres psql -U pmoves -d pmoves -f pmoves/data/.../consciousness-schema.sql`
 3. Import the n8n workflow to push embeddings:
    - n8n UI → _Workflows → Import_ → select `processed-for-rag/supabase-import/n8n-workflow.json`
    - Configure Hugging Face + Supabase credentials (respect `env.shared`).
+4. Pull authoritative videos via PMOVES.YT:
+   ```bash
+   make -C pmoves up-yt
+   make -C pmoves ingest-consciousness-yt ARGS="--max 5"
+   ```
+   Review `processed-for-rag/supabase-import/consciousness-video-sources.json` and rerun without `--dry-run` once satisfied.
 
 ---
 
