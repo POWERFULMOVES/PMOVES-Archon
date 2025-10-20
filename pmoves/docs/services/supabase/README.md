@@ -22,23 +22,23 @@ The Makefile picks the CLI path by default. Override with `SUPA_PROVIDER=compose
 
 1. **Install the CLI** (one-time): `winget install supabase.supabase` on Windows or `npm i -g supabase` on macOS/Linux.  
 2. **Initialise the project** (one-time): `make supa-init` → creates `supabase/config.toml`.
-3. **Optional: disable Realtime when you don’t need it locally**
-   - Edit `supabase/config.toml` and set:
-     ```toml
-     [realtime]
-     enabled = false
+3. **Make sure Realtime is enabled and shares the network**
+   - Verify `supabase/config.toml` has `enabled = true` under the `[realtime]` block (this is the default).
+   - Start the stack on the shared PMOVES network so containers can resolve each other:
+     ```bash
+     supabase start --network-id pmoves-net
      ```
-     (Supabase honours per-service `enabled` flags during `supabase start`.)  
-   - Alternatively, start the stack with exclusions: `supabase start -x realtime storage` if you only need Postgres + PostgREST.  
-4. **Start the stack**: `make supa-start`. The CLI seeds Postgres and exposes:
+     (`make supa-start` runs the same command once `config.toml` is in place. Create the network with `docker network create pmoves-net` if you haven’t already.)
+4. **The CLI exposes the following endpoints** once it is running:
    - Host REST: `http://127.0.0.1:54321/rest/v1`
    - Container REST: `http://api.supabase.internal:8000/rest/v1`
    - GoTrue: `http://127.0.0.1:54323`
    - Storage: `http://127.0.0.1:54324`
+   - Realtime WebSocket: `ws://127.0.0.1:54321/realtime/v1`
 5. **Wire PMOVES env**: `make supa-use-local` copies `.env.supa.local.example` → `.env.local`. Paste the anon/service keys from `make supa-status`.
-   - Set `SUPA_REST_URL=http://localhost:54321/rest/v1`
+   - Set `SUPA_REST_URL=http://host.docker.internal:54321/rest/v1`
    - Set `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1`
-   - Leave `SUPABASE_REALTIME_URL=disabled` (the gateways auto-detect and skip realtime when disabled).
+   - Set `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1`
 6. **Launch PMOVES**: `make up` (or `make up-gpu` if you also want GPU profiles). The bootstrap step will replay SQL under `supabase/initdb/` and `supabase/migrations/` into whichever Postgres instance is running (CLI or compose).  
 7. **Stop the CLI stack**: `make supa-stop`.
 
@@ -65,7 +65,7 @@ docker compose -p pmoves --profile data up -d qdrant neo4j minio meilisearch pre
 or simply re-run `make up` to let the Makefile handle prerequisites.
 
 **Supabase Realtime**  
-Realtime is optional for local dev. Leaving `SUPABASE_REALTIME_URL` blank or set to `disabled` prevents the hi-rag gateways from spamming connection retries when the CLI stack is running without the realtime container. If you later enable realtime, set `SUPABASE_REALTIME_URL` back to the websocket endpoint (for the CLI stack that’s `ws://localhost:54321/realtime/v1`) and restart the gateways with `docker compose --profile data restart hi-rag-gateway-v2 hi-rag-gateway-v2-gpu`.
+Realtime must be running when you mirror the production stack. Start the CLI with `supabase start --network-id pmoves-net` (or `make supa-start` after configuring `config.toml`) and set `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1`. If containers still can’t connect, confirm `docker ps` lists `supabase_realtime` and that you can `wget http://host.docker.internal:54321/realtime/v1` from inside a PMOVES container.
 
 **CLI vs Compose PostgREST**  
 When the CLI stack is active, the Makefile detects `supabase_db_<project>` containers and applies migrations there. If you stop the CLI stack and flip to compose, run `SUPA_PROVIDER=compose make up` followed by `make supabase-up` to ensure PostgREST and the ancillary services are reachable at `http://postgrest:3000`.
@@ -77,14 +77,14 @@ When the CLI stack is active, the Makefile detects `supabase_db_<project>` conta
 | PostgREST (CLI) | `curl http://localhost:54321/rest/v1` | JSON, HTTP 200 |
 | PostgREST (compose) | `curl http://localhost:3000` | JSON, HTTP 200 |
 | Supabase status | `make supa-status` | Lists service ports + anon/service keys |
-| Geometry warmup | `docker logs pmoves-hi-rag-gateway-v2-gpu-1 | grep 'ShapeStore warmed'` | Should show `Supabase realtime service not available...` (informational) or `Supabase realtime geometry listener started` if realtime enabled |
+| Geometry warmup | `docker logs pmoves-hi-rag-gateway-v2-gpu-1 | grep 'Supabase realtime geometry listener started'` | Confirms the gateway subscribed to `geometry.cgp.v1` over WebSocket |
 
 ## 5. Troubleshooting
 
 | Symptom | Resolution |
 | --- | --- |
 | `Get "http://postgrest:3000/...": context deadline exceeded` | Ensure either the CLI stack is running (`make supa-start`) or the compose fallback is up (`SUPA_PROVIDER=compose make up && make supabase-up`). |
-| `hi-rag-gateway` logs `Configured SUPABASE_REALTIME_URL host does not resolve` | Set `SUPABASE_REALTIME_URL=disabled` (CLI stack without realtime) or point it at a resolvable websocket endpoint before restarting the gateways. |
+| `hi-rag-gateway` logs `Configured SUPABASE_REALTIME_URL host does not resolve` | Ensure Supabase CLI is running with `--network-id pmoves-net`, and confirm `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1` (or another resolvable websocket host) before restarting the gateways. |
 | `Neo4jUnavailable` warnings during shape warmup | Start the data profile (`make up` or `docker compose --profile data up -d neo4j qdrant`). |
 | Need to reset CLI data | `make supa-stop` → delete the `.supabase` Docker volumes → `make supa-start` → `make supabase-bootstrap`. |
 
