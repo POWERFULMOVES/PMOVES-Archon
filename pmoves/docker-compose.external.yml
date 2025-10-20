@@ -29,14 +29,37 @@ services:
     volumes:
       - firefly-storage:/var/www/html/storage
 
+  open-notebook-surrealdb-ext:
+    image: ${OPEN_NOTEBOOK_SURREAL_IMAGE:-surrealdb/surrealdb:v2}
+    container_name: pmoves-open-notebook-surrealdb
+    command: start --log info --user ${OPEN_NOTEBOOK_SURREAL_USER:-root} --pass ${OPEN_NOTEBOOK_SURREAL_PASS:-root} rocksdb:/mydata/mydatabase.db
+    restart: unless-stopped
+    user: "0:0"
+    networks: [pmoves]
+    volumes:
+      - ./data/open-notebook/surreal_data:/mydata
+
   open-notebook-ext:
     image: ${OPEN_NOTEBOOK_IMAGE:-ghcr.io/powerfulmoves/pmoves-open-notebook:main}
     container_name: pmoves-open-notebook
     restart: unless-stopped
+    depends_on:
+      - open-notebook-surrealdb-ext
     networks: [pmoves]
+    environment:
+      SURREAL_ADDRESS: ${OPEN_NOTEBOOK_SURREAL_ADDRESS:-pmoves-open-notebook-surrealdb}
+      SURREAL_PORT: ${OPEN_NOTEBOOK_SURREAL_PORT:-8000}
+      SURREAL_USER: ${OPEN_NOTEBOOK_SURREAL_USER:-root}
+      SURREAL_PASS: ${OPEN_NOTEBOOK_SURREAL_PASS:-root}
+      SURREAL_NAMESPACE: ${OPEN_NOTEBOOK_SURREAL_NAMESPACE:-open-notebook}
+      SURREAL_DATABASE: ${OPEN_NOTEBOOK_SURREAL_DATABASE:-open-notebook}
+      OPEN_NOTEBOOK_API_TOKEN: ${OPEN_NOTEBOOK_API_TOKEN:-}
+      OPEN_NOTEBOOK_PASSWORD: ${OPEN_NOTEBOOK_PASSWORD:-}
     ports:
-      - "8503:8502"  # UI
-      - "5056:5055"  # API
+      - "${OPEN_NOTEBOOK_UI_PORT:-8503}:8502"    # UI
+      - "${OPEN_NOTEBOOK_API_PORT:-5055}:5055"  # API
+    volumes:
+      - ./data/open-notebook/notebook_data:/app/data
 
   jellyfin-ext:
     image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:latest}

@@ -88,9 +88,9 @@ recreate-v2: ## Force-recreate v2 CPU container (no deps)
 	@echo "✔ Recreated hi-rag-gateway-v2"
 
 .PHONY: up-open-notebook
-up-open-notebook: ## Bring up Open Notebook on pmoves-net (UI :8503, API :5056)
+up-open-notebook: ## Bring up Open Notebook on pmoves-net (defaults UI :8503, API :5055)
 	@docker compose -f docker-compose.open-notebook.yml up -d open-notebook
-	@echo "✔ Open Notebook up (http://localhost:8503, API :5056)"
+	@echo "✔ Open Notebook up (http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}, API :${OPEN_NOTEBOOK_API_PORT:-5055})"
 
 .PHONY: down-open-notebook
 down-open-notebook: ## Stop Open Notebook

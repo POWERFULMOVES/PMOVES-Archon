@@ -22,7 +22,7 @@ This file summarizes the most-used targets and maps them to what they do under d
 
 ## Open Notebook
 - `make up-open-notebook`
-  - Brings up Open Notebook attached to `pmoves-net`. UI http://localhost:8503, API :5056.
+  - Brings up Open Notebook attached to `pmoves-net`. UI http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}, API :${OPEN_NOTEBOOK_API_PORT:-5055}.
 - `make down-open-notebook`
   - Stops Open Notebook.
 
