@@ -3,13 +3,13 @@
 ### Core stack lifecycle
 
 - `make up`
-  - Brings up the core data profile (`qdrant`, `neo4j`, `minio`, `meilisearch`, `presign`, plus Postgres/PostgREST when `SUPA_PROVIDER=compose`) and all default workers (`hi-rag-gateway-v2`, `retrieval-eval`, `render-webhook`, `langextract`, `extract-worker`).
+  - Brings up the core data profile (`qdrant`, `neo4j`, `minio`, `meilisearch`, `presign`, plus Postgres/PostgREST when `SUPABASE_RUNTIME=compose`) and all default workers (`hi-rag-gateway-v2`, `retrieval-eval`, `render-webhook`, `langextract`, `extract-worker`).
   - Also launches pmoves.yt (`ffmpeg-whisper`, `pmoves-yt`) and the Jellyfin bridge. When running with the compose Supabase provider the target automatically chains to `make supabase-up` so GoTrue/Realtime/Storage/Studio come online.
-  - Defaults to `SUPA_PROVIDER=cli`, which skips the compose Postgres/PostgREST pair so that the Supabase CLI database can own those ports.
-  - If the Supabase CLI stack is detected (`supabase_db_pmoves`), the target also runs `supabase-bootstrap` to replay `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and the v5.12 schema/seed SQL under `db/`.
+  - Defaults to `SUPABASE_RUNTIME=cli`, which skips the compose Postgres/PostgREST pair so that the Supabase CLI database can own those ports.
+- Follow `make up` with `make bootstrap-data` (or the granular `make supabase-bootstrap` / `make neo4j-bootstrap` / `make seed-data`) to apply SQL, seed Neo4j, and load demo vectors on fresh installs.
 
 - `make up-cli` / `make up-compose`
-  - Convenience shims that force a single run of `make up` with `SUPA_PROVIDER=cli` or `SUPA_PROVIDER=compose` respectively.
+  - Convenience shims that force a single run of `make up` with `SUPABASE_RUNTIME=cli` or `SUPABASE_RUNTIME=compose` respectively.
 
 - `make down`
   - Stops and removes the pmoves Docker Compose project while leaving Supabase CLI services untouched.
@@ -74,9 +74,11 @@ Set `EXTERNAL_NEO4J|MEILI|QDRANT|SUPABASE=true` in `.env.local` to skip local in
   - Parses `supa.md` and produces `.env.supa.remote` (ignored by Git) with the endpoints/keys discovered upstream.
 
 - `make supabase-bootstrap`
-  - Idempotently applies all SQL under `supabase/initdb/` (including the CHIT demo fixture in `12_geometry_fixture.sql`), `supabase/migrations/`, and the v5.12 schema/seed files in `db/` against the Supabase CLI database (expects the `supabase_db_pmoves` container to be running). This target runs automatically at the end of `make up`, but you can invoke it manually after rotating credentials or pulling new migrations.
+  - Idempotently applies all SQL under `supabase/initdb/` (including the CHIT demo fixture in `12_geometry_fixture.sql`), `supabase/migrations/`, and the v5.12 schema/seed files in `db/` against the Supabase CLI database (expects the `supabase_db_pmoves` container to be running). Run directly after you edit migrations or reset the CLI stack, or let `make bootstrap-data` call it for you.
 - `make neo4j-bootstrap`
   - Copies `neo4j/datasets/person_aliases_seed.csv` into the running container and executes the curated Cypher set (`neo4j/cypher/001_init.cypher`, `002_load_person_aliases.cypher`, `010_chit_geometry_fixture.cypher`, `011_chit_geometry_smoke.cypher`) via `cypher-shell`. Useful after refreshing the aliases CSV, replaying the CHIT constellation, or wiping the graph.
+- `make bootstrap-data`
+  - Convenience umbrella that runs `supabase-bootstrap`, `neo4j-bootstrap`, and `seed-data` so Supabase, Neo4j, and Qdrant/Meili land in a known-good state on a new workstation.
 
 ### Notes
 

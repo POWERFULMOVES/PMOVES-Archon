@@ -24,12 +24,12 @@ This guide aggregates the entry points that keep local environments consistent a
 - `make supa-start` / `make supa-stop` / `make supa-status` → lifecycle management for the CLI stack.
 - `make supa-use-local` → copies `.env.supa.local.example` into `.env.local` so services reference the CLI hostnames/ports.
 - TIP: to share networking with the compose services, run `supabase start --network-id pmoves-net` from `pmoves/`. Afterwards, update `.env.local` with the CLI-issued keys (`supabase status -o json`) and reapply `supabase/initdb/*.sql` so PostgREST, GoTrue, and Realtime expose the expected tables.
-- When the CLI stack is running (`supabase_db_pmoves` container), `make up` automatically invokes `supabase-bootstrap` which replays `supabase/initdb/*.sql` (including `12_geometry_fixture.sql`), `supabase/migrations/*.sql`, and the v5.12 schema/seed files under `db/` so your database stays current without manual psql loops.
-- `make neo4j-bootstrap` copies the seed CSV (`neo4j/datasets/person_aliases_seed.csv`) into the live container and now executes the curated CHIT geometry fixture `neo4j/cypher/010_chit_geometry_fixture.cypher` followed by the smoke validator `011_chit_geometry_smoke.cypher`. `make up` runs this helper after the Supabase bootstrap when `pmoves-neo4j-1` is online.
+- Apply SQL/seeds with `make supabase-bootstrap` (or run the new `make bootstrap-data` umbrella) after starting the CLI stack. This replays `supabase/initdb/*.sql` (including `12_geometry_fixture.sql`), `supabase/migrations/*.sql`, and the v5.12 schema/seed files under `db/` so your database stays current without manual psql loops.
+- `make neo4j-bootstrap` copies the seed CSV (`neo4j/datasets/person_aliases_seed.csv`) into the live container and now executes the curated CHIT geometry fixture `neo4j/cypher/010_chit_geometry_fixture.cypher` followed by the smoke validator `011_chit_geometry_smoke.cypher`. `make bootstrap-data` runs this helper (and `make seed-data`) once the Supabase bootstrap completes.
 - New in October 2025: containers now honour `SUPA_REST_INTERNAL_URL` (defaults to `http://postgrest:3000`) so compose services call the bundled PostgREST directly. Host-side scripts continue to rely on `SUPA_REST_URL` (`http://postgrest:3000`); override both with the Supabase CLI URLs (`http://127.0.0.1:54321/rest/v1`, `http://api.supabase.internal:8000/rest/v1`) when you switch back to the CLI stack.
 - December 2025 update: services that publish to Supabase (pmoves-yt, ffmpeg-whisper, hi-rag-gateway-v2) now also read `SUPABASE_URL` and `SUPABASE_KEY`. Compose defaults to `SUPABASE_URL=http://postgrest:3000`; when you run `supabase start --network-id pmoves-net`, copy the CLI-issued service role key into both `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_KEY`, and adjust `SUPABASE_URL` to `http://api.supabase.internal:8000` inside `.env.local` so in-network containers hit the CLI proxy directly.
 - Compose alternative:
-  - `SUPA_PROVIDER=compose make up` → start core stack with compose Postgres/PostgREST.
+  - `SUPABASE_RUNTIME=compose make up` → start core stack with compose PostgREST/GoTrue shim.
   - `make supabase-up` / `make supabase-stop` / `make supabase-clean` → manage GoTrue, Realtime, Storage, Studio sidecars.
 - Remote handoff:
   - `make supa-extract-remote` → pulls documented endpoints/keys into Markdown when you have remote Supabase credentials.
@@ -46,7 +46,7 @@ This guide aggregates the entry points that keep local environments consistent a
 - **macOS (Homebrew)**: `brew update && brew upgrade supabase/tap/supabase`.
 - **Linux package managers**: use the matching package command, e.g. `sudo apt update && sudo apt install --only-upgrade supabase` (Debian/Ubuntu) or `sudo dnf upgrade supabase` (Fedora/RHEL). Arch users can run `paru -Syu supabase-cli` (or the helper they originally used).
 - **Node-based installs**: if the CLI lives in `devDependencies`, run `npm update supabase --save-dev` (or `pnpm/yarn` equivalents). Global npm installs update with `npm install -g supabase`.
-- After upgrading, verify with `supabase --version`, then restart the local stack (`supabase start` or `SUPA_PROVIDER=cli make up`).
+- After upgrading, verify with `supabase --version`, then restart the local stack (`supabase start --network-id pmoves-net` or `SUPABASE_RUNTIME=cli make up`).
 
 
 ## Data, Agents, & Utilities

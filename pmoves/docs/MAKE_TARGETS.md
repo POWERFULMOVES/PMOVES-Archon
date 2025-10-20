@@ -26,6 +26,16 @@ This file summarizes the most-used targets and maps them to what they do under d
 - `make down-open-notebook`
   - Stops Open Notebook.
 
+## Supabase
+- `make supa-start`
+  - Wraps `supabase start --network-id pmoves-net` (Supabase CLI runtime). Uses the port overrides from `supabase/config.toml` (65421/65432/etc.).
+- `make supa-stop`
+  - Calls `supabase stop` to shut down the CLI stack.
+- `make supabase-up`
+  - Only relevant when `SUPABASE_RUNTIME=compose`; starts the GoTrue/Realtime/Storage shim defined in `docker-compose.supabase.yml`.
+- `make supabase-bootstrap`
+  - Replays `supabase/initdb/*.sql` + `supabase/migrations/*.sql` into whichever Postgres is active (CLI or compose) and re-seeds geometry/persona fixtures.
+
 ## Agents, Media, and YT
 - `make up-agents`
   - Starts NATS, Agent Zero, Archon, Mesh Agent, and publisher-discord.

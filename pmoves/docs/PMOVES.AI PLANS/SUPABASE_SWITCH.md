@@ -14,8 +14,8 @@
     - Ensure PostgREST uses the full path for both host + containers:
       - `SUPA_REST_URL=http://localhost:54321/rest/v1` (host-facing scripts, smoke harness)
       - `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1` (compose services talk to the CLI stack on the shared Docker network)
-  - Run pmoves: `make up` (default `SUPA_PROVIDER=cli` avoids Compose Postgres/PostgREST)
-    - When the Supabase CLI stack is active you’ll see `supabase-bootstrap` replay the SQL under `supabase/initdb/` (including `12_geometry_fixture.sql`), `supabase/migrations/`, and `db/v5_12_*.sql` automatically so migrations/seeds stay current. The same run also triggers `neo4j-bootstrap` to load the CHIT geometry fixture (`010_chit_geometry_fixture.cypher`) and the smoke validator (`011_chit_geometry_smoke.cypher`) when the Neo4j container is up.
+  - Run pmoves: `make up` (default `SUPABASE_RUNTIME=cli` avoids Compose Postgres/PostgREST)
+    - Follow with `make bootstrap-data` to replay Supabase SQL (`supabase/initdb/`, `supabase/migrations/`, `db/v5_12_*.sql`), load the CHIT geometry fixture (`neo4j/cypher/010_chit_geometry_fixture.cypher`), run the smoke validator (`011_chit_geometry_smoke.cypher`), and load the demo Qdrant/Meili corpus in one command. Use the individual helpers when you only need a subset.
   - Stop CLI: `make supa-stop`
 
 - Self‑hosted Supabase (remote)
@@ -25,7 +25,7 @@
 
 - Compose‑based Supabase (lightweight alternative)
   - Use if you don’t need every Supabase component locally
-  - Start: `SUPA_PROVIDER=compose make up` then `make supabase-up`
+  - Start: `SUPABASE_RUNTIME=compose make up` then `make supabase-up`
   - Stop: `make supabase-stop` or `make down`
   - Reset (if you had an older volume before the 2025‑10‑11 schema updates): `make supabase-clean` then rerun `make supabase-up`
 

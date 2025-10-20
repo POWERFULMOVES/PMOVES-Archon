@@ -34,8 +34,7 @@ This guide covers preflight wiring, starting the core stack, and running the loc
         - `SUPA_REST_INTERNAL_URL=http://postgrest:3000` (compose services)
         - Override both with the Supabase CLI values (`http://127.0.0.1:54321/rest/v1`, `http://api.supabase.internal:8000/rest/v1`) if you run the CLI stack instead of Docker compose.
 
-    - With the Supabase CLI stack running, `make up` will replay all schema + seed SQL (including `supabase/initdb/12_geometry_fixture.sql`) before the smoke harness executes. You can re-run it manually via `make supabase-bootstrap`.
-    - If Neo4j is running (`pmoves-neo4j-1`), run `make neo4j-bootstrap` (or `scripts/neo4j_bootstrap.sh`) to load the CHIT geometry fixture and verify the two-modality smoke check so `/mindmap/{id}` resolves during geometry checks.
+    - After the Supabase CLI stack is online, run `make bootstrap-data` to apply Supabase SQL (including `supabase/initdb/12_geometry_fixture.sql`), seed Neo4j, and load the demo Qdrant/Meili corpus. Re-run individual layers with `make supabase-bootstrap`, `make neo4j-bootstrap`, or `make seed-data` if you only need one.
 
 3. Buckets: ensure MinIO has buckets you plan to use (defaults: `assets`, `outputs`). You can create buckets via the MinIO Console at `http://localhost:9001` if needed.
 
@@ -108,7 +107,7 @@ Expected: the Discord channel receives a rich embed with the Smoke Story title, 
 
 ## 4) Seed Demo Data (Optional but helpful)
 
-- `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
+- `make seed-data` (loads small sample docs into Qdrant/Meilisearch; already included in `make bootstrap-data`)
 - Alternatively: `make load-jsonl FILE=$(pwd)/datasets/queries_demo.jsonl`
 
 ## 5) Run Smoke Tests

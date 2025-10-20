@@ -22,7 +22,9 @@ endif
 ifeq ($(EXTERNAL_SUPABASE),true)
   supa_profile :=
 else
-  supa_profile := ,supabase-local
+supa_profile := ,supabase-local
+SUPABASE_RUNTIME ?= cli
+SUPA_PROVIDER := $(SUPABASE_RUNTIME)
 endif
 COMPOSE_PROFILES ?= $(compose_profiles)$(neo4j_profile)$(meili_profile)$(qdrant_profile)$(supa_profile)
 export COMPOSE_PROFILES
@@ -123,7 +125,8 @@ NOTEBOOK_PROJECT ?= $(PROJECT)-notebook
 JELLYFIN_AI_BASE ?= jellyfin-ai
 export JELLYFIN_AI_BASE
 # Supabase provider: 'cli' for Supabase CLI stack, 'compose' for docker-compose stack
-SUPA_PROVIDER ?= cli
+# Back-compat alias for older scripts. Use SUPABASE_RUNTIME going forward.
+SUPA_PROVIDER ?= $(SUPABASE_RUNTIME)
 
 # Data services differ by provider: with CLI we don't run Postgres/PostgREST here
 DATA_SERVICES := minio presign
@@ -276,31 +279,43 @@ SUPA_FILE ?= docker-compose.supabase.yml
 SUPA_PROJECT ?= pmoves
 
 supabase-up:
-	docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) up -d gotrue realtime storage studio
+	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
+		supabase start --network-id pmoves-net; \
+	else \
+		docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) up -d gotrue realtime storage studio; \
+	fi
 
 supabase-stop:
-	docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) stop gotrue realtime storage studio
+	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
+		supabase stop; \
+	else \
+		docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) stop gotrue realtime storage studio; \
+	fi
 
 supabase-clean:
-	- docker volume rm $(PROJECT)_supabase-storage 2> NUL || true
+	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
+		echo "↷ Supabase CLI manages its own volumes; run 'supabase stop' followed by 'supabase start --reset' if you need a clean slate."; \
+	else \
+		- docker volume rm $(PROJECT)_supabase-storage 2> NUL || true; \
+	fi
 
 # Supabase CLI targets (Option A). Requires 'supabase' CLI in PATH.
 .PHONY: supa-init supa-start supa-stop supa-status
 supa-init:
-	where supabase > NUL 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
-	supabase init
+	command -v supabase >/dev/null 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
+	cd .. && supabase init
 
 supa-start:
-	where supabase > NUL 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
-	supabase start
+	command -v supabase >/dev/null 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
+	cd .. && supabase start --network-id pmoves-net
 
 supa-stop:
-	where supabase > NUL 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
-	supabase stop
+	command -v supabase >/dev/null 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
+	cd .. && supabase stop
 
 supa-status:
-	where supabase > NUL 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
-	supabase status
+	command -v supabase >/dev/null 2>&1 || (echo Supabase CLI not found. Install via 'winget install supabase.supabase' or 'npm i -g supabase' && exit 1)
+	cd .. && supabase status
 
 supa-extract-remote:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/extract_supa_md.ps1 -Source supa.md -Out .env.supa.remote
@@ -316,26 +331,31 @@ env-check:
 
 .PHONY: supabase-bootstrap
 supabase-bootstrap:
-	@if docker ps --format '{{.Names}}' | grep -q '^supabase_db_pmoves$$'; then \
-	  echo "→ Supabase CLI stack detected; applying schema + seed SQL"; \
+	@if docker ps --format '{{.Names}}' | grep -q '^supabase_db_'; then \
+	  supabase_db=$$(docker ps --format '{{.Names}}' | grep -m1 '^supabase_db_'); \
+	  echo "→ Supabase CLI stack detected ($$supabase_db); applying schema + seed SQL"; \
 	  set -eu; \
 	  for f in supabase/initdb/*.sql; do \
-	    echo "   • Init $$f"; \
-	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    if [ -f "$$f" ]; then \
+	      echo "   • Init $$f"; \
+	      cat "$$f" | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    fi; \
 	  done; \
 	  for f in supabase/migrations/*.sql; do \
-	    echo "   • Migration $$f"; \
-	    cat "$$f" | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    if [ -f "$$f" ]; then \
+	      echo "   • Migration $$f"; \
+	      cat "$$f" | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    fi; \
 	  done; \
 	  if [ -f db/v5_12_grounded_personas.sql ]; then \
 	    echo "   • Schema db/v5_12_grounded_personas.sql"; \
-	    cat db/v5_12_grounded_personas.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    cat db/v5_12_grounded_personas.sql | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
 	  fi; \
 	  if [ -f db/v5_12_seed.sql ]; then \
 	    echo "   • Seed db/v5_12_seed.sql"; \
-	    cat db/v5_12_seed.sql | docker exec -i supabase_db_pmoves psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
+	    cat db/v5_12_seed.sql | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
 	  fi; \
-	  echo "✔ Supabase schema + seeds applied."; \
+	  echo "✔ Supabase CLI schema + seeds applied."; \
 	else \
 	  if docker ps --format '{{.Names}}' | grep -q '^pmoves-postgres-1$$'; then \
 	    echo "→ Compose Postgres detected; applying schema + seed SQL"; \
@@ -365,6 +385,12 @@ supabase-bootstrap:
 .PHONY: neo4j-bootstrap
 neo4j-bootstrap:
 	@bash scripts/neo4j_bootstrap.sh
+
+.PHONY: bootstrap-data
+bootstrap-data: ## Apply Supabase SQL, Neo4j seeds, and Qdrant/Meili demo docs
+	@$(MAKE) supabase-bootstrap
+	@$(MAKE) neo4j-bootstrap
+	@$(MAKE) seed-data
 
 .PHONY: smoke-webhook-ci
 smoke-webhook-ci:

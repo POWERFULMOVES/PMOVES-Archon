@@ -27,8 +27,7 @@ This guide covers preflight wiring, starting the core stack, and running the loc
    - Supabase REST endpoints:
      - `SUPA_REST_URL=http://127.0.0.1:54321/rest/v1` (host-side smoke harness + curl snippets)
      - `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1` (compose services targeting the Supabase CLI stack)
-   - With the Supabase CLI stack running, `make up` will replay all schema + seed SQL before the smoke harness executes. You can re-run it manually via `make supabase-bootstrap`.
-   - If Neo4j is running (`pmoves-neo4j-1`), seed the CHIT mind-map aliases via `make neo4j-bootstrap` so `/mindmap/{id}` resolves during geometry checks.
+   - After the CLI stack is running, execute `make bootstrap-data` to apply Supabase SQL, seed Neo4j, and load the demo Qdrant/Meili corpus before smokes. Re-run components individually with `make supabase-bootstrap`, `make neo4j-bootstrap`, or `make seed-data` if you only need one layer.
 4. External integrations: copy tokens into `pmoves/.env.local` so the health/finance automations can run without errors.
    - `WGER_API_TOKEN`, `WGER_BASE_URL=http://wger:8000`
    - `FIREFLY_ACCESS_TOKEN`, `FIREFLY_BASE_URL=http://firefly:8080`
@@ -109,7 +108,7 @@ Expected: the Discord channel receives a rich embed with the Smoke Story title, 
 Remove `public_url` from the payload if you want to confirm the local-path fallback formatting.
 
 ## 4) Seed Demo Data (Optional but helpful)
-- `make seed-data` (loads small sample docs into Qdrant/Meilisearch)
+- `make seed-data` (loads small sample docs into Qdrant/Meilisearch; already invoked by `make bootstrap-data`)
 - Alternatively: `make load-jsonl FILE=$(pwd)/datasets/queries_demo.jsonl`
 
 ## 5) Run Smoke Tests

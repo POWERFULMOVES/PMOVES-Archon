@@ -20,17 +20,22 @@ Environment (selected)
 - GPU variant adds: `CHIT_DECODE_*`, `CHIT_PERSIST_DB`, `PG*`
 
 Realtime
-- Fallback: If `SUPABASE_REALTIME_URL` resolves to a host‑only DNS (e.g., `api.supabase.internal`), v2 auto‑derives `ws://host.docker.internal:54321/realtime/v1/websocket` using `SUPA_REST_URL`/`SUPA_REST_INTERNAL_URL`.
+- Fallback: If `SUPABASE_REALTIME_URL` resolves to a host‑only DNS (e.g., `api.supabase.internal`), v2 auto‑derives `ws://host.docker.internal:65421/realtime/v1` using `SUPA_REST_URL`/`SUPA_REST_INTERNAL_URL`.
 - Recommended `.env.local` (host):
-  - `SUPA_REST_URL=http://host.docker.internal:54321/rest/v1`
-  - `SUPA_REST_INTERNAL_URL=http://host.docker.internal:54321/rest/v1`
-  - `SUPABASE_REALTIME_URL=ws://host.docker.internal:54321/realtime/v1/websocket`
+  - `SUPA_REST_URL=http://host.docker.internal:65421/rest/v1`
+  - `SUPA_REST_INTERNAL_URL=http://host.docker.internal:65421/rest/v1`
+  - `SUPABASE_REALTIME_URL=ws://host.docker.internal:65421/realtime/v1`
 - Admin stats guard: stats are Tailscale‑admin only unless `SMOKE_ALLOW_ADMIN_STATS=true` (for local smokes).
 - Reranker model label (reporting only): `POST /hirag/admin/reranker/model/label {"label":"Qwen/Qwen3-Reranker-4B"}`
 
 Defaults
 - Meilisearch lexical: enabled by default for v2‑GPU (compose sets `USE_MEILI=true`). CPU v2 honors `USE_MEILI` from env.
 - v2‑GPU reranker default: `RERANK_MODEL=Qwen/Qwen3-Reranker-4B` (overridable with env).
+
+Neo4j warm dictionary
+- Startup no longer emits `UnknownPropertyKey` warnings when `type` is absent on individual `Entity` nodes—the warm cache now checks `keys(e)` before reading the property and falls back to `UNK`.
+- To force refresh after updating nodes: `docker compose --profile workers exec hi-rag-gateway-v2 python -c "from app import refresh_warm_dictionary; refresh_warm_dictionary(); print('ok')"` and repeat for the GPU variant if in use.
+- Fresh stacks: run `make bootstrap-data` to apply Supabase SQL, seed Neo4j, and load the Qdrant/Meili demo corpus before popping the smokes.
 
 Smoke
 ```
