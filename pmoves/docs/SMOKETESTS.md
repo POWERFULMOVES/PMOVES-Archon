@@ -104,23 +104,44 @@ Remove `public_url` from the payload if you want to confirm the local-path fallb
 - Alternatively: `make load-jsonl FILE=$(pwd)/datasets/queries_demo.jsonl`
 
 ## 5) Run Smoke Tests
+
+### 5a) Core Stack
 Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-What the smoke covers now (12 checks):
-1) Qdrant ready (6333)
-2) Meilisearch health (7700, warning only)
-3) Neo4j UI reachable (7474, warning only)
-4) Presign health (8088)
-5) Render Webhook health (8085)
-6) PostgREST reachable (3000)
-7) Insert a demo row via Render Webhook
-8) Verify a `studio_board` row exists via PostgREST
-9) Run a Hi-RAG v2 query (8087)
-10) Agent Zero `/healthz` reports the JetStream controller running
-11) POST a generated `geometry.cgp.v1` packet to `/geometry/event`
-12) Confirm the ShapeStore locator + calibration report via `/shape/point/{id}/jump` and `/geometry/calibration/report`
+Checks (12):
+1. Qdrant ready (`6333`)
+2. Meilisearch health (`7700`, warning only)
+3. Neo4j UI reachable (`7474`, warning only)
+4. Presign health (`8088`)
+5. Render Webhook health (`8085`)
+6. PostgREST reachable (`3000`)
+7. Insert a demo row via Render Webhook
+8. Verify a `studio_board` row exists via PostgREST
+9. Run a Hi-RAG v2 query (`8087`)
+10. Agent Zero `/healthz` reports JetStream controller running
+11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
+12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
+
+### 5b) Creative Automations
+Prereqs: tutorials installed (`pmoves/docs/PMOVES.AI PLANS/PMOVES ART STUFF/`), Supabase CLI stack running, `make bootstrap` secrets populated, `make up` + `make up-n8n`.
+1. Import/activate creative flows (`pmoves/n8n/flows/wan_to_cgp.json`, `qwen_to_cgp.json`, `vibevoice_to_cgp.json`).
+2. Trigger WAN flow (HTTP webhook) → verify Supabase `studio_board` row + MinIO asset.
+3. Trigger Qwen edit flow → verify Supabase row with edit metadata.
+4. Trigger VibeVoice flow → confirm audio normalized via FFmpeg and optional Discord preview.
+5. Geometry UI (`make -C pmoves web-geometry`): confirm new constellations with avatar animation (persona namespace).
+
+### 5c) Domain Integrations
+- `make -C pmoves demo-health-cgp` (needs `WGER_API_TOKEN`) → expect Supabase `health_workouts` upserts + `health.weekly.summary.v1` CGP.
+- `make -C pmoves demo-finance-cgp` (needs `FIREFLY_ACCESS_TOKEN`) → expect Supabase `finance_transactions` upserts + `finance.monthly.summary.v1` CGP.
+- Notebook sync smoke → ensure `OPEN_NOTEBOOK_API_*` set, watch `make notebook-up` logs, confirm Supabase `notebook_entries` and `geometry_cgp_packets` rows when research summaries arrive.
+
+### 5d) Persona Film End-to-End
+1. WAN + VibeVoice combo: trigger `wan_to_cgp` and `vibevoice_to_cgp` flows sequentially (supply persona prompt).
+2. Confirm n8n emits `content.publish.persona-film.v1` with media + voice references.
+3. Geometry UI → select persona avatar, play resulting film while the constellation animates.
+4. Supabase audit: check `publisher_audit` for film entry and `geometry_cgp_packets` for CGP snapshot.
 
 ## 6) Geometry Bus (CHIT) — Extended Deep Dive
 
