@@ -31,6 +31,12 @@ Before running ComfyUI graphs that upload into this pipeline, confirm the local 
 - Run `ffmpeg -encoders | findstr h264` (Windows) to ensure encoding support for video workflows.
 - Run `uv pip list` inside the VibeVoice virtual environment to ensure uv-installed packages are resolvable before rendering or voice conversion nodes execute.
 
+### Creative Tutorials & Automation Hooks
+- Tutorials and installers live under `pmoves/docs/PMOVES.AI PLANS/PMOVES ART STUFF/` (WAN Animate 2.2, Qwen Image Edit+, VibeVoice TTS, WAN installer notes). Follow them to seed ComfyUI graphs and audio pipelines before enabling the automations below.
+- n8n creative flows (see `pmoves/n8n/flows/wan_to_cgp.json`, `qwen_to_cgp.json`, `vibevoice_to_cgp.json`) monitor ComfyUI completions, run the associated scripts, and emit `content.publish.*` envelopes that the pipeline consumes. Ensure `WAN_ANIMATE_ROOT`, `QWEN_IMAGE_EDIT_ROOT`, `VIBEVOICE_ROOT`, and related env vars are captured via `make bootstrap`.
+- Persona-to-movie automation: combine WAN + VibeVoice flows with persona prompt templates (stored in Supabase `persona_prompts`) to storyboard, voice, and animate PMOVES avatars. These flows publish `content.publish.persona-film.v1` alongside `geometry.cgp.v1` packets so avatars sync with the geometry bus.
+- Scheduling: use n8n cron nodes to trigger daily persona drops, or call the HTTP webhook endpoints directly from the WAN tutorial CLI / ComfyUI manager scripts.
+
 ## Services
 - Presign: `pmoves-v5/services/presign` (port 8088)
 - Render Webhook: `pmoves-v5/services/render-webhook` (port 8085)
@@ -130,6 +136,11 @@ Node inputs:
   - If the workflow exported multiple takes, call the webhook once per asset so each Supabase row maps 1:1 with a MinIO object. Include `graph_hash` only when the Comfy graph matches the default `VIBEVOICE-RVC_VOICE_CLONING.json` to fast-track diffing later.
 - **Manual finalize:** When you extend the bundle with extra audio effect nodes, rerun `VIBEVOICE-RVC-NODES_INSTALL.bat` so their requirements get pinned alongside VibeVoice. For RVC WebUI-based conversions, remember to manually upload the converted WAV through the Comfy graph (or drag-drop into Comfy’s input folder and use `Upload File Path`) before triggering the webhook.
 - **Publishing reminder:** Audio artifacts won’t auto-approve—double-check `RENDER_AUTO_APPROVE` or manually flip the Supabase row once the mix passes review. Jellyfin refresh uses the namespace path, so keep naming consistent before approving.
+
+## Geometry Bus & Avatar Playback
+- Each creative publish emits a matching `geometry.cgp.v1` packet (see `services/common/cgp_mappers.py`) so constellations appear in the Geometry UI. Set `CHIT_PERSIST_DB=true` and supply Postgres creds if you want Supabase to store the packets for replay.
+- PMOVES avatars: populate the `persona_avatar` table with WAN Animate output paths (video/gif) and `geometry_constellation_id` values. The Geometry UI (`make -C pmoves web-geometry`) animates avatars while stepping through constellation nodes, letting reviewers and personas watch the geometry bus evolve.
+- Demo: trigger a WAN + VibeVoice flow via n8n, then open the Geometry UI, choose the persona avatar from the Avatars panel, and use jump links to watch the animated walkthrough driven by the newly published CGP.
 
 ## Approve → Publish
 - In Supabase Studio, set `status=approved` (or use `RENDER_AUTO_APPROVE=true`).
