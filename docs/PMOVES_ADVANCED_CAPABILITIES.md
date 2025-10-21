@@ -268,6 +268,18 @@ async def get_mindmap(constellation_id: str):
    - Add geometry alerts to observability dashboard
    - Experimental: Sidecar networks for geometry regularization
 
+### Consciousness Knowledge Loop (new)
+
+To keep PMOVES grounded in authoritative research, we added a full-stack ingestion loop that funnels curated consciousness playlists and papers into every layer:
+
+1. `make harvest-consciousness` scaffolds source material (HTML, PDFs, Docling-ready assets) and generates processed JSONL/SQL/geometry samples.
+2. LangExtract (with Docling PDF parsing) converts the corpus into chunk embeddings for Supabase/Qdrant.
+3. `make ingest-consciousness-yt` drives pmoves-yt batch ingestion, downloading authoritative interviews, emitting `geometry.cgp.v1`, and logging video mappings.
+4. Jellyfin + Creator pipelines refresh automatically, so avatars and persona demos surface the same sources.
+5. Evo Swarm advertises the new namespace (`pmoves.consciousness`), and Flute prompt templates import the data for multimodal conversations.
+
+This loop serves as the canonical end-to-end smoke for the knowledge stack: harvest → LangExtract → PMOVES.YT → Supabase/Qdrant → Geometry Bus → Jellyfin/Creator → Flute. Evidence for each stage is captured in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
+
 ### Phase 4: Optional UX Enhancements (2-3 weeks)
 7. **Voice Orchestrator** (If Still Desired)
    - OpenAI Realtime API wrapper at `services/voice-orchestrator/`

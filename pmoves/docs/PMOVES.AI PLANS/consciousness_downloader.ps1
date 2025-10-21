@@ -1,12 +1,16 @@
-# Landscape of Consciousness Website Downloader
-# For Russell's PMOVES.AI project
-# Target: C:\Users\russe\Documents\GitHub\PMOVES.AI\pmoves\docs\Constellation-Harvest-Regularization
+# Landscape of Consciousness Harvester (PMOVES Runtime Edition)
+# Mirrors the Landscape of Consciousness taxonomy into the PMOVES knowledge stack
+# Default target: pmoves/data/consciousness/Constellation-Harvest-Regularization
 
 param(
     [string]$BaseUrl = "https://loc.closertotruth.com",
-    [string]$TargetPath = "C:\Users\russe\Documents\GitHub\PMOVES.AI\pmoves\docs\Constellation-Harvest-Regularization",
+    [string]$RepoRoot = (Resolve-Path "$PSScriptRoot/../../..").Path,
+    [string]$TargetPathSuffix = "pmoves/data/consciousness/Constellation-Harvest-Regularization",
     [switch]$IncludeRelatedPapers = $true
 )
+
+$TargetPath = Join-Path $RepoRoot $TargetPathSuffix
+New-Item -ItemType Directory -Path $TargetPath -Force | Out-Null
 
 # Function to create directory structure
 function New-DirectoryStructure {
@@ -20,7 +24,8 @@ function New-DirectoryStructure {
         "research-papers",
         "data-exports",
         "media",
-        "scripts"
+        "scripts",
+        "processed-for-rag"
     )
     
     foreach ($dir in $directories) {
@@ -28,6 +33,15 @@ function New-DirectoryStructure {
         if (-not (Test-Path $fullPath)) {
             New-Item -ItemType Directory -Path $fullPath -Force
             Write-Host "Created directory: $fullPath" -ForegroundColor Green
+        }
+    }
+
+    $processedRoot = Join-Path $BasePath "processed-for-rag"
+    foreach ($sub in @("embeddings-ready", "supabase-import")) {
+        $subPath = Join-Path $processedRoot $sub
+        if (-not (Test-Path $subPath)) {
+            New-Item -ItemType Directory -Path $subPath -Force
+            Write-Host "Created directory: $subPath" -ForegroundColor Green
         }
     }
 }
@@ -208,70 +222,40 @@ $dataTemplate | ConvertTo-Json -Depth 10 | Out-File -FilePath $templatePath -Enc
 
 # 6. Create README with instructions
 $readmeContent = @"
-# Landscape of Consciousness Database
+# PMOVES • Landscape of Consciousness Dataset
 
-This directory contains a comprehensive download of Robert Lawrence Kuhn's "Landscape of Consciousness" - a taxonomy of consciousness theories.
+This bundle mirrors Robert Lawrence Kuhn's *Landscape of Consciousness* taxonomy into the PMOVES knowledge stack for downstream CHIT decoding, Geometry Bus constellations, and Evo Swarm curation.
 
-## Directory Structure
+## Directory Layout (`pmoves/data/consciousness/Constellation-Harvest-Regularization/`)
+- `website-mirror/` — HTML snapshots of the taxonomy portal
+- `theories/` — folders per major category (Materialism, Quantum, Panpsychism, etc.)
+- `categories/`, `subcategories/` — supplemental hierarchy exports
+- `research-papers/` — source papers + related commentary
+- `data-exports/` — JSON/CSV manifests for ingestion
+- `processed-for-rag/` — embedding-ready artifacts + Supabase import SQL
+- `media/` — referenced imagery/video assets
+- `scripts/` — Selenium scraper, RAG processors, helper utilities
 
-- **website-mirror/**: Static copies of web pages
-- **theories/**: Organized by major categories (Materialism, Quantum, Panpsychism, etc.)
-- **categories/**: High-level category information
-- **subcategories/**: Detailed subcategory breakdowns
-- **research-papers/**: Academic papers and related research
-- **data-exports/**: Structured data exports (JSON, CSV)
-- **media/**: Images, videos, diagrams
-- **scripts/**: Automation and extraction scripts
+## PMOVES Integration Checklist
+1. **Harvest dynamic content**
+   - `pwsh -File scripts/selenium-scraper.ps1` (runs headless Chrome, exports discovered theory links).
+2. **Prepare embeddings + JSONL**
+   - Use the provided `processed-for-rag` templates or wire n8n ingestion to chunk/export `consciousness-chunks.jsonl`.
+3. **Load Supabase (CLI runtime)**
+   - Ensure stack is running (`make supa-start && make up`).
+   - Apply schema from `processed-for-rag/supabase-import/consciousness-schema.sql` via `supabase db execute` or the SQL editor.
+4. **Push embeddings**
+   - Import `processed-for-rag/supabase-import/n8n-workflow.json` into n8n (`make up-n8n`), configure Hugging Face + Supabase credentials, and process the JSONL export.
+5. **Surface in Geometry / Evo Swarm**
+   - Map canonical theory rows into CGP payloads (via custom mapper or manual seed) and publish with `make mesh-handshake FILE=...` or through Agent Zero producers.
+   - Update CHIT decoder plan (`pmoves/docs/PMOVESCHIT/`) with resulting constellation IDs for playback.
 
-## Main Categories of Consciousness Theories
+## Why This Matters
+- Anchors extended consciousness theory metadata within Supabase + Qdrant for Geometry Bus queries.
+- Enables Evo Swarm to pull from curated philosophical corpora when synthesizing pack suggestions.
+- Enriches CHIT playback demos with authoritative consciousness taxonomies.
 
-### Materialism Theories
-- Philosophical, Neurobiological, Electromagnetic Field
-- Computational & Informational, Homeostatic & Affective
-- Embodied & Enactive, Relational, Representational
-- Language, Phylogenetic Evolution
-
-### Non-Physical Approaches  
-- Non-Reductive Physicalism
-- Quantum Theories
-- Integrated Information Theory
-- Panpsychisms, Monisms, Dualisms, Idealisms
-- Anomalous & Altered States Theories
-- Challenge Theories
-
-## Key Implications Assessed
-1. Meaning/Purpose/Value
-2. AI Consciousness
-3. Virtual Immortality  
-4. Survival Beyond Death
-
-## Usage for RAG System
-
-This data structure is optimized for Russell's RAG system:
-- Hierarchical organization for semantic search
-- JSON templates for structured extraction
-- Metadata for embeddings and indexing
-- Cross-references for relationship mapping
-
-## Next Steps
-
-1. Run selenium-scraper.ps1 to extract dynamic content
-2. Process JSON data for embedding generation  
-3. Import into Supabase vector database
-4. Set up hybrid search with Hugging Face embeddings
-5. Integrate with n8n automation workflow
-
-## Integration with PMOVES.AI
-
-This consciousness theories database enhances the PMOVES.AI knowledge base by providing:
-- Comprehensive theoretical frameworks
-- Structured philosophical arguments
-- Scientific and speculative approaches
-- Implications for AI development
-
----
-Generated for Russell's PMOVES.AI project
-Target for RAG integration with Supabase + Hugging Face embeddings
+Document progress and evidence in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md` when each integration stage completes.
 "@
 
 $readmePath = Join-Path $TargetPath "README.md"
@@ -279,11 +263,11 @@ $readmeContent | Out-File -FilePath $readmePath -Encoding UTF8
 
 Write-Host "`n=== Download Setup Complete ===" -ForegroundColor Green
 Write-Host "Directory structure created at: $TargetPath" -ForegroundColor Green
-Write-Host "`nNext steps:" -ForegroundColor Yellow
-Write-Host "1. Run the Selenium scraper: .\scripts\selenium-scraper.ps1" -ForegroundColor White
-Write-Host "2. Check the data-exports folder for structured data" -ForegroundColor White
-Write-Host "3. Process with your Hugging Face embeddings pipeline" -ForegroundColor White
-Write-Host "4. Import into your Supabase vector database" -ForegroundColor White
+Write-Host "`nNext steps (from repo root):" -ForegroundColor Yellow
+Write-Host "1. pwsh -File $TargetPath\scripts\selenium-scraper.ps1" -ForegroundColor White
+Write-Host "2. Populate processed-for-rag outputs (JSONL, SQL) for embeddings" -ForegroundColor White
+Write-Host "3. make supa-start && make up (ensure Supabase + core services running)" -ForegroundColor White
+Write-Host "4. Import schema + embeddings via n8n / supabase CLI (see README in harvest dir)" -ForegroundColor White
 
 # Display final summary
 Write-Host "`n=== Summary ===" -ForegroundColor Cyan
