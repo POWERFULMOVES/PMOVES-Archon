@@ -24,5 +24,8 @@ YouTube ingest helper that emits CHIT geometry after analysis.
 - Downloads resume automatically thanks to a persistent scratch directory
   (`YT_TEMP_ROOT`, default `/tmp/pmoves-yt`). Successful ingests clean the cache;
   failures leave partial files to resume on the next run.
+- Video metadata is enriched with duration, channel details, tags, statistics,
+  and provenance (job id, timestamps) so downstream dashboards can render richer
+  context without manual joins.
 - Summaries/chapters emit `ingest.summary.ready.v1` / `ingest.chapters.ready.v1`
   events so downstream automations (Discord, n8n) can react in real time.

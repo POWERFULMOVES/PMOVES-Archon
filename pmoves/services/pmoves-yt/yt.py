@@ -1,5 +1,6 @@
-import os, json, tempfile, shutil, asyncio, time, re, math, uuid
+import os, json, tempfile, shutil, asyncio, time, re, math, uuid, copy
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, Body, HTTPException
 import yt_dlp
@@ -242,6 +243,8 @@ def yt_info(body: Dict[str,Any] = Body(...)):
 def yt_download(body: Dict[str,Any] = Body(...)):
     url = body.get('url'); ns = body.get('namespace') or DEFAULT_NAMESPACE
     bucket = body.get('bucket') or DEFAULT_BUCKET
+    job_id = body.get('job_id')
+    entry_meta = body.get('entry_meta') or {}
     if not url: raise HTTPException(400, 'url required')
     YT_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     outtmpl = os.path.join(str(YT_TEMP_ROOT), '%(id)s', '%(id)s.%(ext)s')
@@ -267,6 +270,40 @@ def yt_download(body: Dict[str,Any] = Body(...)):
             title = info.get('title') or vid
             base = base_prefix(vid)
             vid_dir = YT_TEMP_ROOT / vid
+            downloaded_at = datetime.now(timezone.utc).isoformat()
+            channel_meta = {
+                'title': info.get('uploader') or info.get('channel'),
+                'id': info.get('channel_id') or info.get('uploader_id'),
+                'url': info.get('uploader_url') or info.get('channel_url'),
+            }
+            video_meta_patch: Dict[str, Any] = {
+                'thumb': None,
+                'duration': info.get('duration'),
+                'duration_ms': info.get('duration') * 1000 if info.get('duration') else None,
+                'tags': info.get('tags'),
+                'categories': info.get('categories'),
+                'channel': channel_meta,
+                'upload_date': info.get('upload_date'),
+                'description': info.get('description'),
+                'thumbnails': info.get('thumbnails'),
+                'provenance': {
+                    'source': 'youtube',
+                    'original_url': url,
+                    'job_id': job_id,
+                    'entry': entry_meta,
+                    'downloaded_at': downloaded_at,
+                },
+                'ingest': {
+                    'version': 1,
+                    'downloader': 'yt-dlp',
+                    'yt_dlp_version': getattr(yt_dlp, '__version__', None),
+                },
+                'statistics': {
+                    'view_count': info.get('view_count'),
+                    'like_count': info.get('like_count'),
+                },
+            }
+            video_meta_patch = _compact(video_meta_patch) or {}
             # Upload raw video
             raw_key = f"{base}/raw.mp4"
             s3_url = upload_to_s3(outpath, bucket, raw_key)
@@ -278,13 +315,22 @@ def yt_download(body: Dict[str,Any] = Body(...)):
                     thumb_key = f"{base}/thumb{ext}"
                     thumb = upload_to_s3(cand, bucket, thumb_key)
                     break
+            if thumb:
+                video_meta_patch = _deep_merge(video_meta_patch or {}, {'thumb': thumb})
             # Publish Studio record
             supa_insert('studio_board', {
                 'title': title,
                 'namespace': ns,
                 'content_url': s3_url,
                 'status': 'submitted',
-                'meta': {'source': 'youtube', 'original_url': url, 'thumb': thumb}
+                'meta': {
+                    'source': 'youtube',
+                    'original_url': url,
+                    'thumb': thumb,
+                    'duration': info.get('duration'),
+                    'channel': _compact(channel_meta) or None,
+                    'job_id': job_id,
+                }
             })
             supa_insert('videos', {
                 'video_id': vid,
@@ -294,9 +340,21 @@ def yt_download(body: Dict[str,Any] = Body(...)):
                 's3_base_prefix': f"s3://{bucket}/{base}",
                 'meta': {'thumb': thumb}
             })
+            if video_meta_patch:
+                _merge_meta(vid, video_meta_patch)
             # Emit ingest/file-added event (if contracts present)
             try:
-                _publish_event('ingest.file.added.v1', {'bucket': bucket, 'key': raw_key, 'namespace': ns, 'title': title, 'source': 'youtube', 'video_id': vid})
+                event_payload = {
+                    'bucket': bucket,
+                    'key': raw_key,
+                    'namespace': ns,
+                    'title': title,
+                    'source': 'youtube',
+                    'video_id': vid,
+                }
+                if info.get('duration'):
+                    event_payload['duration'] = info.get('duration')
+                _publish_event('ingest.file.added.v1', event_payload)
             except Exception:
                 pass
             success = True
@@ -439,9 +497,52 @@ def _should_retry_exception(exc: BaseException) -> bool:
         return 500 <= exc.status_code < 600
     return isinstance(exc, (requests.RequestException, DownloadError))
 
-def _ingest_one(video_url: str, ns: str, bucket: str) -> Dict[str,Any]:
+
+def _deep_merge(target: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(target)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_meta(video_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    rows = supa_get('videos', {'video_id': video_id}) or []
+    current: Dict[str, Any] = {}
+    if rows:
+        existing_meta = rows[0].get('meta')
+        if isinstance(existing_meta, dict):
+            current = copy.deepcopy(existing_meta)
+    merged = _deep_merge(current, patch)
+    supa_update('videos', {'video_id': video_id}, {'meta': merged})
+    return merged
+
+
+def _compact(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned = {}
+        for k, v in value.items():
+            compacted = _compact(v)
+            if compacted is not None:
+                cleaned[k] = compacted
+        return cleaned or None
+    if isinstance(value, list):
+        cleaned_list = [v for v in (_compact(item) for item in value) if v is not None]
+        return cleaned_list or None
+    if value in (None, ""):
+        return None
+    return value
+
+def _ingest_one(video_url: str, ns: str, bucket: str, job_id: Optional[str] = None, entry_meta: Optional[Dict[str, Any]] = None) -> Dict[str,Any]:
     try:
-        d = yt_download({'url': video_url, 'namespace': ns, 'bucket': bucket})
+        payload = {'url': video_url, 'namespace': ns, 'bucket': bucket}
+        if job_id:
+            payload['job_id'] = job_id
+        if entry_meta:
+            payload['entry_meta'] = entry_meta
+        d = yt_download(payload)
         vid = d.get('video_id')
         t = yt_transcript({'video_id': vid, 'namespace': ns, 'bucket': bucket})
         return {'ok': True, 'video_id': vid, 'download': d, 'transcript': t}
@@ -449,8 +550,8 @@ def _ingest_one(video_url: str, ns: str, bucket: str) -> Dict[str,Any]:
         return {'ok': False, 'error': str(e.detail)}
 
 
-async def _ingest_one_async(video_url: str, ns: str, bucket: str) -> Dict[str, Any]:
-    result = await asyncio.to_thread(_ingest_one, video_url, ns, bucket)
+async def _ingest_one_async(video_url: str, ns: str, bucket: str, job_id: Optional[str] = None, entry_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    result = await asyncio.to_thread(_ingest_one, video_url, ns, bucket, job_id, entry_meta)
     if not result.get('ok'):
         msg = result.get('error') or 'ingest failed'
         raise IngestException(msg, transient=_is_retryable_error(msg))
@@ -488,9 +589,9 @@ async def yt_playlist(body: Dict[str,Any] = Body(...)):
                 await asyncio.sleep(wait_for)
             last_request['ts'] = time.monotonic()
 
-    async def worker(entry: Dict[str, Any]):
+    async def worker(position: int, entry: Dict[str, Any]):
         vid_id = entry['id']
-        meta = {'title': entry.get('title')}
+        meta = {'title': entry.get('title'), 'position': position}
         if job_id:
             _item_upsert(job_id, vid_id, 'queued', None, meta, retries=0)
         video_url = f"https://www.youtube.com/watch?v={vid_id}" if len(vid_id) == 11 else vid_id
@@ -498,7 +599,7 @@ async def yt_playlist(body: Dict[str,Any] = Body(...)):
         async def attempt_ingest() -> Dict[str, Any]:
             async with semaphore:
                 await respect_rate_limit()
-                return await _ingest_one_async(video_url, ns, bucket)
+                return await _ingest_one_async(video_url, ns, bucket, job_id=job_id, entry_meta=meta)
 
         try:
             async for attempt in AsyncRetrying(
@@ -540,7 +641,7 @@ async def yt_playlist(body: Dict[str,Any] = Body(...)):
                 _item_update(job_id, vid_id, {'status': 'failed', 'error': str(exc)})
             return {'id': vid_id, 'ok': False, 'error': str(exc)}
 
-    tasks = [asyncio.create_task(worker(entry)) for entry in entries]
+    tasks = [asyncio.create_task(worker(idx, entry)) for idx, entry in enumerate(entries)]
     results = await asyncio.gather(*tasks)
     any_failures = any(not r.get('ok') for r in results)
     if job_id:
@@ -600,20 +701,7 @@ def _get_transcript(video_id: str) -> Dict[str,Any]:
     return {'text': row.get('text') or '', 'segments': meta.get('segments') or []}
 
 def _merge_video_meta(video_id: str, gemma_patch: Dict[str, Any]) -> None:
-    rows = supa_get('videos', {'video_id': video_id}) or []
-    meta: Dict[str, Any] = {}
-    if rows:
-        existing_meta = rows[0].get('meta')
-        if isinstance(existing_meta, dict):
-            meta = dict(existing_meta)
-    gemma_meta = meta.get('gemma')
-    if isinstance(gemma_meta, dict):
-        merged_gemma = dict(gemma_meta)
-    else:
-        merged_gemma = {}
-    merged_gemma.update(gemma_patch)
-    meta['gemma'] = merged_gemma
-    supa_update('videos', {'video_id': video_id}, {'meta': meta})
+    _merge_meta(video_id, {'gemma': gemma_patch})
 
 @app.post('/yt/summarize')
 def yt_summarize(body: Dict[str,Any] = Body(...)):

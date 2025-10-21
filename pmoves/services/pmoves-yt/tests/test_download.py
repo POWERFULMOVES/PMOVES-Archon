@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -20,10 +21,18 @@ class DownloadYDL:
         return False
 
     def extract_info(self, url: str, download: bool) -> Dict[str, Any]:
+        base_dir = Path(yt.YT_TEMP_ROOT) / "abc123"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        filename = str(base_dir / "abc123.mp4")
         return {
             "id": "abc123",
             "title": "Video",
-            "requested_downloads": [{"_filename": "/tmp/abc123.mp4"}],
+            "requested_downloads": [{"_filename": filename}],
+            "duration": 321,
+            "uploader": "Channel Name",
+            "uploader_id": "channel-xyz",
+            "tags": ["tag1", "tag2"],
+            "categories": ["Education"],
         }
 
 
@@ -32,7 +41,13 @@ def _patch_yt_dlp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(yt.yt_dlp, "YoutubeDL", DownloadYDL)
 
 
-def test_download_uploads_and_emits() -> None:
+@pytest.fixture(autouse=True)
+def _patch_video_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yt, "supa_get", MagicMock(return_value=[{"meta": {}}]))
+    monkeypatch.setattr(yt, "supa_update", MagicMock())
+
+
+def test_download_uploads_and_emits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     upload = MagicMock(return_value="http://s3/abc123.mp4")
     supa = MagicMock()
     publisher = MagicMock()
@@ -40,6 +55,8 @@ def test_download_uploads_and_emits() -> None:
     yt.upload_to_s3 = upload
     yt.supa_insert = supa
     yt._publish_event = publisher
+    monkeypatch.setenv("YT_TEMP_ROOT", str(tmp_path))
+    yt.YT_TEMP_ROOT = tmp_path
 
     client = TestClient(yt.app)
     response = client.post(
@@ -52,7 +69,7 @@ def test_download_uploads_and_emits() -> None:
     assert body["video_id"] == "abc123"
     assert body["s3_url"] == "http://s3/abc123.mp4"
 
-    upload.assert_called_once_with("/tmp/abc123.mp4", "bkt", "yt/abc123/raw.mp4")
+    upload.assert_called_once_with(str(tmp_path / "abc123" / "abc123.mp4"), "bkt", "yt/abc123/raw.mp4")
 
     assert supa.call_count == 2
     supa.assert_any_call(
@@ -66,6 +83,9 @@ def test_download_uploads_and_emits() -> None:
                 "source": "youtube",
                 "original_url": "https://youtu.be/abc123",
                 "thumb": None,
+                "duration": 321,
+                "channel": {"title": "Channel Name", "id": "channel-xyz"},
+                "job_id": None,
             },
         },
     )
@@ -82,14 +102,17 @@ def test_download_uploads_and_emits() -> None:
         },
     )
 
+    yt.supa_update.assert_called_once()
+    update_args, _ = yt.supa_update.call_args
+    meta_payload = update_args[2]["meta"]
+    assert meta_payload["duration"] == 321
+    assert meta_payload["channel"]["title"] == "Channel Name"
+    assert meta_payload["provenance"]["source"] == "youtube"
+
     publisher.assert_called_once()
-    args, kwargs = publisher.call_args
+    args, _ = publisher.call_args
     assert args[0] == "ingest.file.added.v1"
-    assert args[1] == {
-        "bucket": "bkt",
-        "key": "yt/abc123/raw.mp4",
-        "namespace": "ns",
-        "title": "Video",
-        "source": "youtube",
-        "video_id": "abc123",
-    }
+    event_payload = args[1]
+    assert event_payload["bucket"] == "bkt"
+    assert event_payload["key"] == "yt/abc123/raw.mp4"
+    assert event_payload["duration"] == 321
