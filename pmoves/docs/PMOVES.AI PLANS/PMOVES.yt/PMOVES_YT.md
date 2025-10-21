@@ -52,6 +52,8 @@ Notes
   - Set `YT_COOKIES=/path/to/cookies.txt` if you need authenticated fetches; the path is passed straight to yt-dlp.
   - `YT_FORCE_IPV4=true|false` (default true) avoids IPv6-only CDN nodes that intermittently reject API calls; disable if your network only supports IPv6.
   - `YT_EXTRACTOR_RETRIES` controls yt-dlp retry attempts (default `2`). Increase when scraping longer playlists or spotty connections.
+  - `YT_TEMP_ROOT` (default `/tmp/pmoves-yt`) stores resumable downloads. Successful ingests clean the directory; failures keep partial files so retries resume automatically.
+  - `YT_RETRY_MAX` caps automatic retry attempts per video (default `3`). Combine with `YT_RATE_LIMIT` to throttle aggressive playlists.
 - Gemma providers:
   - `YT_SUMMARY_PROVIDER=ollama|hf`, `OLLAMA_URL`, `YT_GEMMA_MODEL` (default gemma2:9b-instruct)
   - `HF_GEMMA_MODEL`, `HF_USE_GPU`, `HF_TOKEN` (requires transformers+torch if using HF locally)

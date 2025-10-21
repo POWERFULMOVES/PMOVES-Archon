@@ -1,10 +1,13 @@
 import os, json, tempfile, shutil, asyncio, time, re, math, uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, Body, HTTPException
 import yt_dlp
+from yt_dlp.utils import DownloadError
 import boto3
 import requests
 from nats.aio.client import Client as NATS
+from tenacity import AsyncRetrying, retry_if_exception, wait_exponential, stop_after_attempt, RetryError
 # Prefer shared envelope util if present; otherwise, fall back to a local stub
 try:
     from services.common.events import envelope  # type: ignore
@@ -65,6 +68,8 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 YT_PLAYLIST_MAX = int(os.environ.get("YT_PLAYLIST_MAX", "50"))
 YT_CONCURRENCY = int(os.environ.get("YT_CONCURRENCY", "2"))
 YT_RATE_LIMIT = float(os.environ.get("YT_RATE_LIMIT", "0.0"))  # seconds between downloads
+YT_RETRY_MAX = int(os.environ.get("YT_RETRY_MAX", "3"))
+YT_TEMP_ROOT = Path(os.environ.get("YT_TEMP_ROOT", "/tmp/pmoves-yt"))
 
 # Segmentation thresholds (smart boundaries)
 YT_SEG_TARGET_DUR = float(os.environ.get("YT_SEG_TARGET_DUR", "30.0"))
@@ -117,6 +122,8 @@ def _with_ytdlp_defaults(opts: Dict[str, Any]) -> Dict[str, Any]:
         merged['force_ipv4'] = True
     if YT_EXTRACTOR_RETRIES >= 0 and 'extractor_retries' not in merged:
         merged['extractor_retries'] = YT_EXTRACTOR_RETRIES
+    merged.setdefault('continuedl', True)
+    merged.setdefault('nooverwrites', True)
     return merged
 
 def s3_client():
@@ -236,8 +243,8 @@ def yt_download(body: Dict[str,Any] = Body(...)):
     url = body.get('url'); ns = body.get('namespace') or DEFAULT_NAMESPACE
     bucket = body.get('bucket') or DEFAULT_BUCKET
     if not url: raise HTTPException(400, 'url required')
-    tmpd = tempfile.mkdtemp(prefix='yt-')
-    outtmpl = os.path.join(tmpd, '%(id)s.%(ext)s')
+    YT_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    outtmpl = os.path.join(str(YT_TEMP_ROOT), '%(id)s', '%(id)s.%(ext)s')
     ydl_opts = _with_ytdlp_defaults({
         'outtmpl': outtmpl,
         'format': body.get('format') or 'bestvideo+bestaudio/best',
@@ -246,6 +253,8 @@ def yt_download(body: Dict[str,Any] = Body(...)):
         'quiet': True,
         'noprogress': True,
     })
+    success = False
+    vid_dir: Optional[Path] = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -257,13 +266,14 @@ def yt_download(body: Dict[str,Any] = Body(...)):
             vid = info.get('id') or os.path.splitext(os.path.basename(outpath))[0]
             title = info.get('title') or vid
             base = base_prefix(vid)
+            vid_dir = YT_TEMP_ROOT / vid
             # Upload raw video
             raw_key = f"{base}/raw.mp4"
             s3_url = upload_to_s3(outpath, bucket, raw_key)
             # Upload thumbnail if present
             thumb = None
             for ext in ('.jpg','.png','.webp'):
-                cand = os.path.join(tmpd, f"{vid}{ext}")
+                cand = os.path.join(str(vid_dir), f"{vid}{ext}")
                 if os.path.exists(cand):
                     thumb_key = f"{base}/thumb{ext}"
                     thumb = upload_to_s3(cand, bucket, thumb_key)
@@ -289,11 +299,13 @@ def yt_download(body: Dict[str,Any] = Body(...)):
                 _publish_event('ingest.file.added.v1', {'bucket': bucket, 'key': raw_key, 'namespace': ns, 'title': title, 'source': 'youtube', 'video_id': vid})
             except Exception:
                 pass
+            success = True
             return {'ok': True, 'title': title, 'video_id': vid, 's3_url': s3_url, 'thumb': thumb}
     except Exception as e:
         raise HTTPException(500, f"yt-dlp error: {e}")
     finally:
-        shutil.rmtree(tmpd, ignore_errors=True)
+        if success and vid_dir is not None:
+            shutil.rmtree(vid_dir, ignore_errors=True)
 
 @app.post("/yt/transcript")
 def yt_transcript(body: Dict[str,Any] = Body(...)):
@@ -382,9 +394,50 @@ def _job_update(job_id: str, state: str, error: Optional[str]=None):
         patch['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     supa_update('yt_jobs', {'id': job_id}, patch)
 
-def _item_upsert(job_id: str, video_id: str, status: str, error: Optional[str]=None, meta: Optional[Dict[str,Any]]=None):
-    row = {'job_id': job_id, 'video_id': video_id, 'status': status, 'error': error, 'retries': 0, 'meta': meta or {}}
+def _item_upsert(
+    job_id: str,
+    video_id: str,
+    status: str,
+    error: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    retries: Optional[int] = None,
+):
+    row: Dict[str, Any] = {'job_id': job_id, 'video_id': video_id, 'status': status}
+    if error is not None:
+        row['error'] = error
+    if meta is not None:
+        row['meta'] = meta
+    if retries is not None:
+        row['retries'] = retries
     supa_upsert('yt_items', row, on_conflict='job_id,video_id')
+
+
+def _item_update(job_id: str, video_id: str, patch: Dict[str, Any]) -> None:
+    supa_update('yt_items', {'job_id': job_id, 'video_id': video_id}, patch)
+
+
+class IngestException(Exception):
+    def __init__(self, message: str, transient: bool = True) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+def _is_retryable_error(message: Optional[str]) -> bool:
+    if not message:
+        return True
+    lowered = message.lower()
+    for token in ("404", "not found", "private video", "copyright"):
+        if token in lowered:
+            return False
+    return True
+
+
+def _should_retry_exception(exc: BaseException) -> bool:
+    if isinstance(exc, IngestException):
+        return exc.transient
+    if isinstance(exc, HTTPException):
+        return 500 <= exc.status_code < 600
+    return isinstance(exc, (requests.RequestException, DownloadError))
 
 def _ingest_one(video_url: str, ns: str, bucket: str) -> Dict[str,Any]:
     try:
@@ -395,35 +448,107 @@ def _ingest_one(video_url: str, ns: str, bucket: str) -> Dict[str,Any]:
     except HTTPException as e:
         return {'ok': False, 'error': str(e.detail)}
 
+
+async def _ingest_one_async(video_url: str, ns: str, bucket: str) -> Dict[str, Any]:
+    result = await asyncio.to_thread(_ingest_one, video_url, ns, bucket)
+    if not result.get('ok'):
+        msg = result.get('error') or 'ingest failed'
+        raise IngestException(msg, transient=_is_retryable_error(msg))
+    return result
+
 @app.post('/yt/playlist')
-def yt_playlist(body: Dict[str,Any] = Body(...)):
+async def yt_playlist(body: Dict[str,Any] = Body(...)):
     url = body.get('url'); ns = body.get('namespace') or DEFAULT_NAMESPACE; bucket = body.get('bucket') or DEFAULT_BUCKET
-    if not url: raise HTTPException(400, 'url required')
+    if not url:
+        raise HTTPException(400, 'url required')
     limit = int(body.get('max_videos') or YT_PLAYLIST_MAX)
     entries = _extract_entries(url)[:limit]
     if not entries:
         raise HTTPException(400, 'no entries found')
     job_id = _job_create('playlist', {'url': url, 'namespace': ns, 'bucket': bucket, 'count': len(entries)})
-    if job_id: _job_update(job_id, 'running')
-    results = []
-    # Resolve rate limit per-call to respect runtime env overrides in tests
+    if job_id:
+        _job_update(job_id, 'running')
+
     try:
         rate_limit = float(os.environ.get('YT_RATE_LIMIT', str(YT_RATE_LIMIT)))
     except Exception:
         rate_limit = YT_RATE_LIMIT
-    for i, e in enumerate(entries):
-        vid_url = f"https://www.youtube.com/watch?v={e['id']}" if len(e['id']) == 11 else e['id']
-        if job_id: _item_upsert(job_id, e['id'], 'running', None, {'title': e.get('title')})
-        r = _ingest_one(vid_url, ns, bucket)
-        results.append({'id': e['id'], **r})
-        if job_id: _item_upsert(job_id, e['id'], 'completed' if r.get('ok') else 'failed', r.get('error'))
-        if rate_limit > 0:
-            time.sleep(rate_limit)
-    if job_id: _job_update(job_id, 'completed')
-    return {'ok': True, 'job_id': job_id, 'count': len(results), 'results': results}
+
+    semaphore = asyncio.Semaphore(max(1, YT_CONCURRENCY))
+    rate_lock = asyncio.Lock()
+    last_request = {'ts': time.monotonic() - rate_limit if rate_limit > 0 else 0.0}
+
+    async def respect_rate_limit():
+        if rate_limit <= 0:
+            return
+        async with rate_lock:
+            now = time.monotonic()
+            wait_for = rate_limit - (now - last_request['ts'])
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            last_request['ts'] = time.monotonic()
+
+    async def worker(entry: Dict[str, Any]):
+        vid_id = entry['id']
+        meta = {'title': entry.get('title')}
+        if job_id:
+            _item_upsert(job_id, vid_id, 'queued', None, meta, retries=0)
+        video_url = f"https://www.youtube.com/watch?v={vid_id}" if len(vid_id) == 11 else vid_id
+
+        async def attempt_ingest() -> Dict[str, Any]:
+            async with semaphore:
+                await respect_rate_limit()
+                return await _ingest_one_async(video_url, ns, bucket)
+
+        try:
+            async for attempt in AsyncRetrying(
+                retry=retry_if_exception(_should_retry_exception),
+                stop=stop_after_attempt(max(1, YT_RETRY_MAX)),
+                wait=wait_exponential(multiplier=1, min=1, max=30),
+                reraise=True,
+            ):
+                attempt_num = attempt.retry_state.attempt_number
+                if job_id:
+                    status = 'running' if attempt_num == 1 else 'retrying'
+                    _item_upsert(job_id, vid_id, status, None, meta, retries=max(0, attempt_num - 1))
+                try:
+                    result = await attempt_ingest()
+                except BaseException as exc:
+                    if job_id:
+                        _item_update(job_id, vid_id, {
+                            'status': 'retrying',
+                            'error': str(exc),
+                            'retries': attempt.retry_state.attempt_number,
+                        })
+                    raise
+                else:
+                    if job_id:
+                        _item_update(job_id, vid_id, {'status': 'completed', 'error': None})
+                    return {'id': vid_id, **result}
+        except IngestException as exc:
+            if job_id:
+                _item_update(job_id, vid_id, {'status': 'failed', 'error': str(exc)})
+            return {'id': vid_id, 'ok': False, 'error': str(exc)}
+        except RetryError as exc:
+            last_exc = exc.last_attempt.exception()
+            msg = str(last_exc) if last_exc else 'max retries exceeded'
+            if job_id:
+                _item_update(job_id, vid_id, {'status': 'failed', 'error': msg, 'retries': YT_RETRY_MAX})
+            return {'id': vid_id, 'ok': False, 'error': msg}
+        except Exception as exc:
+            if job_id:
+                _item_update(job_id, vid_id, {'status': 'failed', 'error': str(exc)})
+            return {'id': vid_id, 'ok': False, 'error': str(exc)}
+
+    tasks = [asyncio.create_task(worker(entry)) for entry in entries]
+    results = await asyncio.gather(*tasks)
+    any_failures = any(not r.get('ok') for r in results)
+    if job_id:
+        _job_update(job_id, 'failed' if any_failures else 'completed', None if not any_failures else 'one or more items failed')
+    return {'ok': not any_failures, 'job_id': job_id, 'count': len(results), 'results': results}
 
 @app.post('/yt/channel')
-def yt_channel(body: Dict[str,Any] = Body(...)):
+async def yt_channel(body: Dict[str,Any] = Body(...)):
     # Accept channel URL or channel_id
     base = body.get('url') or body.get('channel_id')
     if not base:
@@ -431,7 +556,7 @@ def yt_channel(body: Dict[str,Any] = Body(...)):
     # yt-dlp accepts channel URLs; if only id provided, build URL
     if not base.startswith('http'):
         base = f"https://www.youtube.com/channel/{base}/videos"
-    return yt_playlist({'url': base, 'namespace': body.get('namespace'), 'bucket': body.get('bucket'), 'max_videos': body.get('max_videos')})
+    return await yt_playlist({'url': base, 'namespace': body.get('namespace'), 'bucket': body.get('bucket'), 'max_videos': body.get('max_videos')})
 
 # -------------------- Gemma Summarization --------------------
 
