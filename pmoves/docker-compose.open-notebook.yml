@@ -46,7 +46,13 @@ services:
       cataclysm:
         aliases:
           - cataclysm-open-notebook
+      pmoves:
+        aliases:
+          - cataclysm-open-notebook
 networks:
   cataclysm:
     external: true
     name: cataclysm-net
+  pmoves:
+    external: true
+    name: pmoves-net
