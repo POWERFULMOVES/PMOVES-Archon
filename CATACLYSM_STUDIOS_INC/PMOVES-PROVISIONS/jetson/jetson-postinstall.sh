@@ -15,6 +15,20 @@ log() {
   echo -e "\n[jetson-postinstall] $*"
 }
 
+require_supported_arch() {
+  local arch="$1"
+  case "${arch}" in
+    aarch64)
+      return 0
+      ;;
+    *)
+      log "Unsupported architecture '${arch}'. Jetson provisioning requires a 64-bit ARM host (aarch64)."
+      log "Replace legacy 32-bit boards with Jetson Orin Nano or Raspberry Pi 5 class hardware before rerunning."
+      exit 1
+      ;;
+  esac
+}
+
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [--mode <standalone|web|full>]
@@ -23,6 +37,8 @@ Modes:
   standalone  Minimal networking bootstrap (Tailscale + RustDesk)
   web         Mesh + Docker runtime + repo clone for container entrypoints
   full        Complete Jetson bootstrap (default)
+
+This helper targets 64-bit Jetson hardware (aarch64 JetPack hosts).
 
 You can also set MODE=<mode> in the environment.
 USAGE
@@ -73,12 +89,6 @@ ensure_env_file() {
   fi
 }
 
-
-log "Refreshing base system packages."
-
-apt update && apt -y upgrade
-apt -y install ca-certificates curl gnupg lsb-release build-essential git unzip jq python3 python3-pip python3-venv docker.io docker-compose-plugin
-=======
 install_base_packages() {
   local packages=("$@")
   log "Refreshing base system packages."
@@ -102,9 +112,10 @@ configure_docker_for_nvidia() {
 }
 JSON
 
-systemctl enable --now docker
-usermod -aG docker "${SUDO_USER:-$USER}"
-systemctl restart docker
+  systemctl enable --now docker
+  usermod -aG docker "${SUDO_USER:-$USER}"
+  systemctl restart docker
+}
 
 
 # Tailscale setup and Tailnet join
@@ -142,19 +153,6 @@ join_tailnet() {
     local status=$?
     log "Tailnet join failed via helper (${helper_path}) with exit code ${status}."
   fi
-}
-
-if [[ -f "${TAILSCALE_HELPER}" ]]; then
-  if [[ -x "${TAILSCALE_HELPER}" ]]; then
-    log "Attempting Tailnet join using ${TAILSCALE_HELPER}."
-    join_tailnet "${TAILSCALE_HELPER}" "${TAILSCALE_AUTH_FILE}"
-  else
-    log "Tailnet helper found at ${TAILSCALE_HELPER} but is not executable; attempting to source anyway."
-    join_tailnet "${TAILSCALE_HELPER}" "${TAILSCALE_AUTH_FILE}"
-
-  systemctl enable --now docker
-  usermod -aG docker "${SUDO_USER:-$USER}"
-  systemctl restart docker
 }
 
 install_tailscale() {
@@ -236,38 +234,6 @@ install_pmoves_python_dependencies() {
     log "install_all_requirements.sh not found at ${PMOVES_ROOT}/scripts; skipping dependency install."
   fi
 
-else
-  log "PMOVES project directory not found under ${TARGET_DIR}; skipping env bootstrap and dependency install."
-fi
-
-if [[ -d "${BUNDLE_ROOT}/docker-stacks" ]]; then
-  ln -sfn "${BUNDLE_ROOT}/docker-stacks" "${TARGET_DIR}/docker-stacks"
-  log "Linked docker-stacks bundle into ${TARGET_DIR}."
-fi
-
-log "Installing jetson-containers and dependencies."
-if [[ -d "${JETSON_CONTAINERS_DIR}/.git" ]]; then
-  git -C "${JETSON_CONTAINERS_DIR}" fetch --all --prune
-  git -C "${JETSON_CONTAINERS_DIR}" reset --hard origin/main
-elif [[ -d "${JETSON_CONTAINERS_DIR}" && -n $(ls -A "${JETSON_CONTAINERS_DIR}" 2>/dev/null) ]]; then
-  timestamp=$(date +%Y%m%d%H%M%S)
-  backup_dir="${JETSON_CONTAINERS_DIR}.bak-${timestamp}"
-  mv "${JETSON_CONTAINERS_DIR}" "${backup_dir}"
-  log "Existing non-git jetson-containers directory moved to ${backup_dir}."
-  git clone https://github.com/dusty-nv/jetson-containers.git "${JETSON_CONTAINERS_DIR}"
-else
-  git clone https://github.com/dusty-nv/jetson-containers.git "${JETSON_CONTAINERS_DIR}"
-fi
-
-if [[ -f "${JETSON_CONTAINERS_DIR}/install.sh" ]]; then
-  bash "${JETSON_CONTAINERS_DIR}/install.sh"
-else
-  log "install.sh not found under ${JETSON_CONTAINERS_DIR}; skipping jetson-containers installer."
-fi
-
-
-log "Jetson bootstrap complete."
-
 }
 
 link_docker_stacks() {
@@ -330,6 +296,7 @@ run_full_mode() {
 
 main() {
   parse_args "$@"
+  require_supported_arch "$(uname -m)"
   local mode
   mode=$(echo "${MODE_INPUT}" | tr '[:upper:]' '[:lower:]')
   case "${mode}" in

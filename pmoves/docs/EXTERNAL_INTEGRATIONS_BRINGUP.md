@@ -89,6 +89,8 @@ curl -s http://localhost:5055/api/models/providers | jq '.available'
      ```
 
 ## Jellyfin
+> Jellyfin 10.11 ships 64-bit only. Confirm target nodes are x86_64 or aarch64 (`inventory/nodes.yaml`) and retire any legacy 32-bit Raspberry Pi hosts. Run `make manifest-audit` before upgrade windows to surface unsupported inventory rows and plan replacements (Pi 5 8GB, Jetson Orin Nano, or x86 mini PCs).
+
 1) Clone and run:
 ```bash
 cd ..
