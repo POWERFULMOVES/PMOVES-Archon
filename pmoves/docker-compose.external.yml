@@ -128,8 +128,8 @@ services:
       - ./data/open-notebook/notebook_data:/app/data
 
   jellyfin-ext:
-    image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:latest}
-    container_name: cataclysm-jellyfin
+    image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:10.11.0}
+    container_name: pmoves-jellyfin
     restart: unless-stopped
     env_file: [env.shared, .env, .env.local]
     networks:
