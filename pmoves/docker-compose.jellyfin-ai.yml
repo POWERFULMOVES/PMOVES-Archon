@@ -38,6 +38,20 @@ services:
     <<: *jellyfin-base
     container_name: ${JELLYFIN_CONTAINER_NAME:-pmoves-jellyfin}
     profiles: ["default", "jellyfin-ai"]
+    image: lscr.io/linuxserver/jellyfin:10.11.0
+    container_name: pmoves-jellyfin
+    environment:
+      - PUID=${JELLYFIN_PUID:-1000}
+      - PGID=${JELLYFIN_PGID:-1000}
+      - TZ=${TZ:-UTC}
+      - JELLYFIN_PublishedServerUrl=${JELLYFIN_PUBLISHED_URL:-http://localhost:8096}
+    volumes:
+      - ./${JELLYFIN_AI_BASE:-jellyfin-ai}/config:/config
+      - ./${JELLYFIN_AI_BASE:-jellyfin-ai}/cache:/cache
+      - ./${JELLYFIN_AI_BASE:-jellyfin-ai}/media:/media
+      - ./${JELLYFIN_AI_BASE:-jellyfin-ai}/output:/output
+      - ./${JELLYFIN_AI_BASE:-jellyfin-ai}/config/www:/config/www:ro
+      - ../CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/docker-stacks/jellyfin-ai/install_plugins.sh:/tmp/install_plugins.sh:ro
     # Uncomment to auto-install plugins on startup (may slow first boot):
     # entrypoint: >
     #   bash -c "apt-get update && apt-get install -y wget unzip && cp /tmp/install_plugins.sh /usr/local/bin/install_plugins.sh && chmod +x /usr/local/bin/install_plugins.sh && /usr/local/bin/install_plugins.sh && /init"
