@@ -226,8 +226,8 @@ ps:
 # -------- External stacks (forks / published images) ----------
 .PHONY: up-external up-external-wger up-external-firefly up-external-on up-external-jellyfin down-external
 up-external: ## Start all external stacks (Wger, Firefly, Open Notebook, Jellyfin)
-        @docker network create pmoves-net >/dev/null 2>&1 || true
-        @docker compose -p $(PROJECT) -f docker-compose.external.yml up -d
+	@docker network create pmoves-net >/dev/null 2>&1 || true
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d
 
 up-external-wger: ## Start Wger (Django + nginx proxy) on pmoves-net
 	@docker network create pmoves-net >/dev/null 2>&1 || true
@@ -246,7 +246,7 @@ up-external-jellyfin: ## Start Jellyfin on pmoves-net (external image)
 	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d jellyfin-ext
 
 down-external: ## Stop all external stacks
-        @docker compose -p $(PROJECT) -f docker-compose.external.yml down
+	@docker compose -p $(PROJECT) -f docker-compose.external.yml down
 
 .PHONY: integrations-up-core integrations-up-wger integrations-up-firefly integrations-up-all integrations-down integrations-logs integrations-import-flows
 
@@ -282,15 +282,15 @@ integrations-logs: ## Tail n8n logs for the integrations stack
 	@docker compose -p $(INTEGRATIONS_PROJECT) -f $(INTEGRATIONS_COMPOSE_CORE) logs -f n8n
 
 integrations-import-flows: ## Import JSON flows from integrations/* into n8n via REST
-        @which jq >/dev/null 2>&1 || (echo "jq is required for integrations-import-flows" && exit 1)
-        @which curl >/dev/null 2>&1 || (echo "curl is required for integrations-import-flows" && exit 1)
-        @bash scripts/n8n-import-flows.sh
+	@which jq >/dev/null 2>&1 || (echo "jq is required for integrations-import-flows" && exit 1)
+	@which curl >/dev/null 2>&1 || (echo "curl is required for integrations-import-flows" && exit 1)
+	@bash scripts/n8n-import-flows.sh
 
 .PHONY: package-pr-kits
 package-pr-kits: ## Package PR kits into dist/pr-kits/*.tar.gz
-        @mkdir -p dist/pr-kits
-        @for kit in wger firefly open-notebook jellyfin; do \
-          tar -czf dist/pr-kits/$$kit.pr-kit.tgz -C pmoves/integrations/pr-kits/ $$kit; \
+	@mkdir -p dist/pr-kits
+	@for kit in wger firefly open-notebook jellyfin; do \
+	  tar -czf dist/pr-kits/$$kit.pr-kit.tgz -C pmoves/integrations/pr-kits/ $$kit; \
 	  echo "→ dist/pr-kits/$$kit.pr-kit.tgz"; \
 	done
 
@@ -385,6 +385,7 @@ supa-extract-remote:
 
 # Environment helpers
 env-setup:
+	PYTHONPATH=.. python3 -m pmoves.tools.secrets_sync generate
 	- pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_setup.ps1
 	- bash scripts/env_setup.sh || true
 
@@ -574,6 +575,38 @@ retrieval-eval-smoke:
 	  echo "→ Evaluating $$ds"; \
 	  $(PYTHON) services/retrieval-eval/evaluate.py "$$ds" --no-query-details; \
 	done
+
+.PHONY: harvest-consciousness
+harvest-consciousness:
+	@bash -c 'set -euo pipefail; \
+	HARVEST_DIR="$(CURDIR)/data/consciousness/Constellation-Harvest-Regularization"; \
+	echo "[Harvest] Downloading consciousness corpus via bash helper"; \
+	bash "docs/PMOVES.AI PLANS/consciousness_downloader.sh"; \
+	echo "[Harvest] Building processed artifacts"; \
+	$(PYTHON) tools/consciousness_build.py; \
+	if command -v supabase >/dev/null 2>&1; then \
+	  echo "[Harvest] Supabase CLI detected. Apply schema manually:"; \
+	  echo "  supabase db push --file $$HARVEST_DIR/processed-for-rag/supabase-import/consciousness-schema.sql"; \
+	else \
+	  echo "[Harvest] Supabase CLI not detected; skipping schema instructions."; \
+	fi; \
+	echo "[Harvest] Artifacts ready under $$HARVEST_DIR"; \
+	echo "[Harvest] Next steps:"; \
+	echo "  pwsh -File $$HARVEST_DIR/scripts/selenium-scraper.ps1    # dynamic content"; \
+	echo "  Import $$HARVEST_DIR/processed-for-rag/supabase-import/n8n-workflow.json"; \
+	echo "  Publish geometry via $$HARVEST_DIR/processed-for-rag/supabase-import/consciousness-geometry-sample.json"'
+
+.PHONY: chit-encode-secrets
+chit-encode-secrets:
+	@$(PYTHON) tools/chit_encode_secrets.py $(ARGS)
+
+.PHONY: chit-decode-secrets
+chit-decode-secrets:
+	@$(PYTHON) tools/chit_decode_secrets.py $(ARGS)
+
+.PHONY: ingest-consciousness-yt
+ingest-consciousness-yt:
+	@$(PYTHON) tools/consciousness_ingest.py $(ARGS)
 .PHONY: eval-jsonl
 eval-jsonl:
 	@if [ -z "$(FILE)" ]; then echo "Usage: make eval-jsonl FILE=/abs/path/queries.jsonl [K=10]"; exit 1; fi

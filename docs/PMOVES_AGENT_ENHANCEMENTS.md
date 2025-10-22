@@ -110,6 +110,18 @@ Update `contracts/schemas/` with `agent.command.v1.schema.json` and enforce via 
 
 **Priority**: Low (nice-to-have; current format is functional)
 
+### 5. Consciousness Ingestion Orchestrator (New)
+
+**Status**: Partially manual (harvest + pmoves-yt helper).
+
+**Proposal**: Ship a managed ingestion job that bundles playlist downloads, LangExtract (Docling) processing, pmoves-yt video ingestion, geometry emission, Jellyfin refresh, and persona updates. The orchestrator should:
+- Accept `playlist_id`, `pdf_urls`, `repo_urls`, and persona tags via REST/CLI.
+- Emit stage events (`ingest.harvest.completed`, `ingest.video.completed`, …) so Agent Zero can monitor jobs.
+- Persist job state in Supabase (`ingest_jobs`, `consciousness_videos`) for audit/resume.
+- Trigger Archon sandbox tasks whenever new GitHub repos are discovered; Agent Zero coordinates evaluation.
+
+**Priority**: High (unlocks fully automated research ingestion and aligns with PMOVES’s CHIT + persona roadmap).
+
 ## Comparison: Video Demo vs. PMOVES
 
 | Feature | Video (Claude Code + Realtime API) | PMOVES |

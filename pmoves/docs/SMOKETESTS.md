@@ -42,6 +42,9 @@ This guide covers preflight wiring, starting the core stack, and running the loc
 
 This checks tool availability, common ports, `.env` keys vs `.env.example`, and validates `contracts/topics.json`.
 
+Optional secret bundle:
+- `make chit-encode-secrets` — snapshot `env.shared` into `pmoves/data/chit/env.cgp.json` using the CHIT CGP v0.1 format. Confirm round-trip with `make chit-decode-secrets ARGS="--out /tmp/env.from.chit"`. This ensures the encoder/decoder pair remain compatible with the docs in `pmoves/docs/PMOVESCHIT/`.
+
 ## 3) Start Core Stack
 - Start data + workers profile (v2 gateway) after the Supabase CLI stack is online:
   - `make up`
@@ -370,6 +373,21 @@ Optional smoke targets:
 - `make smoke-langextract` — extract chunks from XML via `langextract` and load
 - `make smoke-archon` — hit `http://localhost:8091/healthz` and ensure Archon reports `status: "ok"` (requires NATS + Supabase CLI stack)
 - `make smoke-hirag-v1` — query v1 gateway (auto-detects 8090→8089)
+- `make harvest-consciousness` — scaffold consciousness corpus, generate processed artifacts, and (if Supabase CLI is installed) apply schema; follow with the Selenium scrape + geometry publish steps below.
+- `make ingest-consciousness-yt` — search YouTube for each consciousness chunk, invoke pmoves-yt ingest/emit, and record video mappings (`processed-for-rag/supabase-import/consciousness-video-sources.json`).
+
+Consciousness follow-up:
+1. `pwsh -File pmoves/data/consciousness/Constellation-Harvest-Regularization/scripts/selenium-scraper.ps1` (run on a host with PowerShell + Chrome).
+2. Apply schema:
+   ```bash
+   supabase status --output env > supabase/.tmp_env && source supabase/.tmp_env
+   psql "$${SUPABASE_DB_URL}" -f pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-schema.sql
+   ```
+   *(Compose runtime)* `docker compose -p pmoves exec postgres psql -U pmoves -d pmoves -f pmoves/data/.../consciousness-schema.sql`
+3. Import `processed-for-rag/supabase-import/n8n-workflow.json` into n8n and process `embeddings-ready/consciousness-chunks.jsonl`.
+4. `make -C pmoves ingest-consciousness-yt` (after `make -C pmoves up-yt`) to download authoritative interviews and emit CGPs for each chunk.
+5. Publish geometry sample via `make mesh-handshake FILE=pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-geometry-sample.json`.
+6. Record evidence (chunk counts, Supabase rows, geometry IDs, video IDs) in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
 
 ## Troubleshooting
 - Port in use: change the host port in `docker-compose.yml` or stop the conflicting process.

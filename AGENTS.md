@@ -41,3 +41,53 @@
 ## Agent Communication Practices
 - Summarize progress after each major action, compacting details to preserve context window space for upcoming tasks.
 - Tie summaries to the active roadmap items or checklists so parallel workstreams stay coherent across longer sessions.
+
+## Core Bring-Up Sequence (Supabase CLI default)
+Follow this flow before running smokes or automation. Commands run from repo root unless noted.
+
+1. `cp pmoves/env.shared.example pmoves/env.shared` → populate secrets (Supabase keys, Discord webhook, MinIO, Firefly, etc.). Keep `.env` entries commented so they don’t override shared secrets.
+2. `make env-setup` – sync `.env`, `.env.local`, and Supabase config defaults.
+3. `make supa-start` – launches the Supabase CLI stack (REST on 65421). Check status with `make supa-status`. Stop with `make supa-stop`.
+4. `make up` – core PMOVES services (presign, render-webhook, hi-rag, etc.).
+5. `make up-agents` – NATS, Agent Zero, Archon, mesh-agent, publisher-discord.
+6. `make up-external` (or `make up-external-wger`, `...-firefly`, `...-jellyfin`, `...-on`) – third-party integrations.
+7. `make bootstrap-data` – seeds Supabase SQL, Neo4j graph, Qdrant/Meili demo data.
+8. Optional stacks:
+   - `make up-n8n` – workflow engine (UI at http://localhost:5678).
+   - `make notebook-up` / `make notebook-seed-models` – Open Notebook + SurrealDB.
+   - `make jellyfin-folders` prior to first Jellyfin boot.
+
+## Smoketests & Diagnostics
+- Full harness: `make smoke`
+- Discord publisher: `make discord-smoke` (requires `DISCORD_WEBHOOK_URL` in `env.shared`/`.env.local`; host port 8094).
+- Geometry web UI: `make web-geometry`
+- Health checks: `make health-agent-zero`, `make health-publisher-discord`, `make health-jellyfin-bridge`
+- External integrations: `make smoke-wger`, `make smoke-presign-put`, `make jellyfin-smoke`
+- Creative CGP demos: `make demo-health-cgp`, `make demo-finance-cgp`, plus manual WAN/Qwen/VibeVoice webhook triggers (see `pmoves/creator/README.md`).
+- Environment sanity: `make preflight` (tooling) and `make flight-check` (runtime)
+
+## Command Reference (keep handy)
+- Supabase mode switching: `make supa-use-local`, `make supa-use-remote`
+- Logs tail: `make logs-core` or `make logs-core-15m`
+- Evidence capture: `make evidence-log LABEL="..."` (PowerShell variant `-ps`)
+- Seed helpers: `make seed-approval`, `make seed-data`, `make mindmap-seed`
+- CI parity: `make chit-contract-check`, `make jellyfin-verify`, `pytest` via `make test-discord-format` etc.
+- Integration workspace helpers live in `pmoves/tools/integrations/*.sh|ps1` (bootstrap, import flows, push PRs).
+- Consciousness harvest: `make harvest-consciousness` (scaffolds dataset + processed artifacts)
+- Consciousness YouTube ingestion: `make ingest-consciousness-yt ARGS="--max 5"` (requires pmoves-yt)
+- CHIT secret bundle: `make chit-encode-secrets ARGS="--env-file pmoves/env.shared"`; round-trip via `make chit-decode-secrets`.
+
+## Creative Stack Notes
+- Installers / tutorials / workflows live under `pmoves/creator/`. Run the “One-Click Bring-Up Flow” before testing n8n creative webhooks (`wan_to_cgp`, `qwen_to_cgp`, `vibevoice_to_cgp`).
+- Keep `env.shared` aligned with MinIO buckets (`SUPABASE_STORAGE_*`) and Discord preview webhooks for VibeVoice.
+
+## Documentation Anchors
+- Operational runbooks: `pmoves/docs/SMOKETESTS.md`, `pmoves/docs/LOCAL_DEV.md`, `pmoves/docs/LOCAL_TOOLING_REFERENCE.md`
+- Service-specific guides: `pmoves/docs/services/<service>/README.md`
+- Creative pipeline: `pmoves/docs/PMOVES.AI PLANS/CREATOR_PIPELINE*.md` and `pmoves/creator/README.md`
+- Automation checklists: `pmoves/docs/PMOVES.AI PLANS/N8N_SETUP.md`, `N8N_CHECKLIST.md`
+
+## Working Practice Reminders
+- Sync with the latest `main` (`git fetch origin && git checkout main && git pull --rebase`) before branching for new work.
+- Capture test evidence in PRs (reference command outputs, screenshots, Supabase rows).
+- When services log config errors, inspect `env.shared`, rerun `make supa-status`, and restart with the `make up-*` targets above instead of manual `docker compose` invocations.
