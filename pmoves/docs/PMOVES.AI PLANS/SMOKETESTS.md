@@ -45,6 +45,9 @@ This guide covers preflight wiring, starting the core stack, and running the loc
 
 This checks tool availability, common ports, `.env` keys vs `.env.example`, and validates `contracts/topics.json`.
 
+Optional secret bundle:
+- `make chit-encode-secrets` — snapshot `env.shared` into `pmoves/data/chit/env.cgp.json` using the CHIT CGP v0.1 format. Confirm round-trip with `make chit-decode-secrets ARGS="--out /tmp/env.from.chit"` to ensure the encoder/decoder pair matches the docs in `pmoves/docs/PMOVESCHIT/`.
+
 ## 3) Start Core Stack
 
 - Start data + workers profile (v2 gateway):
@@ -280,6 +283,14 @@ Optional smoke targets:
 - `make smoke-rerank` — query with `use_rerank=true` (provider optional)
 - `make smoke-langextract` — extract chunks from XML via `langextract` and load
 - `make smoke-archon` — hit `http://localhost:8091/healthz` and ensure Archon reports `status: "ok"` (requires NATS + Supabase CLI stack)
+- `make harvest-consciousness` — scaffold the consciousness corpus, generate processed-for-rag artifacts, and attempt Supabase schema apply (if CLI present).
+
+Consciousness follow-up:
+
+1. `pwsh -File pmoves/data/consciousness/Constellation-Harvest-Regularization/scripts/selenium-scraper.ps1` (run on a host with PowerShell + Chrome).
+2. Import `processed-for-rag/supabase-import/n8n-workflow.json` into n8n; process `embeddings-ready/consciousness-chunks.jsonl` to push embeddings.
+3. Publish geometry sample via `make mesh-handshake FILE=pmoves/data/consciousness/Constellation-Harvest-Regularization/processed-for-rag/supabase-import/consciousness-geometry-sample.json`.
+4. Capture Supabase row counts, geometry IDs, and evidence logs in `pmoves/docs/SESSION_IMPLEMENTATION_PLAN.md`.
 
 ## Troubleshooting
 

@@ -4,7 +4,9 @@ services:
     container_name: cataclysm-open-notebook
     restart: unless-stopped
     env_file:
+      - env.shared.generated
       - env.shared
+      - .env.generated
       - .env
       - .env.local
     environment:

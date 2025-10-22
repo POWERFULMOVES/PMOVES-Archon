@@ -10,6 +10,8 @@ services:
       cataclysm:
         aliases:
           - cataclysm-wger
+    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    networks: [pmoves]
     environment:
       - DJANGO_DEBUG=False
       - WGER_USE_GUNICORN=True
@@ -44,6 +46,8 @@ services:
       cataclysm:
         aliases:
           - cataclysm-firefly
+    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    networks: [pmoves]
     environment:
       APP_KEY: ${FIREFLY_APP_KEY:-SomeRandomStringOf32CharsExactly}
       APP_ENV: ${FIREFLY_APP_ENV:-production}
@@ -74,7 +78,7 @@ services:
     image: ${OPEN_NOTEBOOK_IMAGE:-ghcr.io/cataclysmstudios/pmoves-open-notebook:main}
     container_name: cataclysm-open-notebook
     restart: unless-stopped
-    env_file: [env.shared, .env, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
     depends_on:
       - open-notebook-surrealdb-ext
     networks:
@@ -132,6 +136,8 @@ services:
       cataclysm:
         aliases:
           - cataclysm-jellyfin
+    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    networks: [pmoves]
     environment:
       JELLYFIN_PublishedServerUrl: ${JELLYFIN_PUBLISHED_URL:-http://localhost:8096}
       JELLYFIN_MEDIA_ROOT: ${JELLYFIN_MEDIA_ROOT:-/media}
