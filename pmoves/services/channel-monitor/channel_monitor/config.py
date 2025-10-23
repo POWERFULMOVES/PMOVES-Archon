@@ -10,6 +10,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         {
             "channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
             "channel_name": "Google Developers",
+            "platform": "youtube",
+            "source_type": "channel",
+            "source_url": "https://www.youtube.com/@GoogleDevelopers",
             "enabled": False,
             "check_interval_minutes": 60,
             "auto_process": True,
@@ -22,9 +25,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "priority": 1,
             "namespace": "pmoves",
             "tags": ["tech"],
+            "format": None,
+            "media_type": "video",
+            "cookies_path": None,
             "yt_options": {
                 "download_archive": "/data/yt-dlp/google-developers.archive",
                 "subtitle_langs": ["en"],
+                "write_info_json": True,
             },
         }
     ],

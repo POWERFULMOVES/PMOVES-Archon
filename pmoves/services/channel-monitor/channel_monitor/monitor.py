@@ -5,6 +5,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Dict, List, Optional, Set
 
 import asyncpg
@@ -138,15 +139,32 @@ class ChannelMonitor:
         return total_new
 
     async def check_single_channel(self, channel: Dict[str, Any]) -> int:
-        channel_id = channel["channel_id"]
-        channel_name = channel.get("channel_name", channel_id)
+        channel_name = channel.get("channel_name") or channel.get("source_url") or channel.get("channel_id")
+        platform = channel.get("platform", "youtube").lower()
+        source_type = channel.get("source_type", "channel").lower()
+        cookies_path = channel.get("cookies_path")
+        max_videos = channel.get("max_items") or self.config["global_settings"].get("max_videos_per_check", 10)
+        channel_id = channel.get("channel_id") or channel.get("source_id")
+        source_url = channel.get("source_url")
         LOGGER.info("Checking channel %s", channel_name)
 
-        videos: List[Dict[str, Any]]
-        if self.config["global_settings"].get("use_rss_feed", True):
-            videos = await self._fetch_via_rss(channel_id)
+        videos: List[Dict[str, Any]] = []
+        if platform == "youtube":
+            if source_type == "playlist" and source_url:
+                videos = await self._fetch_youtube_flat(source_url, cookies_path, max_videos)
+            elif source_url:
+                videos = await self._fetch_youtube_flat(source_url, cookies_path, max_videos)
+            else:
+                if self.config["global_settings"].get("use_rss_feed", True) and channel_id:
+                    videos = await self._fetch_via_rss(channel_id)
+                elif channel_id:
+                    playlist_url = f"https://www.youtube.com/channel/{channel_id}"
+                    videos = await self._fetch_youtube_flat(playlist_url, cookies_path, max_videos)
+        elif platform == "soundcloud" and source_url:
+            videos = await self._fetch_soundcloud(source_url, cookies_path, max_videos)
         else:
-            videos = await self._fetch_via_api(channel_id)
+            LOGGER.warning("Unsupported platform %s for channel %s", platform, channel_name)
+            return 0
 
         filters = channel.get("filters", {})
         filtered = self._apply_filters(videos, filters)
@@ -260,17 +278,35 @@ class ChannelMonitor:
 
     async def _queue_videos(self, channel: Dict[str, Any], videos: List[Dict[str, Any]]) -> None:
         namespace = channel.get("namespace", self.namespace_default)
-        payloads = [
-            {
-                "url": video["url"],
-                "namespace": namespace,
-                "auto_emit": False,
-                "source": "channel_monitor",
-                "tags": channel.get("tags", []),
-                "yt_options": self._build_yt_options(channel),
-            }
-            for video in videos
-        ]
+        payloads = []
+        yt_options = self._build_yt_options(channel)
+        format_override = channel.get("format")
+        media_type = channel.get("media_type") or "video"
+        channel_label = (
+            channel.get("channel_name")
+            or channel.get("source_url")
+            or channel.get("channel_id")
+            or channel.get("source_id")
+            or "unknown"
+        )
+        for video in videos:
+            payloads.append(
+                {
+                    "url": video["url"],
+                    "namespace": namespace,
+                    "auto_emit": False,
+                    "source": "channel_monitor",
+                    "tags": channel.get("tags", []),
+                    "media_type": media_type,
+                    "format": format_override,
+                    "yt_options": yt_options,
+                    "metadata": {
+                        "platform": channel.get("platform", "youtube"),
+                        "source_type": channel.get("source_type", "channel"),
+                        "channel_name": channel_label,
+                    },
+                }
+            )
         async with httpx.AsyncClient(timeout=60.0) as client:
             for payload, video in zip(payloads, videos):
                 try:
@@ -305,7 +341,87 @@ class ChannelMonitor:
         channel_opts = channel.get("yt_options") or {}
         if isinstance(channel_opts, dict):
             merged.update(channel_opts)
+        if channel.get("cookies_path"):
+            merged.setdefault("cookies", channel["cookies_path"])
         return merged
+
+    async def _fetch_youtube_flat(
+        self,
+        url: str,
+        cookies_path: Optional[str],
+        max_items: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(self._yt_dlp_extract, url, cookies_path, max_items, platform="youtube"),
+        )
+
+    async def _fetch_soundcloud(
+        self,
+        url: str,
+        cookies_path: Optional[str],
+        max_items: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(self._yt_dlp_extract, url, cookies_path, max_items, platform="soundcloud"),
+        )
+
+    @staticmethod
+    def _yt_dlp_extract(
+        url: str,
+        cookies_path: Optional[str],
+        max_items: Optional[int],
+        platform: str,
+    ) -> List[Dict[str, Any]]:
+        opts: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": True,
+        }
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
+        results: List[Dict[str, Any]] = []
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            entries = info.get("entries")
+            if entries is None:
+                entries = [info]
+            if isinstance(entries, dict):
+                entries = entries.values()
+            for entry in entries:
+                if max_items and len(results) >= max_items:
+                    break
+                video_id = entry.get("id") or entry.get("url")
+                if not video_id:
+                    continue
+                webpage_url = entry.get("webpage_url") or entry.get("url")
+                if platform == "youtube" and video_id and not webpage_url:
+                    webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+                published_ts = entry.get("timestamp") or entry.get("release_timestamp")
+                if entry.get("upload_date") and not published_ts:
+                    try:
+                        published_ts = datetime.strptime(entry["upload_date"], "%Y%m%d").replace(tzinfo=timezone.utc).timestamp()
+                    except Exception:
+                        published_ts = None
+                if published_ts:
+                    published = datetime.fromtimestamp(published_ts, tz=timezone.utc)
+                else:
+                    published = utcnow()
+                results.append(
+                    {
+                        "video_id": str(video_id),
+                        "title": entry.get("title") or video_id,
+                        "url": webpage_url,
+                        "published": published,
+                        "author": entry.get("uploader") or entry.get("channel") or "",
+                        "description": entry.get("description") or "",
+                    }
+                )
+        return results
 
     async def _update_status(
         self,

@@ -48,6 +48,10 @@ _Last updated: 2025-10-14_
   - Scaffold FastAPI worker, Supabase migration, queue wiring, smoke tests.
   - 2025-10-23: Added queue status transitions + webhook callback + pytest coverage (`pytest pmoves/services/channel-monitor/tests`). Stack smoke pending.
   - 2025-10-23: Surfaced yt-dlp archive/caption/postprocessor knobs in env + channel configs.
+- [ ] Launch PMOVES.YT personalization MVP (see `PMOVES.yt/USER_PREFERENCES_AND_INSIGHTS.md`).
+  - Implement Supabase tables (`user_sources`, `user_engagement`, `tv_channels`).
+  - Extend channel monitor ingest loop with per-user `yt_options` + credentials.
+  - Capture Jellyfin/PMOVES.TV events into engagement tables and surface baseline recommendations.
   - Provide default channel config + env vars; update docs once smoke passes.
 - [ ] Implement PMOVES.YT summarization + resilient downloader backlog (Gemma endpoints, multipart upload, `make yt-smoke` helper).
 - [ ] Design and document the resilient download module (resume, retries, rate limiting, playlist/channel ingestion, bounded worker pool).

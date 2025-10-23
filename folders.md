@@ -309,6 +309,7 @@ PY
 │       ├── publish_content_published.ps1
 │       ├── publish_content_published.sh
 │       ├── publish_handshake.py
+│       ├── register_media_source.py
 │       ├── realtime_listener.py
 │       ├── requirements-minimal.txt
 │       ├── seed_studio_board.ps1

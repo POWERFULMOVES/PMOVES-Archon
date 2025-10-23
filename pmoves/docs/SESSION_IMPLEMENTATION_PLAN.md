@@ -8,6 +8,8 @@ This working session establishes the concrete implementation tasks needed to clo
 
 - Hardened the PMOVES.yt channel monitor queue path: status transitions now capture `processing` → `queued`/`completed`/`failed` timestamps in Supabase metadata, added `/api/monitor/status` callback guarded by `CHANNEL_MONITOR_SECRET`, and pytest coverage exercises happy-path + failure flows (`pytest pmoves/services/channel-monitor/tests`). Pending: run `make channel-monitor-smoke` once pmoves-yt and Supabase are online to log evidence.
 - Pulled in yt-dlp optional deps (`yt-dlp[default]`, `curl-cffi`, AtomicParsley) and exposed archive/subtitle/postprocessor knobs via `YT_*` env + `yt_options` blocks so playlists skip duplicates, embed metadata, and capture captions during backfill.
+- Authored `PMOVES.yt/USER_PREFERENCES_AND_INSIGHTS.md`, defining the user personalization architecture (Supabase tables, per-user `yt_options`, PMOVES.TV channel scheduling) to support custom playlists/likes ingestion and engagement dashboards.
+- Added multi-source tooling: channel monitor now supports YouTube playlists + SoundCloud feeds via yt-dlp flat extraction, and `python -m pmoves.tools.register_media_source` appends sources with per-user namespaces/archive settings.
 
 ## Session Log (2025-10-20)
 

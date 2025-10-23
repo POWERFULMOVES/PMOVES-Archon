@@ -161,7 +161,11 @@ def test_queue_videos_success_updates_status(tmp_path, monkeypatch):
         DummyAsyncClient,
     )
 
-    channel = {"channel_id": "UC123", "namespace": "pmoves", "tags": ["news"]}
+    channel = {
+        "channel_id": "UC123",
+        "namespace": "pmoves",
+        "tags": ["news"],
+    }
     videos = [
         {
             "video_id": "vid-42",
@@ -178,6 +182,9 @@ def test_queue_videos_success_updates_status(tmp_path, monkeypatch):
     assert payload["url"] == videos[0]["url"]
     assert payload["source"] == "channel_monitor"
     assert payload["yt_options"] == {"write_info_json": True}
+    assert payload["format"] is None
+    assert payload["media_type"] == "video"
+    assert payload["metadata"]["platform"] == "youtube"
     assert statuses[0][0:3] == ("vid-42", "processing", None)
     assert statuses[1][0:3] == ("vid-42", "queued", None)
     assert statuses[1][3] == {"queue_status_code": 202}

@@ -43,6 +43,19 @@ curl -X POST http://localhost:8097/api/monitor/channel \
 - `postprocessors`: override yt-dlp post-processing chain; defaults embed thumbnails + metadata.
 - `write_info_json`: emit `.info.json` alongside downloads for downstream RAG enrichment.
 
+CLI helper (writes to the active config path):
+
+```bash
+python -m pmoves.tools.register_media_source \
+  --platform youtube \
+  --source-type playlist \
+  --name "DARKSXIDE Mix Series" \
+  --url "https://www.youtube.com/playlist?list=PLGupOT04oMfok7S8W8Js7lZZIlhM8ufc8" \
+  --namespace pmoves.darkxside \
+  --tags "darkxside,mix" \
+  --yt-options '{"download_archive": "/data/yt-dlp/darkxside/mixseries.archive"}'
+```
+
 ### Persistence
 
 Discovered videos are stored in `pmoves.channel_monitoring` with status flags (`pending`, `processing`, `queued`, `completed`, `failed`). The service records each transition timestamp inside the row metadata so operations can audit ingestion attempts. The `pmoves/supabase/initdb/14_channel_monitoring.sql` migration creates the table and indexes for Supabase/Postgres environments.
