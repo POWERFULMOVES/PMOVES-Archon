@@ -576,6 +576,6 @@ class ChannelMonitor:
 async def lifespan_monitor(monitor: ChannelMonitor):
     await monitor.start()
     try:
-        yield monitor
+        yield {"monitor": monitor}
     finally:
         await monitor.shutdown()

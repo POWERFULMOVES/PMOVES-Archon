@@ -313,6 +313,8 @@ services:
       - SUPA_REST_URL=${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - HIRAG_URL=http://hi-rag-gateway:8086
+    volumes:
+      - ./config:/app/config
     depends_on: [minio]
     ports: ["8077:8077"]
     profiles: ["orchestration","workers","agents"]
