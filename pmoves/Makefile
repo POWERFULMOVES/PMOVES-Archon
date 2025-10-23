@@ -200,7 +200,7 @@ up-workers:
 
 # YouTube ingest + whisper stack
 up-yt:
-	docker compose -p $(PROJECT) --profile data --profile workers up -d ffmpeg-whisper pmoves-yt
+	docker compose -p $(PROJECT) --profile data --profile workers --profile yt up -d bgutil-pot-provider ffmpeg-whisper pmoves-yt
 
 # Optional media analyzers (video+audio)
 up-media:
