@@ -69,3 +69,4 @@ A production-ready, self-hostable orchestration mesh for creative + agent worklo
 - ✅ Hi‑RAG reranker toggle + evaluation suite update — implemented (parameter sweeps still optional)
 - 🚧 Jellyfin refresh + rich Discord embeds — waiting on publisher metadata polish and Discord wiring
 - ✅ Roadmap/NEXT_STEPS — aligned with repo state
+- ✅ LangExtract Workers AI option + docs/env wiring — 2025-10-23
