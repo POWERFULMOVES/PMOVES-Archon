@@ -246,6 +246,8 @@ services:
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - USE_CUDA=${USE_CUDA:-true}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - FFW_PROVIDER=${FFW_PROVIDER:-faster-whisper}
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
     deploy:
       resources:
         reservations:
@@ -319,6 +321,9 @@ services:
       - BGUTIL_HTTP_BASE_URL=${BGUTIL_HTTP_BASE_URL:-http://bgutil-pot-provider:4416}
       - BGUTIL_DISABLE_INNERTUBE=${BGUTIL_DISABLE_INNERTUBE:-1}
       - CHANNEL_MONITOR_STATUS_URL=${CHANNEL_MONITOR_STATUS_URL:-http://channel-monitor:8097/api/monitor/status}
+      - YT_TRANSCRIPT_PROVIDER=${YT_TRANSCRIPT_PROVIDER:-faster-whisper}
+      - YT_WHISPER_MODEL=${YT_WHISPER_MODEL:-small}
+      - YT_TRANSCRIPT_DIARIZE=${YT_TRANSCRIPT_DIARIZE:-false}
     volumes:
       - ./config:/app/config
     depends_on:

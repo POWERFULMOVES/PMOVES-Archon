@@ -267,3 +267,13 @@ The following checklist captures what could be validated within the hosted Codex
 | Invidious schema bootstrapped | 2025-10-23T14:24:05Z | `docker compose -p pmoves up -d invidious-db` now mounts `services/invidious/init-invidious-db.sh` ensuring tables are created during startup. |
 | Grayjay profile scaffolding | 2025-10-23T14:28:12Z | Added `grayjay-plugin-host` (FastAPI) + `grayjay-server` optional profile; plugin registry reachable at `http://localhost:9096/plugins`. |
 | Next steps | — | Embed companion secrets in secrets manager, stand up optional Invidious stack (DB + companion) under `docker-compose` profile, implement auto-retry in channel monitor once completed statuses flow back. |
+
+## 2025-10-23 – Whisper Tuning & Ingest Recovery
+
+| Step | Timestamp (UTC) | Evidence |
+| --- | --- | --- |
+| Added defaults for faster-whisper small model | 2025-10-23T18:12:40Z | `pmoves/docker-compose.yml` now injects `FFW_PROVIDER=faster-whisper` and `WHISPER_MODEL=small`; `pmoves/env.shared.example` documents the new vars. |
+| Propagated transcript defaults to pmoves-yt | 2025-10-23T18:13:05Z | `pmoves/services/pmoves-yt/yt.py` reads `YT_TRANSCRIPT_PROVIDER`, `YT_WHISPER_MODEL`, and `YT_TRANSCRIPT_DIARIZE` when building `/yt/transcript` payloads. |
+| Restarted ffmpeg-whisper to clear hung jobs | 2025-10-23T18:13:15Z | `docker compose -p pmoves restart ffmpeg-whisper` followed by `curl http://localhost:8078/healthz` → `{"ok":true}`; synthetic WAV transcription completes in ~10 s. |
+| Disabled dynamic SoundCloud ingest | 2025-10-23T17:54:28Z | Updated `pmoves.user_sources` via container SQL (status `inactive`, `auto_process=false`) to prevent further SoundCloud 500s. |
+| Rebuilt ffmpeg with whisper filter | 2025-10-23T18:29:40Z | New multi-stage Dockerfile builds whisper.cpp `libwhisper` then FFmpeg git master with `--enable-whisper`; verified `ffmpeg -filters | grep whisper` shows the filter inside the runtime image. |

@@ -54,6 +54,16 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.propagate = True
 
+def _parse_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    return None
+
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT") or os.environ.get("S3_ENDPOINT") or "minio:9000"
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID") or "minioadmin"
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "minioadmin"
@@ -160,6 +170,14 @@ SOUNDCLOUD_USERNAME = os.environ.get("SOUNDCLOUD_USERNAME")
 SOUNDCLOUD_PASSWORD = os.environ.get("SOUNDCLOUD_PASSWORD") or os.environ.get("SOUNDCLOUD_PASS")
 SOUNDCLOUD_COOKIEFILE = os.environ.get("SOUNDCLOUD_COOKIEFILE") or os.environ.get("SOUNDCLOUD_COOKIES")
 SOUNDCLOUD_COOKIES_FROM_BROWSER = os.environ.get("SOUNDCLOUD_COOKIES_FROM_BROWSER")
+YT_TRANSCRIPT_PROVIDER = os.environ.get("YT_TRANSCRIPT_PROVIDER") or "faster-whisper"
+YT_WHISPER_MODEL = os.environ.get("YT_WHISPER_MODEL") or "small"
+_raw_transcript_diarize = os.environ.get("YT_TRANSCRIPT_DIARIZE")
+if _raw_transcript_diarize is None:
+    YT_TRANSCRIPT_DIARIZE = False
+else:
+    parsed = _parse_bool(_raw_transcript_diarize)
+    YT_TRANSCRIPT_DIARIZE = False if parsed is None else parsed
 
 _nc: Optional[NATS] = None
 
@@ -1075,6 +1093,12 @@ def yt_ingest(body: Dict[str,Any] = Body(...)):
         }
         if body.get('provider'):
             tr_payload['provider'] = body['provider']
+        if YT_TRANSCRIPT_PROVIDER:
+            tr_payload.setdefault('provider', YT_TRANSCRIPT_PROVIDER)
+        if YT_WHISPER_MODEL:
+            tr_payload.setdefault('whisper_model', YT_WHISPER_MODEL)
+        if YT_TRANSCRIPT_DIARIZE is not None:
+            tr_payload.setdefault('diarize', YT_TRANSCRIPT_DIARIZE)
         tr = yt_transcript(tr_payload)
         logger.info(
             "ingest_transcript_complete",
