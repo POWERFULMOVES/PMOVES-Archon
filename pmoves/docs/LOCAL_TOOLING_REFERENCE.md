@@ -14,6 +14,7 @@ This guide aggregates the entry points that keep local environments consistent a
 - `scripts/create_venv*.{sh,ps1}` → optional helpers to create/activate Python virtualenvs outside of Conda. Pass the environment name as the first argument on Bash, or `-Name` in PowerShell.
 - `scripts/codex_bootstrap*.{sh,ps1}` → standardizes editor/agent prerequisites inside Codex or WSL sessions (installs `jq`, configures Make, syncs Python deps).
 - `scripts/install_all_requirements*.{sh,ps1}` → one-shot installs for every Python requirement file when you need parity with CI or remote hosts.
+- Offline Python deps: `pmoves/vendor/python/` ships a bundled copy of `httpx` + dependencies for the Jellyfin backfill path. The script automatically prepends this directory to `sys.path`, so once the repository is synced no external pip download is required. Open Notebook also exposes a default login (`changeme`), defined in `.env.shared`/`.env.local`, to keep first-time bring-up painless—rotate it immediately after confirming access.
 
 ## Stack Orchestration (Make Targets)
 - `make up` → main compose profile (data + workers). Overrides: `make up-cli`, `make up-compose`, `make up-workers`, `make up-media`, `make up-jellyfin`, `make up-yt`.

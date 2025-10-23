@@ -66,6 +66,14 @@ Notes
 - Auto‑tune:
    - `YT_SEG_AUTOTUNE=true|false` (default true). When enabled, thresholds are auto‑tuned per video using Whisper segment stats (avg duration, gap, words/sec, short‑line ratio) to choose profiles: dialogue, talk, or lyrics.
 
+## Roadmap
+
+- [x] Multi-model embeddings (MiniLM/Gemma/Qwen) wired into Supabase (`youtube_transcripts`).
+- [ ] Channel monitor service (see `CHANNEL_MONITOR_IMPLEMENTATION.md`) — **in progress**.
+- [ ] Resilient downloader + checksum pipeline.
+- [ ] Gemma-powered summarization/chapters hardening + fallback logic.
+- [ ] `make yt-smoke` automation + pytest coverage for pmoves-yt endpoints.
+
 ## `/yt/chapters`
 
 - Body: `{ video_id, provider? }`.

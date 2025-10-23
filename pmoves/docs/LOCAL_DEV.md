@@ -132,12 +132,13 @@ OpenAI-compatible presets:
 
 ### Notebook Sync Worker
 
-- Included with the default `make up` stack once `OPEN_NOTEBOOK_API_URL` is configured.
+- Included with the default `make up` stack once `OPEN_NOTEBOOK_API_URL` is configured (defaults to `http://localhost:5055`).
 - Start individually: `docker compose up notebook-sync` (requires the data + workers profile services).
 - Health check: `curl http://localhost:8095/healthz`.
 - Manual poll: `curl -X POST http://localhost:8095/sync` (returns HTTP 409 while a run is in-flight).
 - Interval tuning: `NOTEBOOK_SYNC_INTERVAL_SECONDS` (seconds, defaults to 300).
 - Cursor storage: `NOTEBOOK_SYNC_DB_PATH` (default `/data/notebook_sync.db` mounted via the `notebook-sync-data` volume).
+- When you launch `make notebook-up`, the bundled SurrealDB endpoint now defaults to `ws://localhost:8000/rpc`; override `SURREAL_URL`/`SURREAL_ADDRESS` in `.env.local` if you target an external Surreal instance. The UI ships with `OPEN_NOTEBOOK_PASSWORD=changeme`—log in with that and update it immediately for your environment.
 
 ### Events (NATS)
 

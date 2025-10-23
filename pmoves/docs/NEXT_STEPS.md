@@ -43,6 +43,11 @@ _Last updated: 2025-10-14_
   - Notes: Qwen default on GPU path is in place; sweeps should compare Qwen vs BGE vs Cohere/Azure on the real datasets under `services/retrieval-eval/datasets/` and publish artifacts.
 
 ### 4. PMOVES.YT High-Priority Lane
+- [x] Add multi-model `youtube_transcripts` schema columns (MiniLM/Gemma/Qwen) and adapter config knobs (2025-10-23).
+- [ ] Promote YouTube channel monitor prototype into core service (see `PMOVES.yt/CHANNEL_MONITOR_IMPLEMENTATION.md`).
+  - Scaffold FastAPI worker, Supabase migration, queue wiring, smoke tests.
+  - Provide default channel config + env vars; update docs once smoke passes.
+- [ ] Implement PMOVES.YT summarization + resilient downloader backlog (Gemma endpoints, multipart upload, `make yt-smoke` helper).
 - [ ] Design and document the resilient download module (resume, retries, rate limiting, playlist/channel ingestion, bounded worker pool).
 - [ ] Specify multipart upload + checksum verification approach for MinIO, including lifecycle/retention tag configuration.
 - [ ] Enumerate metadata enrichment requirements (duration, channel, tags, provenance) and map them to Supabase schema updates.
