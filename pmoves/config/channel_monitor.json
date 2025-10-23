@@ -34,7 +34,7 @@
       }
     },
     {
-      "channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      "channel_id": "yt:channel:@DARKSXIDE",
       "channel_name": "DARKSXIDE (Channel)",
       "platform": "youtube",
       "source_type": "channel",
@@ -72,7 +72,7 @@
       }
     },
     {
-      "channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      "channel_id": "yt:playlists:@DARKSXIDE",
       "channel_name": "DARKSXIDE (Playlists)",
       "platform": "youtube",
       "source_type": "playlist",
@@ -106,7 +106,7 @@
       }
     },
     {
-      "channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      "channel_id": "yt:playlist:PLGupOT04oMfok7S8W8Js7lZZIlhM8ufc8",
       "channel_name": "DARKSXIDE Mix Series",
       "platform": "youtube",
       "source_type": "playlist",
@@ -140,6 +140,7 @@
       }
     },
     {
+      "channel_id": "soundcloud:darkxside",
       "channel_name": "DARKSXIDE SoundCloud",
       "platform": "soundcloud",
       "source_type": "user",

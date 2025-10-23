@@ -247,10 +247,28 @@ class ChannelMonitor:
         assert self._pool
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                channel_identifier = (
+                    channel.get("channel_id")
+                    or channel.get("source_url")
+                    or channel.get("source_id")
+                    or channel.get("channel_name")
+                )
+                if not channel_identifier:
+                    raise ValueError("channel configuration missing channel_id/source identifier")
+
                 for video in videos:
                     published = video["published"]
                     if published.tzinfo is None:
                         published = published.replace(tzinfo=timezone.utc)
+                    metadata = json.dumps(
+                        {
+                            "description": video.get("description", ""),
+                            "author": video.get("author", ""),
+                            "platform": channel.get("platform"),
+                            "source_type": channel.get("source_type"),
+                            "source_url": channel.get("source_url"),
+                        }
+                    )
                     await conn.execute(
                         """
                         INSERT INTO pmoves.channel_monitoring (
@@ -259,7 +277,7 @@ class ChannelMonitor:
                         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                         ON CONFLICT (channel_id, video_id) DO NOTHING
                         """,
-                        channel["channel_id"],
+                        channel_identifier,
                         channel.get("channel_name"),
                         video["video_id"],
                         video["title"],
@@ -268,10 +286,7 @@ class ChannelMonitor:
                         channel.get("priority", 0),
                         channel.get("namespace", self.namespace_default),
                         channel.get("tags", []),
-                        {
-                            "description": video.get("description", ""),
-                            "author": video.get("author", ""),
-                        },
+                        metadata,
                     )
         for video in videos:
             self._processed_video_ids.add(video["video_id"])
@@ -289,6 +304,12 @@ class ChannelMonitor:
             or channel.get("source_id")
             or "unknown"
         )
+        channel_identifier = (
+            channel.get("channel_id")
+            or channel.get("source_url")
+            or channel.get("source_id")
+            or channel_label
+        )
         for video in videos:
             payloads.append(
                 {
@@ -304,6 +325,7 @@ class ChannelMonitor:
                         "platform": channel.get("platform", "youtube"),
                         "source_type": channel.get("source_type", "channel"),
                         "channel_name": channel_label,
+                        "channel_id": channel_identifier,
                     },
                 }
             )
