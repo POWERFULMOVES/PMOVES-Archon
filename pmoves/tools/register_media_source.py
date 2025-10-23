@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from pmoves.services.channel_monitor.channel_monitor.config import (
-    config_path_from_env,
-    ensure_config,
-    save_config,
-)
+ROOT = Path(__file__).resolve().parents[2]
+SERVICE_ROOT = ROOT / "services" / "channel-monitor"
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+
+from channel_monitor.config import config_path_from_env, ensure_config, save_config
 
 
 def parse_args() -> argparse.Namespace:
