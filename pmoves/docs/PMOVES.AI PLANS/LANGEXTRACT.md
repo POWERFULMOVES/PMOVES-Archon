@@ -24,4 +24,5 @@ This service and scripts convert XML into structured chunks ready for embedding 
 - `LANGEXTRACT_PROVIDER=rule` (default): Fast rule-based segmentation and IT error extraction.
 - `LANGEXTRACT_PROVIDER=openai`: Uses any OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, or local LM Studio/vLLM/NIM) via `OPENAI_API_BASE`, `OPENAI_API_KEY`, `OPENAI_MODEL`.
 - `LANGEXTRACT_PROVIDER=gemini`: Uses Google Gemini via `GEMINI_API_KEY`, `GEMINI_MODEL`.
+- `LANGEXTRACT_PROVIDER=tensorzero`: Uses the TensorZero gateway (`TENSORZERO_BASE_URL`, optional `TENSORZERO_API_KEY`). Tags emitted via `LANGEXTRACT_REQUEST_ID` and `LANGEXTRACT_FEEDBACK_*` are forwarded to the gateway as request metadata.
 If a provider is not configured or fails, prefer `rule` for offline local use.
