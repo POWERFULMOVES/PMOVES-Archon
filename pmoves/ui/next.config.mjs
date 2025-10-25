@@ -10,6 +10,9 @@ const nextConfig = {
     typedRoutes: true,
   },
   outputFileTracingRoot: __dirname,
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true
 };
 
 export default nextConfig;
