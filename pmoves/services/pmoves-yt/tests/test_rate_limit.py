@@ -17,7 +17,14 @@ from pmoves.services.pmoves_yt import yt as ytmod
 @pytest.mark.asyncio
 async def test_playlist_rate_limit_sleep(monkeypatch):
     sleeps: List[float] = []
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_playlist_rate_limit_sleep(monkeypatch):
+    calls = []
     monkeypatch.setenv("YT_RATE_LIMIT", "0.2")
+    monkeypatch.setenv("YT_CONCURRENCY", "1")
 
     async def fake_sleep(delay: float):
         if delay > 0:
@@ -35,6 +42,12 @@ async def test_playlist_rate_limit_sleep(monkeypatch):
     monkeypatch.setattr(ytmod, "_item_upsert", lambda *a, **k: None)
     monkeypatch.setattr(ytmod, "_item_update", lambda *a, **k: None)
     monkeypatch.setattr(ytmod, "YT_CONCURRENCY", 1)
+    monkeypatch.setattr(ytmod, "_extract_entries", lambda url: fake_extract(url))
+    monkeypatch.setattr(ytmod, "yt_download", fake_download)
+    monkeypatch.setattr(ytmod, "yt_transcript", fake_transcript)
+    async def fake_sleep(duration: float):
+        calls.append(duration)
+
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     out = await ytmod.yt_playlist({"url": "https://www.youtube.com/playlist?list=PL1", "namespace": "pm", "bucket": "b"})
