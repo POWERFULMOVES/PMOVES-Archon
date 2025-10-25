@@ -22,6 +22,8 @@ Refer to `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` for the consolidated list of s
 - pdf-ingest: 8092 (internal name `pdf-ingest`)
 - publisher-discord: 8094 -> 8092 (internal name `publisher-discord`)
 - notebook-sync: 8095 (internal name `notebook-sync`) – polls Open Notebook and ships normalized content into LangExtract + extract-worker.
+- channel-monitor: 8097 (internal name `channel-monitor`) – watches YouTube channels and queues new videos for pmoves-yt ingestion.
+  - Tune yt-dlp via env: `YT_ARCHIVE_DIR` + `YT_ENABLE_DOWNLOAD_ARCHIVE` manage archive files, `YT_SUBTITLE_LANGS`/`YT_SUBTITLE_AUTO` pull captions, `YT_POSTPROCESSORS_JSON` overrides post-processing (defaults embed metadata + thumbnails).
 
 External bundles (via `make up-external`):
 - wger: 8000 (nginx proxy to Django; override host mapping with `WGER_ROOT_URL` when reverse-proxying)
@@ -194,12 +196,13 @@ OpenAI-compatible presets:
 
 ### Notebook Sync Worker
 
-- Included with the default `make up` stack once `OPEN_NOTEBOOK_API_URL` is configured.
+- Included with the default `make up` stack once `OPEN_NOTEBOOK_API_URL` is configured (defaults to `http://localhost:5055`).
 - Start individually: `docker compose up notebook-sync` (requires the data + workers profile services).
 - Health check: `curl http://localhost:8095/healthz`.
 - Manual poll: `curl -X POST http://localhost:8095/sync` (returns HTTP 409 while a run is in-flight).
 - Interval tuning: `NOTEBOOK_SYNC_INTERVAL_SECONDS` (seconds, defaults to 300).
 - Cursor storage: `NOTEBOOK_SYNC_DB_PATH` (default `/data/notebook_sync.db` mounted via the `notebook-sync-data` volume).
+- When you launch `make notebook-up`, the bundled SurrealDB endpoint now defaults to `ws://localhost:8000/rpc`; override `SURREAL_URL`/`SURREAL_ADDRESS` in `.env.local` if you target an external Surreal instance. The UI ships with `OPEN_NOTEBOOK_PASSWORD=changeme`—log in with that and update it immediately for your environment.
 
 ### Events (NATS)
 
