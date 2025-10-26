@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSupabaseProxyClient } from '@/lib/supabaseServer';
 
-const PUBLIC_PATHS = new Set(['/login', '/callback']);
+const PUBLIC_PATHS = new Set(['/', '/login', '/callback']);
 
 const isPublicPath = (pathname: string) => {
   if (PUBLIC_PATHS.has(pathname)) {
