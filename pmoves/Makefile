@@ -116,6 +116,14 @@ up-open-notebook: ensure-env-shared ## Bring up Open Notebook on cataclysm-net (
 	@docker compose -f docker-compose.open-notebook.yml up -d open-notebook
 	@echo "✔ Open Notebook up (http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}, API :${OPEN_NOTEBOOK_API_PORT:-5055})"
 
+.PHONY: notebook-set-password
+notebook-set-password: ## Update Open Notebook password/token (and optionally notebook id). Usage: make notebook-set-password PASSWORD=secret [TOKEN=api-token NOTEBOOK_ID=notebook:abc123]
+	@if [ -z "$(PASSWORD)" ]; then echo "Usage: make notebook-set-password PASSWORD=<value> [TOKEN=<token>] [NOTEBOOK_ID=<id>]"; exit 1; fi
+	@EXTRA=""; \
+	if [ -n "$(TOKEN)" ]; then EXTRA="$$EXTRA --token $(TOKEN)"; fi; \
+	if [ -n "$(NOTEBOOK_ID)" ]; then EXTRA="$$EXTRA --notebook-id $(NOTEBOOK_ID)"; fi; \
+	python scripts/set_open_notebook_password.py --password "$(PASSWORD)" $$EXTRA
+
 .PHONY: down-open-notebook
 down-open-notebook: ## Stop Open Notebook
 	@docker compose -f docker-compose.open-notebook.yml down
@@ -238,6 +246,15 @@ up-yt:
 # Optional media analyzers (video+audio)
 up-media:
 	docker compose -p $(PROJECT) --profile data --profile workers up -d media-video media-audio
+
+# TensorZero model gateway stack
+.PHONY: up-tensorzero down-tensorzero
+up-tensorzero:
+	docker compose -p $(PROJECT) --profile tensorzero up -d tensorzero-clickhouse tensorzero-gateway tensorzero-ui
+
+down-tensorzero:
+	docker compose -p $(PROJECT) --profile tensorzero stop tensorzero-clickhouse tensorzero-gateway tensorzero-ui >/dev/null 2>&1 || true
+	@echo "✔ TensorZero stack stopped."
 
 # Jellyfin bridge only
 up-jellyfin:
@@ -714,6 +731,10 @@ mindmap-notebook-sync:
 .PHONY: hirag-notebook-sync
 hirag-notebook-sync:
 	@python scripts/hirag_search_to_notebook.py $(ARGS)
+
+.PHONY: yt-notebook-sync
+yt-notebook-sync:
+	@python scripts/yt_transcripts_to_notebook.py $(ARGS)
 
 .PHONY: seed-data
 seed-data:

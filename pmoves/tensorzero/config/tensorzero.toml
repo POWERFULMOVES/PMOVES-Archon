@@ -1,0 +1,40 @@
+# Minimal TensorZero configuration used by the PMOVES LangExtract integration.
+# Copy to pmoves/tensorzero/config/tensorzero.toml and adjust models/providers as needed.
+
+[gateway]
+observability.enabled = false
+
+# --- Model definitions -----------------------------------------------------
+# Chat model served from local Ollama; falls back to OpenAI when available.
+[models.llama3_local]
+routing = ["ollama_local"]
+
+[models.llama3_local.providers.ollama_local]
+type = "openai"
+api_base = "http://host.docker.internal:11434/v1"
+model_name = "llama3.1"
+api_key_location = "none"
+
+# Embedding model served from local Ollama.
+[embedding_models.gemma_embed_local]
+routing = ["ollama_local_embedding"]
+
+[embedding_models.gemma_embed_local.providers.ollama_local_embedding]
+type = "openai"
+api_base = "http://host.docker.internal:11434/v1"
+model_name = "embeddinggemma:300m"
+api_key_location = "none"
+
+# --- Functions -------------------------------------------------------------
+[functions.langextract]
+type = "chat"
+# Optional global timeout (seconds) for gateway requests.
+# timeout_seconds = 60
+
+[functions.langextract.variants.langextract_default]
+type = "chat_completion"
+model = "llama3_local"
+
+[clickhouse]
+url = "http://tensorzero-clickhouse:8123"
+healthcheck = "http://tensorzero-clickhouse:8123/ping"

@@ -5,7 +5,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 from dateutil import parser as date_parser
@@ -17,6 +17,8 @@ logging.basicConfig(
     level=getattr(logging, os.getenv("NOTEBOOK_SYNC_LOG_LEVEL", "INFO").upper()),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+VALID_MODES = {"live", "offline"}
 
 
 class CursorStore:
@@ -81,6 +83,8 @@ class NotebookSyncer:
         langextract_url: str = "http://langextract:8084",
         extract_worker_url: str = "http://extract-worker:8083",
         api_token: Optional[str] = None,
+        mode: str = "live",
+        enabled_resources: Optional[List[str]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cursor_store = cursor_store
@@ -89,6 +93,11 @@ class NotebookSyncer:
         self.langextract_url = langextract_url.rstrip("/")
         self.extract_worker_url = extract_worker_url.rstrip("/")
         self.api_token = api_token
+        self.mode = mode if mode in VALID_MODES else "live"
+        self.enabled_resources: List[str] = (
+            [resource for resource in (enabled_resources or []) if resource in self.RESOURCES]
+            or list(self.RESOURCES)
+        )
 
         headers = {"Accept": "application/json"}
         if self.api_token:
@@ -105,6 +114,12 @@ class NotebookSyncer:
         self.last_sync_time: Optional[datetime] = None
 
     async def start(self) -> None:
+        if self.mode != "live":
+            LOGGER.info("Notebook sync worker disabled (mode=%s)", self.mode)
+            return
+        if self.interval_seconds <= 0:
+            LOGGER.info("Notebook sync worker disabled (interval_seconds=%s)", self.interval_seconds)
+            return
         if self._running:
             return
         self._running = True
@@ -121,12 +136,18 @@ class NotebookSyncer:
         LOGGER.info("Notebook sync worker stopped")
 
     async def trigger_once(self) -> None:
+        if self.mode != "live":
+            LOGGER.info("Skipping manual trigger; mode=%s", self.mode)
+            return
         await self._sync_cycle(manual=True)
 
     async def _run(self) -> None:
         try:
             while self._running:
                 await self._sync_cycle()
+                if self.interval_seconds <= 0:
+                    LOGGER.info("Notebook sync interval set to %s; stopping loop", self.interval_seconds)
+                    break
                 await asyncio.sleep(self.interval_seconds)
         except asyncio.CancelledError:
             LOGGER.info("Notebook sync loop cancelled")
@@ -138,8 +159,15 @@ class NotebookSyncer:
     async def _sync_cycle(self, manual: bool = False) -> None:
         async with self._lock:
             start = datetime.now(timezone.utc)
-            LOGGER.info("Starting %s notebook sync", "manual" if manual else "scheduled")
-            for resource in self.RESOURCES:
+            if not self.enabled_resources:
+                LOGGER.info("No notebook resources enabled; skipping sync")
+                return
+            LOGGER.info(
+                "Starting %s notebook sync (resources=%s)",
+                "manual" if manual else "scheduled",
+                ",".join(self.enabled_resources),
+            )
+            for resource in self.enabled_resources:
                 try:
                     await self._sync_resource(resource)
                 except Exception:  # pylint: disable=broad-except
@@ -435,6 +463,14 @@ def _load_syncer() -> NotebookSyncer:
     langextract_url = os.getenv("LANGEXTRACT_URL", "http://langextract:8084")
     extract_worker_url = os.getenv("EXTRACT_WORKER_URL", "http://extract-worker:8083")
     token = os.getenv("OPEN_NOTEBOOK_API_TOKEN")
+    mode = os.getenv("NOTEBOOK_SYNC_MODE", "live").lower()
+    if mode not in VALID_MODES:
+        LOGGER.warning("Invalid NOTEBOOK_SYNC_MODE=%s; defaulting to 'live'", mode)
+        mode = "live"
+    sources_env = os.getenv("NOTEBOOK_SYNC_SOURCES")
+    enabled_resources: Optional[List[str]] = None
+    if sources_env:
+        enabled_resources = [src.strip() for src in sources_env.split(",") if src.strip()]
 
     cursor_store = CursorStore(cursor_path)
     return NotebookSyncer(
@@ -445,6 +481,8 @@ def _load_syncer() -> NotebookSyncer:
         langextract_url=langextract_url,
         extract_worker_url=extract_worker_url,
         api_token=token,
+        mode=mode,
+        enabled_resources=enabled_resources,
     )
 
 

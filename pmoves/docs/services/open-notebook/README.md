@@ -17,13 +17,52 @@ Compose
 Make targets
 - `make up-open-notebook` — bring up ON on `cataclysm-net` (UI http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}, API :${OPEN_NOTEBOOK_API_PORT:-5055})
 - `make down-open-notebook` — stop ON
+- `make notebook-set-password PASSWORD="pmoves4482"` — update `OPEN_NOTEBOOK_PASSWORD` / `OPEN_NOTEBOOK_API_TOKEN` (add `TOKEN=...` if you want a distinct bearer, `NOTEBOOK_ID=notebook:...` to rewrite `MINDMAP_NOTEBOOK_ID`, `YOUTUBE_NOTEBOOK_ID`, and `OPEN_NOTEBOOK_NOTEBOOK_ID`); rerun `make down-open-notebook && make up-open-notebook` afterwards.
 - `make -C pmoves up-external` — starts the packaged image alongside Wger/Firefly/Jellyfin (ensure `docker network create cataclysm-net` first)
 - `make notebook-seed-models` — auto-register provider models/default selections via `scripts/open_notebook_seed.py` after `env.shared` contains your API keys
+- `make yt-notebook-sync ARGS="--limit 10"` — mirror unsynced PMOVES.YT transcripts from Supabase into an Open Notebook notebook (set `YOUTUBE_NOTEBOOK_ID`, `SUPABASE_SERVICE_ROLE_KEY`, and `OPEN_NOTEBOOK_API_TOKEN` first)
+
+### Sync control
+
+- `NOTEBOOK_SYNC_MODE` — set to `live` (default) to allow automation, or `offline` to keep the notebook local-only. The notebook-sync worker honours this flag and Supabase Studio exposes it via `env.shared`.
+- `NOTEBOOK_SYNC_INTERVAL_SECONDS` — polling cadence for the worker (0 disables polling; you can still trigger `/sync` manually or via n8n).
+- `NOTEBOOK_SYNC_SOURCES` — comma list of resources (`notebooks`, `notes`, `sources`) that the worker should process. Use this to stage only specific feeds.
+- To apply changes: edit the values in `pmoves/env.shared` (or directly in Supabase Studio), then `docker compose -f pmoves/docker-compose.yml --profile workers restart notebook-sync`.
+- n8n / cron triggers: POST `http://notebook-sync:8095/sync` with the same bearer token (`OPEN_NOTEBOOK_API_TOKEN`) to run an on-demand sync.
+
+## Sync PMOVES.YT transcripts into Open Notebook
+
+The `scripts/yt_transcripts_to_notebook.py` helper pulls transcripts created by the pmoves-yt service,
+creates Notebook sources for each video, and records the resulting source IDs back into Supabase so
+future runs skip previously-synced items.
+
+1. Ensure the following environment variables are populated (usually via `pmoves/env.shared`):
+   - `SUPA_REST_URL` / `SUPABASE_REST_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `OPEN_NOTEBOOK_API_URL`
+   - `OPEN_NOTEBOOK_API_TOKEN`
+   - `YOUTUBE_NOTEBOOK_ID` (or reuse `MINDMAP_NOTEBOOK_ID` if you want to co-mingle assets)
+   - Supabase migration `2025-10-26_transcripts_video_fk.sql` applied so `transcripts.video_id`
+     has a foreign key to `videos.video_id` (required for PostgREST joins); run `supabase db reset`
+     or apply the migration manually if you provisioned the stack before Oct 26 2025.
+2. Run the sync (dry run first):
+
+   ```bash
+   make yt-notebook-sync ARGS="--limit 5 --dry-run"
+   make yt-notebook-sync ARGS="--limit 25"
+   ```
+
+   The script dedupes using Notebook titles/URLs, creates text sources containing the transcript plus
+   a link to the original video, and updates both `transcripts.meta` and `youtube_transcripts.meta`
+   with `notebook_source_id` / `notebook_synced_at` timestamps.
+
+Use `--namespace` or `--language` flags to narrow the sync to a specific pmoves-yt namespace or language,
+and `--include-synced` if you need to reprocess existing entries.
 
 Troubleshooting
 - If port conflicts occur, set `OPEN_NOTEBOOK_UI_PORT` / `OPEN_NOTEBOOK_API_PORT` in `.env.local` (or export inline) before running Make/Compose.
 - Ensure the shared network exists: `docker network create cataclysm-net` (Make and Compose create/attach automatically when needed).
-- Set credentials in `pmoves/env.shared` before starting:
+- Set credentials in `pmoves/env.shared` before starting (either edit by hand or run `make notebook-set-password PASSWORD="yours" NOTEBOOK_ID=notebook:xyz"` right after the first login so operators can set their own secret and target notebook):
   ```
   OPEN_NOTEBOOK_API_URL=http://cataclysm-open-notebook:5055
   OPEN_NOTEBOOK_API_TOKEN=<generated-token>
@@ -37,6 +76,21 @@ Troubleshooting
 - Health checks:
   - UI: `curl -I http://localhost:${OPEN_NOTEBOOK_UI_PORT:-8503}` (expect HTTP 200/307)
   - API: `curl http://localhost:${OPEN_NOTEBOOK_API_PORT:-5055}/health` (returns `{ "status": "healthy" }`)
+- Rotate credentials:
+  1. Choose a new passphrase and run `make notebook-set-password PASSWORD="new-strong-pass"` (add `TOKEN=...` only if you want the API bearer to differ).
+  2. Restart the service: `make down-open-notebook && make up-open-notebook`.
+  3. Verify `curl -H "Authorization: Bearer new-strong-pass" http://localhost:${OPEN_NOTEBOOK_API_PORT:-5055}/api/sources?limit=1`.
+- Migrating older stacks: if `2025-10-26_transcripts_video_fk.sql` fails because of duplicate `videos.video_id` rows or orphan transcripts, run
+- Migrating older stacks: if `2025-10-26_transcripts_video_fk.sql` fails because of duplicate `videos.video_id` rows or orphan transcripts, run
+  ```
+  delete from public.videos v using public.videos v2 where v.video_id = v2.video_id and v.id > v2.id;
+  insert into public.videos (video_id, namespace, source_url)
+    select distinct t.video_id, coalesce(t.meta->>'namespace', 'default'), 'https://youtube.com/watch?v=' || t.video_id
+    from public.transcripts t
+    left join public.videos v on v.video_id = t.video_id
+    where v.video_id is null;
+  ```
+  before reapplying the migration (adjust namespace if you track multiple brands).
 - If PMOVES logs complain that Open Notebook is missing, re-run `make bootstrap` after the service is up so the env loader captures the API URL/token. Restart `notebook-sync` with `docker compose --profile orchestration up -d notebook-sync`.
 
 Notes

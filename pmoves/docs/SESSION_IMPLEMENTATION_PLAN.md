@@ -13,6 +13,7 @@ This working session establishes the concrete implementation tasks needed to clo
 - Added Jest + Testing Library unit scaffolding (`jest.config.js`, `jest.setup.ts`, `__tests__/home-page.test.tsx`) and Playwright E2E harness (`playwright.config.ts`, `e2e/ingest.spec.ts`). New npm scripts (`npm run test`, `npm run test:e2e`) run clean locally once `npx playwright install` has fetched browsers.
 - Upgraded pmoves/ui to Next.js 16 + React 19 (matching `eslint-config-next` 16). Adjusted Supabase helpers, route handlers, and dynamic rendering defaults so the build succeeds without forcing env variables at compile time, and migrated linting to the native ESLint 9 flat config.
 - Locked down the Next.js ingestion dashboard: added owner-scoped RLS (`upload_events.owner_id`), swapped the page to use authenticated Supabase clients, and required namespace-prefixed object keys before presigning downloads. API routes (`/api/uploads/presign`, `/api/uploads/persist`) now verify session ownership before calling the presign service. Dropzone paths now live under `namespace/users/<owner>/uploads/<upload_id>/…`.
+- Extended pmoves-yt transcript ingestion to upsert Supabase `youtube_transcripts` rows (title/description/channel metadata + transcript text) and added `scripts/yt_transcripts_to_notebook.py` + `make yt-notebook-sync` so unsynced videos can be mirrored into Open Notebook with provenance tracked in `transcripts.meta` / `youtube_transcripts.meta`.
 
 ## Session Log (2025-10-23)
 
@@ -310,3 +311,22 @@ The following checklist captures what could be validated within the hosted Codex
 | Mindmap ingest (live) | 2025-10-26T04:47:04Z | Retried without `--dry-run`; Open Notebook created `source:0gfq69g7warpyre9h9h2` and `source:ms3x27sca995oke809qz`. Missing OpenAI key surfaced in logs; reruns should pass once embeddings are configured or invoked with `--no-embed`. |
 | Hi-RAG search ingest dry-run | 2025-10-26T04:43:18Z | `python pmoves/scripts/hirag_search_to_notebook.py --hirag http://localhost:8086 --namespace pmoves --notebook-id notebook:l0m0qt6q0db40atkr2j7 --token changeme --query "what is pmoves" --k 5 --dry-run --max-items 3` queued three Notebook sources based on `/hirag/query` hits. |
 | pmoves-yt regression | 2025-10-26T04:30:22Z | `./.venv/bin/python -m pytest pmoves/services/pmoves-yt/tests/test_emit.py` passed (5 tests) confirming async upsert flows stay green after env churn. |
+
+### 2025-10-26 – Supabase ↔ Open Notebook Transcript Sync Hardening
+
+| Step | Timestamp (UTC) | Evidence |
+| --- | --- | --- |
+| Videos table deduped before FK | 2025-10-26T17:04:55Z | `docker exec supabase_db_PMOVES.AI psql -c "delete from public.videos v using public.videos v2 where v.video_id = v2.video_id and v.id > v2.id"` removed 14 duplicates. |
+| Backfilled missing video rows | 2025-10-26T17:05:41Z | Inserted placeholders for seven orphaned `transcripts.video_id` values so the FK can enforce integrity. |
+| Added transcripts → videos foreign key | 2025-10-26T17:07:12Z | Applied `supabase/migrations/2025-10-26_transcripts_video_fk.sql` (unique constraint + FK + comment) directly to the local Supabase stack. |
+| Notebook sync dry-run (with join metadata) | 2025-10-26T17:08:26Z | `make -C pmoves yt-notebook-sync ARGS="--limit 5 --dry-run --supabase-url http://127.0.0.1:65421/rest/v1 --api http://127.0.0.1:5055"` returned enriched titles (`Rick Astley…`, `Sketch 8 B Loud Dark`, etc.) without warnings. |
+| Created default notebook | 2025-10-26T17:28:04Z | `curl -H "Authorization: Bearer pmoves4482" -H "content-type: application/json" -d '{"name":"PMOVES Research"}' http://localhost:5055/api/notebooks` → `notebook:04q1fd9pbbvmkkbwvxzb`; env files now point `MINDMAP_NOTEBOOK_ID` / `YOUTUBE_NOTEBOOK_ID` at the new record. |
+| Notebook sync toggles wired | 2025-10-26T19:45:00Z | `services/notebook-sync/sync.py` now honours `NOTEBOOK_SYNC_MODE`, `NOTEBOOK_SYNC_INTERVAL_SECONDS`, and `NOTEBOOK_SYNC_SOURCES` so Supabase Studio / n8n can flip live vs offline, adjust cadence, and select resources. |
+| LangExtract & extract worker embeddings | 2025-10-26T20:05:00Z | `EMBEDDING_BACKEND=tensorzero` now routes extract-worker embeddings through TensorZero (`embeddinggemma:300m` via Ollama); worker auto-falls back to sentence-transformers when unset. |
+
+### 2025-10-26 – Open Notebook Credential Rotation Helper
+
+| Step | Timestamp (UTC) | Evidence |
+| --- | --- | --- |
+| Added helper script | 2025-10-26T17:20:00Z | `pmoves/scripts/set_open_notebook_password.py` updates `env.shared`, `.env`, and `.env.local` so password/token stay in sync; Make target `make notebook-set-password` wraps it. |
+| Docs refreshed | 2025-10-26T17:22:15Z | `pmoves/docs/services/open-notebook/README.md` and `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` document the new target and restart flow. |

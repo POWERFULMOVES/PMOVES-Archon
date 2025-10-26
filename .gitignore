@@ -1,30 +1,24 @@
 # Root ignores
-
 # Python virtual environments
 .venv/
 venv/
-
 # Python cache and compiled files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
-
 # OS/editor noise
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
 # Windows alternate stream metadata
 *:[Zz]one.Identifier
-
 # Logs
 *.log
 /pmoves/data/agent-zero/logs/log_*.html
 /pmoves/data/consciousness/
-
 # Local data caches (safety)
 *.tmp
 *.temp
@@ -34,20 +28,16 @@ integrations-workspace/
 testkeys.md
 .tmp_*
 /.cache/
-
 # dotenv: keep local env files out of the repo
 # Tracked examples like pmoves/.env.example should remain in the repo
 /pmoves/.env
 /pmoves/.env.local
 /pmoves/env.jellyfin-ai
 /pmoves/jellyfin-ai/
-/pmoves/tensorzero/config/tensorzero.toml
-
 # Next.js UI build artifacts
 /pmoves/ui/.next
 /pmoves/ui/node_modules
 /pmoves/ui/out
-
 # Local exports: keep operator-only dumps out of the repo
 /pmoves/docs/coolify/
 .clinerules/byterover-rules.md
@@ -58,12 +48,10 @@ testkeys.md
 .kiro/steering/byterover-rules.md
 .qoder/rules/byterover-rules.md
 .augment/rules/byterover-rules.md
-
 # JavaScript workspaces
 node_modules/
 pmoves/ui/.next/
 pmoves/ui/out/
-
 # Playwright caches & temp artifacts
 playwright-browsers/
 playwright-deps/

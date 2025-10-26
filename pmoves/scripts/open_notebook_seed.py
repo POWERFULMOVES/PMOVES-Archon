@@ -125,6 +125,24 @@ PROVIDERS: Dict[str, ProviderSpec] = {
             ("grok-2", "language"),
         ],
     },
+    "tensorzero": {
+        "env": ["TENSORZERO_BASE_URL"],
+        "models": [
+            (os.environ.get("TENSORZERO_MODEL") or "openai::gpt-4o-mini", "language"),
+            (os.environ.get("TENSORZERO_EMBED_MODEL") or "openai::text-embedding-3-small", "embedding"),
+        ],
+        "defaults": {
+            "default_chat_model": os.environ.get("TENSORZERO_MODEL") or "openai::gpt-4o-mini",
+            "default_embedding_model": os.environ.get("TENSORZERO_EMBED_MODEL") or "openai::text-embedding-3-small",
+        },
+    },
+    "cloudflare": {
+        "env": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"],
+        "models": [
+            (os.environ.get("CLOUDFLARE_LLM_MODEL") or "@cf/meta/llama-3.1-8b-instruct", "language"),
+            (os.environ.get("CLOUDFLARE_EMBED_MODEL") or "@cf/baai/bge-large-en-v1.5", "embedding"),
+        ],
+    },
 }
 
 

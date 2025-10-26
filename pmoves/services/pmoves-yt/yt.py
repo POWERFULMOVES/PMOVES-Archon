@@ -413,6 +413,64 @@ def supa_get(table: str, match: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
     except Exception:
         return None
 
+
+def _parse_upload_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        if len(value) == 8 and value.isdigit():
+            dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
+
+
+def _collect_video_metadata(video_id: str) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "title": f"YouTube {video_id}",
+        "description": None,
+        "channel": None,
+        "url": f"https://youtube.com/watch?v={video_id}",
+        "published_at": None,
+        "duration": None,
+        "meta": {},
+    }
+    rows = supa_get("videos", {"video_id": video_id}) or []
+    if not rows:
+        return metadata
+
+    row = rows[0]
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    channel_meta = meta.get("channel") if isinstance(meta.get("channel"), dict) else {}
+
+    metadata["title"] = row.get("title") or metadata["title"]
+    metadata["description"] = meta.get("description")
+    metadata["channel"] = channel_meta.get("title") or channel_meta.get("name")
+    metadata["duration"] = meta.get("duration") or meta.get("duration_seconds")
+
+    source_url = row.get("source_url") or provenance.get("original_url")
+    if isinstance(source_url, str) and source_url.strip():
+        metadata["url"] = source_url.strip()
+
+    upload_date = provenance.get("upload_date") or meta.get("upload_date")
+    published_at = _parse_upload_date(upload_date) or meta.get("published_at")
+    if isinstance(published_at, str):
+        parsed = _parse_upload_date(published_at) or published_at
+        metadata["published_at"] = parsed
+
+    metadata["meta"] = meta
+    return metadata
+
 def _should_use_invidious(exc: Exception) -> bool:
     if not (INVIDIOUS_BASE_URL or (INVIDIOUS_COMPANION_URL and INVIDIOUS_COMPANION_KEY)):
         return False
@@ -1104,13 +1162,46 @@ def yt_transcript(body: Dict[str,Any] = Body(...)):
         if not r.ok:
             raise HTTPException(r.status_code, f"ffmpeg-whisper error: {j}")
         # Insert transcript row and emit event handled by worker
+        transcript_text = j.get('text') or ''
+        transcript_meta = _compact({
+            'segments': j.get('segments'),
+            'namespace': ns,
+            'provider': j.get('provider') or body.get('provider'),
+            'language': j.get('language') or body.get('language') or 'auto',
+            's3_uri': j.get('s3_uri'),
+        }) or {}
         supa_insert('transcripts', {
             'video_id': vid,
             'language': j.get('language') or body.get('language') or 'auto',
-            'text': j.get('text') or '',
+            'text': transcript_text,
             's3_uri': j.get('s3_uri'),
-            'meta': {'segments': j.get('segments')}
+            'meta': transcript_meta,
         })
+        if SUPA_SERVICE_KEY:
+            try:
+                video_meta = _collect_video_metadata(vid)
+                yt_record: Dict[str, Any] = {
+                    'video_id': vid,
+                    'title': video_meta.get('title') or f"YouTube {vid}",
+                    'description': video_meta.get('description'),
+                    'channel': video_meta.get('channel'),
+                    'url': video_meta.get('url'),
+                    'published_at': video_meta.get('published_at'),
+                    'duration': video_meta.get('duration'),
+                    'transcript': transcript_text,
+                    'meta': _compact({
+                        'namespace': ns,
+                        'language': j.get('language') or body.get('language') or 'auto',
+                        's3_uri': j.get('s3_uri'),
+                        'segments': j.get('segments'),
+                    }) or None,
+                }
+                supa_upsert('youtube_transcripts', yt_record, on_conflict='video_id')
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "youtube_transcripts_upsert_failed",
+                    extra={"event": "youtube_transcripts_upsert_failed", "video_id": vid, "error": str(exc)},
+                )
         try:
             _publish_event('ingest.transcript.ready.v1', {'video_id': vid, 'namespace': ns, 'bucket': bucket, 'key': audio_key})
         except Exception:

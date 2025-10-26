@@ -62,7 +62,12 @@ def test_transcript_inserts_and_emits() -> None:
             "language": "en",
             "text": "hello",
             "s3_uri": "s3://bucket/audio.m4a",
-            "meta": {"segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]},
+            "meta": {
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+                "namespace": "ns",
+                "language": "en",
+                "s3_uri": "s3://bucket/audio.m4a",
+            },
         },
     )
 

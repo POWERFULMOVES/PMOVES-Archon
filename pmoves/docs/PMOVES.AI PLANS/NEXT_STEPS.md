@@ -1,7 +1,6 @@
 
 # PMOVES v5 • NEXT_STEPS
-_Last updated: 2025-10-24_
-_Last updated: 2025-10-23_
+_Last updated: 2025-10-26_
 
 ## Immediate
 
@@ -35,7 +34,8 @@ _Last updated: 2025-10-23_
 
 - [ ] Design and document the resilient download module (resume, retries, rate limiting, playlist/channel ingestion, bounded worker pool).
 - [ ] Specify multipart upload + checksum verification approach for MinIO, including lifecycle/retention tag configuration.
-- [ ] Enumerate metadata enrichment requirements (duration, channel, tags, provenance) and map them to Supabase schema updates.
+- [x] Enumerate metadata enrichment requirements (duration, channel, tags, provenance) and map them to Supabase schema updates (pmoves-yt now upserts `youtube_transcripts` with enriched metadata + Notebook sync helper).
+- [x] Register the `transcripts.video_id → videos.video_id` foreign key (migration `2025-10-26_transcripts_video_fk.sql`) and document the Notebook sync dependency (2025-10-26).
 - [ ] Draft the faster-whisper GPU migration plan (language auto-detect, diarization flags, partial transcript updates) and confirm smoke expectations defined in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] Document Gemma integration paths: Ollama (`gemma2:9b-instruct`) and HF Transformers (`google/gemma-2-9b-it`), including feature toggles and embedding backstops.
 - [ ] Define API hardening, observability, and security tasks (validation, OpenAPI, health/readiness probes, metrics, signed URL enforcement, optional content filters).
@@ -180,7 +180,7 @@ _Last updated: 2025-10-05_
 ### 4. PMOVES.YT High-Priority Lane
 - [ ] Design and document the resilient download module (resume, retries, rate limiting, playlist/channel ingestion, bounded worker pool).
 - [ ] Specify multipart upload + checksum verification approach for MinIO, including lifecycle/retention tag configuration.
-- [ ] Enumerate metadata enrichment requirements (duration, channel, tags, provenance) and map them to Supabase schema updates.
+- [x] Enumerate metadata enrichment requirements (duration, channel, tags, provenance) and map them to Supabase schema updates (pmoves-yt now upserts `youtube_transcripts` with enriched metadata + Notebook sync helper).
 - [ ] Draft the faster-whisper GPU migration plan (language auto-detect, diarization flags, partial transcript updates) and confirm smoke expectations defined in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] Document Gemma integration paths: Ollama (`gemma2:9b-instruct`) and HF Transformers (`google/gemma-2-9b-it`), including feature toggles and embedding backstops.
 - [ ] Define API hardening, observability, and security tasks (validation, OpenAPI, health/readiness probes, metrics, signed URL enforcement, optional content filters).

@@ -267,8 +267,11 @@ OpenAI-compatible presets:
 - Start individually: `docker compose up notebook-sync` (requires the data + workers profile services).
 - Health check: `curl http://localhost:8095/healthz`.
 - Manual poll: `curl -X POST http://localhost:8095/sync` (returns HTTP 409 while a run is in-flight).
-- Interval tuning: `NOTEBOOK_SYNC_INTERVAL_SECONDS` (seconds, defaults to 300).
+- Interval tuning: `NOTEBOOK_SYNC_INTERVAL_SECONDS` (seconds, defaults to 300; set to `0` to disable polling).
+- Live/offline toggle: `NOTEBOOK_SYNC_MODE` (`live` or `offline`) controls whether the worker processes updates at all.
+- Source filter: `NOTEBOOK_SYNC_SOURCES` (comma list of `notebooks`, `notes`, `sources`) limits which resources feed LangExtract.
 - Cursor storage: `NOTEBOOK_SYNC_DB_PATH` (default `/data/notebook_sync.db` mounted via the `notebook-sync-data` volume).
+- Extract worker routing: set `EMBEDDING_BACKEND=tensorzero` to call the TensorZero gateway for chunk embeddings (uses `TENSORZERO_BASE_URL` + `TENSORZERO_EMBED_MODEL`, defaults to `embeddinggemma:300m`). Leave unset for local `sentence-transformers`.
 
 ### Mindmap + Open Notebook integration
 
