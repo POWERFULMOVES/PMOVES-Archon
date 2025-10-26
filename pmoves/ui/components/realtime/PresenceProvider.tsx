@@ -203,7 +203,7 @@ export const PresenceProvider: React.FC<PresenceProviderProps> = ({
         console.warn('Failed to unsubscribe from presence channel', error);
       });
     };
-  }, [client, boardId, selfAgentId, initialCursor]);
+  }, [client, boardId, selfAgentId, initialCursor, sessionId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -387,7 +387,7 @@ export const PresenceProvider: React.FC<PresenceProviderProps> = ({
           profile.color ?? (participant.meta?.color as string | undefined)
         );
 
-        return {
+        const enriched: AgentProfile = {
           ...profile,
           color,
           meta: {
@@ -395,9 +395,11 @@ export const PresenceProvider: React.FC<PresenceProviderProps> = ({
             lastSeenAt: participant.lastSeenAt,
             cursor: participant.cursor,
           },
-        } satisfies AgentProfile;
+        };
+
+        return enriched;
       })
-      .filter((value): value is AgentProfile => Boolean(value));
+      .filter((value): value is AgentProfile => value !== null);
   }, [agents, presence]);
 
   const cursors = useMemo(() => {

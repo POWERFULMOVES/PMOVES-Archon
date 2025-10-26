@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { createSupabaseMiddlewareClient } from '@/lib/supabaseServer';
+import { createSupabaseProxyClient } from '@/lib/supabaseServer';
 
 const PUBLIC_PATHS = new Set(['/login', '/callback']);
 
@@ -10,7 +10,7 @@ const isPublicPath = (pathname: string) => {
   return pathname.startsWith('/_next') || pathname.startsWith('/api/auth');
 };
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (isPublicPath(pathname)) {
@@ -18,7 +18,7 @@ export async function middleware(request: NextRequest) {
   }
 
   const response = NextResponse.next();
-  const supabase = createSupabaseMiddlewareClient({ req: request, res: response });
+  const supabase = createSupabaseProxyClient({ req: request, res: response });
   const {
     data: { session }
   } = await supabase.auth.getSession();

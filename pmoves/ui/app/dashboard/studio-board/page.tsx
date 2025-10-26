@@ -61,7 +61,7 @@ const mergeMeta = (
   ) as StudioBoardRowMeta;
 };
 
-export default function StudioBoardDashboardPage(): JSX.Element {
+export default function StudioBoardDashboardPage() {
   const client = useMemo(() => getSupabaseBrowserClient(), []);
   const restUrl = useMemo(() => getSupabaseRestUrl(), []);
 

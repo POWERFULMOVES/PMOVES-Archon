@@ -4,6 +4,8 @@ import { featureFlags } from '@/config/featureFlags';
 import { getEnabledAuthProviders } from '@/config/supabaseProviders';
 import { LoginForm } from './LoginForm';
 
+export const dynamic = 'force-dynamic';
+
 type LoginPageSearchParams = Record<string, string | string[] | undefined>;
 
 const sanitizeNextParam = (value: string | string[] | undefined): string | undefined => {

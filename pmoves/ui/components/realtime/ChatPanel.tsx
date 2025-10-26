@@ -20,7 +20,7 @@ function formatTimestamp(value: string) {
       return value;
     }
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } catch (error) {
+  } catch (_error) {
     return value;
   }
 }
@@ -58,7 +58,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       try {
         await sendMessage({ content });
         setDraft('');
-      } catch (error) {
+      } catch (_error) {
         // Errors surfaced through context state; no-op.
       }
     },

@@ -4,6 +4,7 @@ import type { ChangeEvent, FormEvent } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSupabaseAuth } from '@/hooks/useSupabaseAuth';
+import type { Provider } from '@supabase/supabase-js';
 import type { SupabaseOAuthProvider } from '@/config/supabaseProviders';
 
 type LoginFormProps = {
@@ -71,7 +72,7 @@ export const LoginForm = ({ providers, passwordEnabled, callbackUrl, nextPath, i
   );
 
   const handleOAuthLogin = useCallback(
-    async (provider: SupabaseOAuthProvider['key']) => {
+    async (providerKey: SupabaseOAuthProvider['key']) => {
       setFormError(null);
       setStatus(null);
 
@@ -83,7 +84,7 @@ export const LoginForm = ({ providers, passwordEnabled, callbackUrl, nextPath, i
       }
 
       const response = await signInWithOAuth({
-        provider,
+        provider: providerKey as Provider,
         options: {
           redirectTo: redirectUrl.toString()
         }

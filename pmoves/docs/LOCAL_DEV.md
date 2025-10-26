@@ -1,5 +1,5 @@
 # Local Development & Networking
-_Last updated: 2025-10-25_
+_Last updated: 2025-10-26_
 
 Note: See consolidated index at pmoves/docs/PMOVES.AI PLANS/README_DOCS_INDEX.md for cross-links.
 
@@ -30,6 +30,12 @@ Optional TensorZero gateway profile (`docker compose --profile tensorzero up ten
 - tensorzero-gateway: 3030 -> 3000 (internal name `tensorzero-gateway`)
 - tensorzero-ui: 4000 (internal name `tensorzero-ui`)
 
+### Supabase runtime modes
+- **Supabase CLI stack (`make supa-start`)** — launches the official Supabase Docker bundle (Postgres, auth, storage, Realtime, Studio) managed by the CLI. Requires the `supabase` binary in your `PATH`; monitor with `make supa-status` and shut down via `make supa-stop`.
+- **Compose overlay (`make supabase-up`)** — reuses the main PMOVES Postgres container while attaching Gotrue, Realtime, Storage, and Studio through `docker-compose.supabase.yml`.
+- Run `make supabase-bootstrap` after either approach to replay `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and `db/v5_12_grounded_personas.sql` into the CLI Postgres container. This keeps the CLI stack aligned with repo-owned schema changes.
+- Use `make supa-use-local` / `make supa-use-remote` to swap `.env.local` presets so services know whether to hit the CLI stack (`http://postgrest:3000`) or a hosted Supabase project (`SUPABASE_URL`, `SUPABASE_KEY`). Refresh `.env.supa.remote` with `supabase db diff` output whenever production schema drifts.
+
 External bundles (via `make up-external`):
 - wger: 8000 (nginx proxy to Django; override host mapping with `WGER_ROOT_URL` when reverse-proxying)
 - Firefly III: ${FIREFLY_PORT:-8082} (set `FIREFLY_PORT` in `env.shared`; 8082 avoids the Agent Zero API on 8080)
@@ -55,6 +61,7 @@ Use the bundled `cloudflared` helper when you need to expose local services to c
   - `CLOUDFLARE_TUNNEL_INGRESS` — comma-separated ingress rules such as `geometry=http://hi-rag-gateway-v2:8086,yt=http://pmoves-yt:8077`.
   - `CLOUDFLARE_TUNNEL_HOSTNAMES` — the hostnames that should be created or updated (e.g., `hi-rag.local.pmoves.ai`).
   - `CLOUDFLARE_TUNNEL_METRICS_PORT` — exported metrics listener (defaults to none).
+- Combine hostnames and ingress rules when you need multiple services behind a single tunnel, e.g. `CLOUDFLARE_TUNNEL_HOSTNAMES=hi-rag.local.pmoves.ai,publisher.local.pmoves.ai` with `CLOUDFLARE_TUNNEL_INGRESS=hi-rag=http://hi-rag-gateway-v2:8086,publisher=http://publisher-discord:8092`.
 - Start/stop the tunnel with `make up-cloudflare` / `make down-cloudflare`; fetch the active URL via `make cloudflare-url` and tail logs with `make logs-cloudflare`.
 - When the tunnel is active the connector runs in the `cloudflare` compose profile; ensure your Supabase or Jellyfin hostnames are routable through the ingress rules you define.
 
@@ -67,16 +74,20 @@ Quick start:
 - Configure Crush with `python3 -m pmoves.tools.mini_cli crush setup` so your local Crush CLI session understands PMOVES context paths, providers, and MCP stubs.
   - Optional: install `direnv` and copy `pmoves/.envrc.example` to `pmoves/.envrc` for auto‑loading.
 - TensorZero gateway (optional): copy `pmoves/tensorzero/config/tensorzero.toml.example` to `pmoves/tensorzero/config/tensorzero.toml`, then set `TENSORZERO_BASE_URL=http://localhost:3030` (and `TENSORZERO_API_KEY` if required). Setting `LANGEXTRACT_PROVIDER=tensorzero` routes LangExtract through the gateway; populate `LANGEXTRACT_REQUEST_ID` / `LANGEXTRACT_FEEDBACK_*` variables to tag observability traces.
+  - Advanced toggles: `TENSORZERO_MODEL` overrides the default chat backend, `TENSORZERO_TIMEOUT_SECONDS` adjusts request timeouts, and `TENSORZERO_STATIC_TAGS` (JSON or `key=value,key2=value2`) forwards deployment metadata as `tensorzero::tags`.
 
 ### UI Workspace (Next.js + Supabase Platform Kit)
 
 - Location: `pmoves/ui/` (Next.js App Router + Tailwind). The workspace consumes the same Supabase CLI stack that powers the core services.
 - Prerequisites: run `make supa-start` and `make supa-status` so `pmoves/.env.local` is populated with `SUPABASE_URL`, anon key, service role key, REST URL, and realtime URL.
-- Env loading: `pmoves/ui/next.config.js` automatically reads `pmoves/.env.local` and exposes the public variables to the browser bundle. Update that file if you need to point the UI at a remote Supabase instance.
+- Env loading: `pmoves/ui/next.config.mjs` automatically reads `pmoves/.env.local` and exposes the public variables to the browser bundle. Update that file if you need to point the UI at a remote Supabase instance.
 - Install dependencies: `cd pmoves/ui && npm install` (or `yarn install`).
 - Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
 - Other scripts: `npm run lint`, `npm run build`, `npm run start`.
+- Tests: `npm run test` (unit/component via Jest + Testing Library) and `npm run test:e2e` (Playwright smoke). Run `npx playwright install` once to download the browser engines before exercising the E2E suite.
 - Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` returns typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.
+- Edge auth proxy: `pmoves/ui/proxy.ts` enforces session checks for all non-public routes using the Supabase auth helper. Update its `PUBLIC_PATHS` set when adding new unauthenticated pages.
+- Security expectations: the ingestion dashboard now requires a Supabase-authenticated session. `upload_events` rows are stamped with `owner_id`, and the UI only presigns objects under `namespace/users/<owner-id>/uploads/<uuid>/`. Anonymous callers can no longer generate presigned GETs or mutate upload metadata.
 
 ### Crush CLI Integration
 

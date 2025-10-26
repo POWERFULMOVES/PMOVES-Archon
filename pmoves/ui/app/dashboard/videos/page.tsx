@@ -70,7 +70,7 @@ const mergeMeta = (
   ) as VideoRowMeta;
 };
 
-export default function VideosDashboardPage(): JSX.Element {
+export default function VideosDashboardPage() {
   const client = useMemo(() => getSupabaseBrowserClient(), []);
   const restUrl = useMemo(() => getSupabaseRestUrl(), []);
 

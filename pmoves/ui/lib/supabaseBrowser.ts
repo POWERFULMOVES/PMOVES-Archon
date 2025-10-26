@@ -1,22 +1,13 @@
 'use client';
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClientComponentClient, type SupabaseClient } from '@supabase/auth-helpers-nextjs';
+import type { Database } from './database.types';
 
-let browserClient: SupabaseClient | null = null;
+let browserClient: SupabaseClient<Database> | null = null;
 
-export function getBrowserSupabaseClient(): SupabaseClient {
-  if (browserClient) {
-    return browserClient;
+export function getBrowserSupabaseClient(): SupabaseClient<Database> {
+  if (!browserClient) {
+    browserClient = createClientComponentClient<Database>() as unknown as SupabaseClient<Database>;
   }
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) {
-    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY environment variables.');
-  }
-  browserClient = createClient(url, anonKey, {
-    auth: {
-      persistSession: false,
-    },
-  });
   return browserClient;
 }

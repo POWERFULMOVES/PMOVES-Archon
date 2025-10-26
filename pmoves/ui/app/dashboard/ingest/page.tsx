@@ -1,6 +1,10 @@
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createServerComponentClient } from '@supabase/auth-helpers-nextjs';
 import { UploadDropzone } from '../../../components/UploadDropzone';
 import { callPresignService } from '../../../lib/presign';
-import { getServiceSupabaseClient } from '../../../lib/supabaseServer';
+import type { Database } from '../../../lib/database.types';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,60 +12,11 @@ const DEFAULT_BUCKET = process.env.NEXT_PUBLIC_UPLOAD_BUCKET || process.env.PMOV
 const DEFAULT_NAMESPACE = process.env.PMOVES_DEFAULT_NAMESPACE || 'pmoves';
 const DEFAULT_AUTHOR = process.env.PMOVES_DEFAULT_AUTHOR;
 
-interface UploadEventRow {
-  id: number;
-  upload_id: string;
-  filename: string | null;
-  bucket: string | null;
-  object_key: string | null;
-  status: string | null;
-  progress: number | null;
-  error_message: string | null;
-  size_bytes: number | null;
-  content_type: string | null;
-  meta: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-}
+type UploadEventRow = Database['public']['Tables']['upload_events']['Row'];
 
-interface EnrichedUploadEvent extends UploadEventRow {
+type EnrichedUploadEvent = UploadEventRow & {
   presignedGetUrl?: string | null;
-}
-
-async function fetchRecentUploads(): Promise<EnrichedUploadEvent[]> {
-  const supabase = getServiceSupabaseClient();
-  const { data, error } = await supabase
-    .from('upload_events')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  if (error) {
-    console.error('[ingest/page] Failed to fetch upload events', error);
-    return [];
-  }
-
-  const rows = data as UploadEventRow[];
-  return Promise.all(
-    rows.map(async (row) => {
-      if (!row.bucket || !row.object_key) {
-        return row;
-      }
-      try {
-        const presign = await callPresignService({
-          bucket: row.bucket,
-          key: row.object_key,
-          method: 'get',
-          expires: 900,
-        });
-        return { ...row, presignedGetUrl: presign.url };
-      } catch (err) {
-        console.warn('[ingest/page] Failed to fetch presigned URL', err);
-        return { ...row, presignedGetUrl: null };
-      }
-    })
-  );
-}
+};
 
 function formatDate(value: string) {
   try {
@@ -69,7 +24,7 @@ function formatDate(value: string) {
       dateStyle: 'short',
       timeStyle: 'short',
     }).format(new Date(value));
-  } catch (err) {
+  } catch {
     return value;
   }
 }
@@ -83,8 +38,76 @@ function formatSize(bytes: number | null) {
   return `${bytes} B`;
 }
 
+function resolveNamespace(row: UploadEventRow): string {
+  if (row.meta && typeof row.meta === 'object' && 'namespace' in row.meta) {
+    const namespace = (row.meta as Record<string, unknown>).namespace;
+    if (typeof namespace === 'string' && namespace.trim().length > 0) {
+      return namespace;
+    }
+  }
+  return DEFAULT_NAMESPACE;
+}
+
+function isSafeObjectKey(row: UploadEventRow, userId: string): boolean {
+  if (!row.object_key) return false;
+  const namespace = resolveNamespace(row);
+  const expectedPrefix = `${namespace}/users/${userId}/uploads/${row.upload_id}/`;
+  return row.object_key.startsWith(expectedPrefix);
+}
+
+async function fetchRecentUploads(
+  supabase: SupabaseClient<Database, 'public'>,
+  userId: string
+): Promise<EnrichedUploadEvent[]> {
+  const { data, error } = await supabase
+    .from('upload_events')
+    .select('*')
+    .eq('owner_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  if (error) {
+    console.error('[ingest/page] Failed to fetch upload events', error);
+    return [];
+  }
+
+  const rows = (data ?? []) as UploadEventRow[];
+  return Promise.all(
+    rows.map(async (row) => {
+      if (!row.bucket || row.owner_id !== userId || !isSafeObjectKey(row, userId)) {
+        return row;
+      }
+      try {
+        const presign = await callPresignService({
+          bucket: row.bucket,
+          key: row.object_key!,
+          method: 'get',
+          expires: 900,
+        });
+        return { ...row, presignedGetUrl: presign.url };
+      } catch (err) {
+        console.warn('[ingest/page] Failed to fetch presigned URL', err);
+        return { ...row, presignedGetUrl: null };
+      }
+    })
+  );
+}
+
 export default async function IngestDashboardPage() {
-  const uploads = await fetchRecentUploads();
+  const cookieStore = cookies();
+  const supabase = createServerComponentClient<Database>({ cookies: () => cookieStore });
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect(`/login?next=/dashboard/ingest`);
+  }
+
+  const uploads = await fetchRecentUploads(
+    supabase as SupabaseClient<Database, 'public', any>,
+    user.id
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 p-8">
@@ -96,7 +119,12 @@ export default async function IngestDashboardPage() {
       </header>
 
       <section>
-        <UploadDropzone bucket={DEFAULT_BUCKET} namespace={DEFAULT_NAMESPACE} author={DEFAULT_AUTHOR} />
+        <UploadDropzone
+          bucket={DEFAULT_BUCKET}
+          namespace={DEFAULT_NAMESPACE}
+          author={DEFAULT_AUTHOR}
+          ownerId={user.id}
+        />
       </section>
 
       <section className="space-y-4">

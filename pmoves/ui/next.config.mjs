@@ -1,18 +1,12 @@
-import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    typedRoutes: true,
-  },
+  reactStrictMode: true,
   outputFileTracingRoot: __dirname,
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true
 };
 
 export default nextConfig;
