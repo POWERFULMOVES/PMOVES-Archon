@@ -1,12 +1,16 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createMiddlewareClient, createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+import type { ReadonlyRequestCookies } from 'next/dist/server/web/spec-extension/adapters/request-cookies';
+import type { NextRequest, NextResponse } from 'next/server';
+import type { Database } from './database.types';
 
 type ServiceClientOptions = {
   serviceKey?: string;
 };
 
-let serviceClient: SupabaseClient | null = null;
+let serviceClient: SupabaseClient<Database> | null = null;
 
-export function getServiceSupabaseClient(options: ServiceClientOptions = {}): SupabaseClient {
+export function getServiceSupabaseClient(options: ServiceClientOptions = {}): SupabaseClient<Database> {
   if (serviceClient) {
     return serviceClient;
   }
@@ -29,16 +33,13 @@ export function getServiceSupabaseClient(options: ServiceClientOptions = {}): Su
   });
   return serviceClient;
 }
-import { createMiddlewareClient, createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
-import type { Cookies } from 'next/headers';
-import type { NextRequest, NextResponse } from 'next/server';
 
-export type Database = Record<string, never>;
+type CookieSource = () => ReadonlyRequestCookies | Promise<ReadonlyRequestCookies> | unknown;
 
-export const createSupabaseRouteHandlerClient = (cookies: () => Cookies) =>
-  createRouteHandlerClient<Database>({ cookies });
+export const createSupabaseRouteHandlerClient = (cookies: CookieSource) =>
+  createRouteHandlerClient<Database>({ cookies: cookies as any });
 
-export const createSupabaseMiddlewareClient = (args: {
+export const createSupabaseProxyClient = (args: {
   req: NextRequest;
   res: NextResponse;
 }) => createMiddlewareClient<Database>(args);

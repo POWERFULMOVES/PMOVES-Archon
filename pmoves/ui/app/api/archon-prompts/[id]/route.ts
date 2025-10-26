@@ -27,9 +27,12 @@ function mapErrorToResponse(error: unknown) {
   return NextResponse.json({ error: { message } }, { status: 500 });
 }
 
-export async function PATCH(request: Request, context: { params: { id?: string } }) {
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    const id = context.params?.id;
+    const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ error: { message: 'Prompt id is required.' } }, { status: 400 });
     }
@@ -42,9 +45,12 @@ export async function PATCH(request: Request, context: { params: { id?: string }
   }
 }
 
-export async function DELETE(_request: Request, context: { params: { id?: string } }) {
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    const id = context.params?.id;
+    const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ error: { message: 'Prompt id is required.' } }, { status: 400 });
     }

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callPresignService } from '../../../../lib/presign';
-import { getServiceSupabaseClient } from '../../../../lib/supabaseServer';
+import { createSupabaseRouteHandlerClient, getServiceSupabaseClient } from '../../../../lib/supabaseServer';
+import type { Database } from '../../../../lib/database.types';
+
+type UploadEventSelection = Pick<Database['public']['Tables']['upload_events']['Row'], 'bucket' | 'object_key' | 'owner_id' | 'meta'>;
 
 const DEFAULT_NAMESPACE = process.env.PMOVES_DEFAULT_NAMESPACE || 'pmoves';
 const RENDER_WEBHOOK_URL =
@@ -35,13 +38,34 @@ function buildAssetUri(bucket: string, key: string) {
   return `s3://${bucket}/${key}`;
 }
 
+function resolveNamespace(meta: Record<string, unknown> | null | undefined, fallback: string): string {
+  if (meta && typeof meta === 'object' && 'namespace' in meta) {
+    const namespace = (meta as Record<string, unknown>).namespace;
+    if (typeof namespace === 'string' && namespace.trim().length > 0) {
+      return namespace;
+    }
+  }
+  return fallback;
+}
+
 export async function POST(request: NextRequest) {
   try {
+    const cookieStore = request.cookies;
+    const supabaseAuth = createSupabaseRouteHandlerClient(() => cookieStore);
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabaseAuth.auth.getSession();
+
+    if (sessionError || !session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const body = await request.json();
     const uploadId = body.uploadId as string | undefined;
     const bucket = body.bucket as string | undefined;
     const key = body.key as string | undefined;
-    const namespace = (body.namespace as string | undefined) || DEFAULT_NAMESPACE;
+    const requestedNamespace = (body.namespace as string | undefined) || DEFAULT_NAMESPACE;
     const title = (body.title as string | undefined) || (key ? key.split('/').pop() : undefined) || 'uploaded asset';
     const size = body.size as number | undefined;
     const contentType = body.contentType as string | undefined;
@@ -49,9 +73,38 @@ export async function POST(request: NextRequest) {
     const language = (body.language as string | undefined) || 'en';
     const transcriptText = (body.transcriptText as string | undefined) || '';
     const author = body.author as string | undefined;
+    const ownerId = body.ownerId as string | undefined;
 
     if (!uploadId || !bucket || !key) {
       return NextResponse.json({ error: 'uploadId, bucket, and key are required' }, { status: 400 });
+    }
+
+    if (ownerId && ownerId !== session.user.id) {
+      return NextResponse.json({ error: 'Owner mismatch' }, { status: 403 });
+    }
+
+    const { data: uploadEvent, error: uploadError } = await supabaseAuth
+      .from('upload_events')
+      .select('bucket, object_key, owner_id, meta')
+      .eq('upload_id' as any, uploadId as any)
+      .single<UploadEventSelection>();
+
+    if (uploadError || !uploadEvent) {
+      return NextResponse.json({ error: 'Upload event not found' }, { status: 404 });
+    }
+
+    if (uploadEvent.owner_id !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    if (!uploadEvent.object_key || uploadEvent.object_key !== key || uploadEvent.bucket !== bucket) {
+      return NextResponse.json({ error: 'Upload metadata mismatch' }, { status: 400 });
+    }
+
+    const namespace = resolveNamespace(uploadEvent.meta as Record<string, unknown> | null, requestedNamespace);
+    const expectedPrefix = `${namespace}/users/${session.user.id}/uploads/${uploadId}/`;
+    if (!uploadEvent.object_key.startsWith(expectedPrefix)) {
+      return NextResponse.json({ error: 'Object key outside authorised prefix' }, { status: 403 });
     }
 
     const presignedGet = await callPresignService({
@@ -71,6 +124,7 @@ export async function POST(request: NextRequest) {
       content_type: contentType,
       presigned_get: presignedGet.url,
       author,
+      owner_id: session.user.id,
     };
 
     const supabase = getServiceSupabaseClient();
@@ -136,6 +190,7 @@ export async function POST(request: NextRequest) {
       content_type: contentType,
       presigned_get: presignedGet.url,
       author,
+      owner_id: session.user.id,
     };
 
     const videoResult = await supabase
@@ -168,6 +223,7 @@ export async function POST(request: NextRequest) {
             ingest: 'ui-dropzone',
             status: transcriptText ? 'available' : 'pending',
             author,
+            owner_id: session.user.id,
           },
         },
         { onConflict: 'video_id' }
@@ -181,6 +237,7 @@ export async function POST(request: NextRequest) {
       .update({
         status: 'complete',
         progress: 100,
+        owner_id: session.user.id,
         meta: {
           namespace,
           tags,
@@ -190,6 +247,7 @@ export async function POST(request: NextRequest) {
           presigned_get: presignedGet.url,
           ingest: 'ui-dropzone',
           author,
+          owner_id: session.user.id,
         },
       })
       .eq('upload_id', uploadId);

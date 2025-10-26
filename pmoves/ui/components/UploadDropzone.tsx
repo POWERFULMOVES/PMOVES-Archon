@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useMemo, useState } from 'react';
-import type { DropEvent } from 'react-dropzone';
 import { useDropzone } from 'react-dropzone';
 import { v4 as uuidv4 } from 'uuid';
+import type { Database, Json } from '../lib/database.types';
 import { getBrowserSupabaseClient } from '../lib/supabaseBrowser';
 
 type UploadStatus = 'idle' | 'preparing' | 'uploading' | 'persisting' | 'complete' | 'error';
@@ -23,7 +23,10 @@ type UploadDropzoneProps = {
   tags?: string[];
   className?: string;
   author?: string;
+  ownerId: string;
 };
+
+type UploadEventInsert = Database['public']['Tables']['upload_events']['Insert'];
 
 type PresignResponse = {
   url: string;
@@ -95,7 +98,14 @@ async function persistMetadata(payload: Record<string, unknown>) {
   return res.json();
 }
 
-export function UploadDropzone({ bucket, namespace = 'pmoves', tags = [], className, author }: UploadDropzoneProps) {
+export function UploadDropzone({
+  bucket,
+  namespace = 'pmoves',
+  tags = [],
+  className,
+  author,
+  ownerId,
+}: UploadDropzoneProps) {
   const [uploads, setUploads] = useState<UploadEntry[]>([]);
   const supabase = useMemo(() => {
     try {
@@ -115,43 +125,51 @@ export function UploadDropzone({ bucket, namespace = 'pmoves', tags = [], classN
       if (!supabase) return;
 
       const { object_key, error_message, ...metaRest } = extra;
-      const metaPayload: Record<string, unknown> = {
+      const metaPayload: Record<string, Json> = {
         namespace,
         tags,
         ingest: 'ui-dropzone',
-        author,
+        owner_id: ownerId,
         ...metaRest,
       };
+      if (author) {
+        metaPayload.author = author;
+      }
       if (typeof object_key === 'string') {
         metaPayload.object_key = object_key;
       }
+      const record: UploadEventInsert = {
+        upload_id: id,
+        filename: file.name,
+        bucket,
+        object_key: typeof object_key === 'string' ? object_key : null,
+        status,
+        progress,
+        error_message: typeof error_message === 'string' ? error_message : null,
+        size_bytes: file.size,
+        content_type: file.type,
+        meta: metaPayload,
+        owner_id: ownerId,
+      };
 
-      await supabase.from('upload_events').upsert([
-        {
-          upload_id: id,
-          filename: file.name,
-          bucket,
-          object_key: typeof object_key === 'string' ? object_key : null,
-          status,
-          progress,
-          error_message: typeof error_message === 'string' ? error_message : null,
-          size_bytes: file.size,
-          content_type: file.type,
-          meta: metaPayload,
-        },
-      ]);
+      await supabase.from('upload_events').upsert([record]);
     },
-    [author, bucket, namespace, supabase, tags]
+    [author, bucket, namespace, ownerId, supabase, tags]
   );
 
   const onDrop = useCallback(
-    async (acceptedFiles: File[], _rejected: File[], _event: DropEvent) => {
+    async (acceptedFiles: File[]) => {
+      if (!ownerId) {
+        console.error('UploadDropzone: missing ownerId, aborting upload.');
+        return;
+      }
       for (const file of acceptedFiles) {
         const uploadId = uuidv4();
         const entry: UploadEntry = { id: uploadId, file, status: 'preparing', progress: 0 };
         setUploads((prev) => [entry, ...prev]);
 
-        const objectKey = `${namespace}/uploads/${uploadId}/${file.name}`;
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const objectKey = `${namespace}/users/${ownerId}/uploads/${uploadId}/${safeName}`;
         try {
           await createUploadEvent(uploadId, file, 'preparing', 0, { object_key: objectKey, author });
 
@@ -161,6 +179,7 @@ export function UploadDropzone({ bucket, namespace = 'pmoves', tags = [], classN
             key: objectKey,
             method: 'put',
             contentType: file.type,
+            uploadId,
           });
 
           await createUploadEvent(uploadId, file, 'uploading', 1, { object_key: objectKey, author });
@@ -186,6 +205,7 @@ export function UploadDropzone({ bucket, namespace = 'pmoves', tags = [], classN
             contentType: file.type,
             tags,
             author,
+            ownerId,
           });
 
           const presignedGetUrl = persistResult?.presignedGetUrl as string | undefined;
@@ -206,7 +226,7 @@ export function UploadDropzone({ bucket, namespace = 'pmoves', tags = [], classN
         }
       }
     },
-    [author, bucket, createUploadEvent, namespace, tags, updateUpload]
+    [author, bucket, createUploadEvent, namespace, ownerId, tags, updateUpload]
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({

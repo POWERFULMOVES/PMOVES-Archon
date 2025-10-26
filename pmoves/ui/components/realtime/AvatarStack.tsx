@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import React from 'react';
 import { AgentProfile, usePresenceContext } from './PresenceProvider';
 
@@ -29,7 +30,7 @@ const Avatar: React.FC<{ agent: AgentProfile; size: number }> = ({
 
   return (
     <div
-      className="pmoves-avatar flex items-center justify-center rounded-full border-2 border-white text-xs font-semibold uppercase text-white shadow"
+      className="pmoves-avatar relative flex items-center justify-center rounded-full border-2 border-white text-xs font-semibold uppercase text-white shadow"
       style={{
         width: size,
         height: size,
@@ -39,10 +40,12 @@ const Avatar: React.FC<{ agent: AgentProfile; size: number }> = ({
       title={agent.name}
     >
       {agent.avatarUrl ? (
-        <img
+        <Image
           src={agent.avatarUrl}
           alt={agent.name}
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          fill
+          sizes={`${size}px`}
+          className="object-cover"
         />
       ) : (
         <span>{initials}</span>

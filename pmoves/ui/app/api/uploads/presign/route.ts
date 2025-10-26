@@ -1,5 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callPresignService, type PresignMethod } from '../../../../lib/presign';
+import { createSupabaseRouteHandlerClient } from '../../../../lib/supabaseServer';
+import type { Database } from '../../../../lib/database.types';
+
+type UploadEventSelection = Pick<Database['public']['Tables']['upload_events']['Row'], 'bucket' | 'object_key' | 'owner_id' | 'meta'>;
+
+function resolveNamespace(meta: Record<string, unknown> | null | undefined, fallback: string): string {
+  if (meta && typeof meta === 'object' && 'namespace' in meta) {
+    const namespace = (meta as Record<string, unknown>).namespace;
+    if (typeof namespace === 'string' && namespace.trim().length > 0) {
+      return namespace;
+    }
+  }
+  return fallback;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -9,9 +23,45 @@ export async function POST(request: NextRequest) {
     const contentType = body.contentType as string | undefined;
     const expires = body.expires as number | undefined;
     const method = (body.method as PresignMethod | undefined) ?? 'put';
+    const uploadId = body.uploadId as string | undefined;
 
-    if (!bucket || !key) {
-      return NextResponse.json({ error: 'bucket and key are required' }, { status: 400 });
+    if (!bucket || !key || !uploadId) {
+      return NextResponse.json({ error: 'bucket, key, and uploadId are required' }, { status: 400 });
+    }
+
+    const cookieStore = request.cookies;
+    const supabase = createSupabaseRouteHandlerClient(() => cookieStore);
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
+
+    if (sessionError || !session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { data: eventRow, error: eventError } = await supabase
+      .from('upload_events')
+      .select('bucket, object_key, owner_id, meta')
+      .eq('upload_id' as any, uploadId as any)
+      .single<UploadEventSelection>();
+
+    if (eventError || !eventRow) {
+      return NextResponse.json({ error: 'Upload event not found' }, { status: 404 });
+    }
+
+    if (eventRow.owner_id !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    if (!eventRow.object_key || eventRow.object_key !== key || eventRow.bucket !== bucket) {
+      return NextResponse.json({ error: 'Upload metadata mismatch' }, { status: 400 });
+    }
+
+    const namespace = resolveNamespace(eventRow.meta as Record<string, unknown> | null, process.env.PMOVES_DEFAULT_NAMESPACE || 'pmoves');
+    const expectedPrefix = `${namespace}/users/${session.user.id}/uploads/${uploadId}/`;
+    if (!eventRow.object_key.startsWith(expectedPrefix)) {
+      return NextResponse.json({ error: 'Object key outside authorised prefix' }, { status: 403 });
     }
 
     const result = await callPresignService({

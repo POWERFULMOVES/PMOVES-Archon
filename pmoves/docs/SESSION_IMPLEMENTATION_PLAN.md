@@ -1,8 +1,18 @@
 # M2 Automation Kickoff & Roadmap Prep Plan
 Note: For cross-references, see pmoves/docs/PMOVES.AI PLANS/README_DOCS_INDEX.md.
-_Last updated: 2025-10-23_
+_Last updated: 2025-10-26_
 
 This working session establishes the concrete implementation tasks needed to close Milestone M2 while warming up broader roadmap threads for Milestones M3–M5. It consolidates the operational reminders from the sprint brief and ties each step to the canonical checklists in `pmoves/docs/SUPABASE_DISCORD_AUTOMATION.md`, `pmoves/docs/NEXT_STEPS.md`, and `pmoves/docs/ROADMAP.md`.
+
+## Session Log (2025-10-26)
+
+- Captured Supabase runtime guidance in `pmoves/docs/LOCAL_DEV.md` (CLI vs compose profiles, `make supabase-bootstrap`, `.env` swapping) and summarized the helper in `LOCAL_TOOLING_REFERENCE.md`.
+- Expanded TensorZero documentation: added advanced env toggles (`TENSORZERO_MODEL`, `TENSORZERO_TIMEOUT_SECONDS`, `TENSORZERO_STATIC_TAGS`) to `env.shared.example`, `LOCAL_DEV.md`, and `LOCAL_TOOLING_REFERENCE.md`.
+- Documented Cloudflare tunnel overrides (`CLOUDFLARE_TUNNEL_INGRESS`, `CLOUDFLARE_TUNNEL_HOSTNAMES`, `CLOUDFLARE_TUNNEL_METRICS_PORT`) across `env.shared.example`, `LOCAL_DEV.md`, and `LOCAL_TOOLING_REFERENCE.md` so WAN validation has consistent guidance.
+- Retired the vitest harness (config, tests, npm dependency) to resolve the upstream esbuild/vite audit warnings; lint/build now pass without vulnerable tooling.
+- Added Jest + Testing Library unit scaffolding (`jest.config.js`, `jest.setup.ts`, `__tests__/home-page.test.tsx`) and Playwright E2E harness (`playwright.config.ts`, `e2e/ingest.spec.ts`). New npm scripts (`npm run test`, `npm run test:e2e`) run clean locally once `npx playwright install` has fetched browsers.
+- Upgraded pmoves/ui to Next.js 16 + React 19 (matching `eslint-config-next` 16). Adjusted Supabase helpers, route handlers, and dynamic rendering defaults so the build succeeds without forcing env variables at compile time, and migrated linting to the native ESLint 9 flat config.
+- Locked down the Next.js ingestion dashboard: added owner-scoped RLS (`upload_events.owner_id`), swapped the page to use authenticated Supabase clients, and required namespace-prefixed object keys before presigning downloads. API routes (`/api/uploads/presign`, `/api/uploads/persist`) now verify session ownership before calling the presign service. Dropzone paths now live under `namespace/users/<owner>/uploads/<upload_id>/…`.
 
 ## Session Log (2025-10-23)
 

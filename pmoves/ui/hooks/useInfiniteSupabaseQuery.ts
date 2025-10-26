@@ -1,17 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type {
-  PostgrestError,
-  PostgrestFilterBuilder,
-  SupabaseClient,
-} from "@supabase/supabase-js";
+import type { PostgrestError, SupabaseClient } from '@supabase/supabase-js';
 
 type CursorValue = string | number | null;
 
-type FilterFactory<T> = (
-  query: PostgrestFilterBuilder<any, T[], unknown>
-) => PostgrestFilterBuilder<any, T[], unknown>;
+type FilterFactory = (query: any) => any;
 
-export interface UseInfiniteSupabaseQueryOptions<T> {
+export interface UseInfiniteSupabaseQueryOptions {
   client: SupabaseClient<any, "public", any>;
   table: string;
   select?: string;
@@ -23,7 +17,7 @@ export interface UseInfiniteSupabaseQueryOptions<T> {
     ascending?: boolean;
     nullsFirst?: boolean;
   };
-  filters?: FilterFactory<T>;
+  filters?: FilterFactory;
 }
 
 export interface UseInfiniteSupabaseQueryResult<T> {
@@ -44,7 +38,7 @@ interface LoadOptions {
 }
 
 export function useInfiniteSupabaseQuery<T = Record<string, unknown>>(
-  options: UseInfiniteSupabaseQueryOptions<T>
+  options: UseInfiniteSupabaseQueryOptions
 ): UseInfiniteSupabaseQueryResult<T> {
   const {
     client,
@@ -80,12 +74,10 @@ export function useInfiniteSupabaseQuery<T = Record<string, unknown>>(
       }
 
       try {
-        let query = client
-          .from<T>(table)
-          .select(select, { head: false });
+        let query = client.from(table).select(select, { head: false });
 
         if (filters) {
-          query = filters(query) as PostgrestFilterBuilder<any, T[], unknown>;
+          query = filters(query);
         }
 
         if (order) {
@@ -126,7 +118,7 @@ export function useInfiniteSupabaseQuery<T = Record<string, unknown>>(
           return;
         }
 
-        const rows = Array.isArray(data) ? data : [];
+        const rows = Array.isArray(data) ? (data as T[]) : [];
 
         setItems((prev) => (append ? [...prev, ...rows] : rows));
         const received = rows.length;

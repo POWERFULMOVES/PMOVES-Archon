@@ -63,3 +63,10 @@ testkeys.md
 node_modules/
 pmoves/ui/.next/
 pmoves/ui/out/
+
+# Playwright caches & temp artifacts
+playwright-browsers/
+playwright-deps/
+pmoves/ui/test-results/
+*.deb
+temp*.mp4

@@ -19,7 +19,7 @@ type ArchonPromptErrorPayload = {
 async function readJson(response: Response) {
   try {
     return (await response.json()) as ArchonPromptErrorPayload | { data: ArchonPrompt };
-  } catch (err) {
+  } catch (_err) {
     return null;
   }
 }
@@ -181,7 +181,7 @@ export default function ArchonPromptsPage() {
           ? {
               ...prompt,
               ...payload,
-              description: payload.description,
+              description: payload.description ?? null,
               updated_at: new Date().toISOString(),
             }
           : prompt
@@ -210,7 +210,7 @@ export default function ArchonPromptsPage() {
       id: temporaryId,
       prompt_name: payload.prompt_name,
       prompt: payload.prompt,
-      description: payload.description,
+      description: payload.description ?? null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };

@@ -295,9 +295,11 @@ export function subscribeToSessionMessages(
       }
     );
 
-  channel.subscribe().catch((error) => {
+  try {
+    channel.subscribe();
+  } catch (error) {
     console.error('Failed to subscribe to session messages', error);
-  });
+  }
 
   return channel;
 }

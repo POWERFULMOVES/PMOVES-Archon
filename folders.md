@@ -327,7 +327,7 @@ PY
 │   ├── config/
 │   ├── hooks/
 │   ├── lib/
-│   ├── middleware.ts
+│   ├── proxy.ts
 │   └── package.json
 └── repomix-output.xml
 ```
