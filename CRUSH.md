@@ -7,11 +7,11 @@ as our interactive coding bestie alongside the PMOVES stack.
 
 1. Install Crush (see upstream README for the package manager of your choice) and
    make sure it is on your `PATH`.
-2. Install the `typer` dependency for the mini CLI (recommended via uv):
+2. Install the `typer` and `PyYAML` dependencies for the mini CLI (recommended via uv):
    ```bash
-   uv pip install typer[all]
+   uv pip install typer[all] PyYAML
    ```
-3. Prime the environment and provisioning bundle in one shot:
+3. With both packages installed, prime the environment and provisioning bundle in one shot:
    ```bash
    python3 -m pmoves.tools.mini_cli bootstrap --accept-defaults
    ```
