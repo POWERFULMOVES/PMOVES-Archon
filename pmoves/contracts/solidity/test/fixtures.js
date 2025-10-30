@@ -27,11 +27,13 @@ async function deployCoreFixture() {
   await groupPurchase.waitForDeployment();
 
   const baseGro = ethers.parseEther("10000");
+  // Provide enough GroToken headroom for the $5k/$3k staking positions modelled in tests.
   await groToken.connect(treasury).mint(alice.address, baseGro);
   await groToken.connect(treasury).mint(bob.address, baseGro / 2n);
   await groToken.connect(treasury).mint(carol.address, ethers.parseEther("2500"));
 
   const baseFood = ethers.parseEther("20000");
+  // Mint FoodUSD balances to cover the $8k bulk order and refund scenarios derived from projections.
   await foodUSD.connect(treasury).mint(alice.address, baseFood);
   await foodUSD.connect(treasury).mint(bob.address, baseFood);
   await foodUSD.connect(treasury).mint(carol.address, baseFood);

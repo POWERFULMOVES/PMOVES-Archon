@@ -88,6 +88,8 @@ This document aligns the Cataclysm Studios brand platform with the current PMOVE
   2. Align DAO constitution drafts with `pmoves/docs/` formatting and reference the new on-chain modules (supply policies, quorum thresholds, emergency pauses).
   3. Implement Supabase telemetry ingestion for CoopGovernor and GroupPurchase events so dashboards can reconcile on-chain voting with community analytics (see the Supabase integration plan in `pmoves/docs/contracts/README.md`).
 - Supabase alignment: instrument Hardhat deployments (or follow-on indexers) to stream `ProposalCreated`, `VoteCast`, `ProposalExecuted`, `OrderCreated`, `OrderExecuted`, and `RefundClaimed` events into Supabase tables consumed by Agent Zero and publisher services. This keeps DAO decisions observable in the existing telemetry fabric and satisfies the governance transparency promises in Sections 2 and 5.
+  - Map CoopGovernor events to `dao_proposals` and `dao_votes` with raw vs quadratic vote deltas so Supabase dashboards can highlight the $5,000 / $3,000 stake distributions validated in the Hardhat suite.
+  - Land GroupPurchase events in `group_orders` / `group_order_contributions` tables to expose supplier disbursements and refund telemetry for Fordham Hill-style pilots.
 - Messaging should continue labeling tokenomics as “pilot” until audits, treasury multi-sig configuration, and Supabase telemetry wiring are complete.
 
 ## 7. Reference Map

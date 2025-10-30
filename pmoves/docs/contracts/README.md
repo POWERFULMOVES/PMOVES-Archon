@@ -22,9 +22,9 @@ JavaScript tests under [`test/`](../../contracts/solidity/test) exercise represe
 
 The test suite provisions sample wallets, locks GroToken balances across 1–4 year intervals, and validates:
 
-- Quadratic voting costs vs available voting power (including over-allocation guards).
+- Quadratic voting costs vs available voting power (including over-allocation guards). Alice stakes the Tier 1 $5,000 commitment while Bob mirrors the $3,000 community allocation from the [5-Year Business Projections](../../../CATACLYSM_STUDIOS_INC/ABOUT/Projections/5-Year%20Business%20Projections_%20AI%20+%20Tokenomics%20Model.md).
 - Proposal execution gating via quorum thresholds.
-- Group purchase execution and refund flows, ensuring supplier disbursement and contributor safety.
+- Group purchase execution and refund flows, ensuring supplier disbursement and contributor safety when a $5,000 lead contributor pairs with a $3,000 cohort pledge (and a missed-target refund case).
 
 Solidity version `0.8.24` is configured with optimizer enabled (200 runs). All contracts import OpenZeppelin 5.x libraries for ERC-20 primitives and math helpers.
 

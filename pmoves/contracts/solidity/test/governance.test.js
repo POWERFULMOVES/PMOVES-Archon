@@ -20,7 +20,8 @@ function sqrtBigInt(value) {
 describe("GroVault & CoopGovernor", function () {
   it("computes voting power with lock multiplier", async function () {
     const { alice, vault, groToken } = await loadFixture(deployCoreFixture);
-    const lockAmount = ethers.parseEther("9000");
+    // Tier 1 scenario from the projections assumes a $5,000 long-term stake.
+    const lockAmount = ethers.parseEther("5000");
     await groToken.connect(alice).approve(await vault.getAddress(), lockAmount);
     await vault.connect(alice).createLock(lockAmount, 4);
 
@@ -34,11 +35,13 @@ describe("GroVault & CoopGovernor", function () {
   it("enforces quadratic vote costs and executes proposals", async function () {
     const { alice, bob, vault, groToken, governor, votingPeriod } = await loadFixture(deployCoreFixture);
 
-    const aliceAmount = ethers.parseEther("9000");
+    // Alice mirrors the $5,000 cooperative lead allocation (4 year commitment).
+    const aliceAmount = ethers.parseEther("5000");
     await groToken.connect(alice).approve(await vault.getAddress(), aliceAmount);
     await vault.connect(alice).createLock(aliceAmount, 4);
 
-    const bobAmount = ethers.parseEther("2500");
+    // Bob represents the $3,000 community tier participant with a 2 year horizon.
+    const bobAmount = ethers.parseEther("3000");
     await groToken.connect(bob).approve(await vault.getAddress(), bobAmount);
     await vault.connect(bob).createLock(bobAmount, 2);
 
