@@ -271,9 +271,19 @@ export default function ArchonPromptsPage() {
   return (
     <div className="archon-prompts-page" data-testid="archon-prompts-page">
       <header>
-        <h1 className="title">Archon Prompt Catalog</h1>
+        <h1 className="title">Archon Prompt Guild</h1>
         <p className="subtitle">
-          Manage prompt templates stored in Supabase. Authenticated users can read; service-role writes honor RLS.
+          Script the cooperative voice that lets neighborhoods steer Archon—DARKXSIDE’s rebel optimism turned into reusable intelligence.
+          Review the{' '}
+          <a
+            className="underline"
+            href="https://github.com/Cataclysm-Studios-Inc/PMOVES.AI/blob/main/pmoves/docs/PMOVES.AI%20PLANS/SUPABASE_RLS_HARDENING_CHECKLIST.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Supabase RLS hardening checklist
+          </a>{' '}
+          before shipping service-role updates so every cooperative stays shielded.
         </p>
       </header>
 
