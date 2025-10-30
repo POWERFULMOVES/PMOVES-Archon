@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
+from requests import exceptions as requests_exceptions
 
 API_PREFIX = "/api/v1"
 DEFAULT_TIMEOUT = 30
@@ -25,6 +26,7 @@ class FireflySeeder:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
+                "User-Agent": "pmoves-firefly-seeder/1.0",
             }
         )
         self.dry_run = dry_run
@@ -37,7 +39,10 @@ class FireflySeeder:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         url = f"{self.base_url}{path}"
-        resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+        try:
+            resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+        except requests_exceptions.RequestException as exc:
+            raise RuntimeError(f"Firefly API {method} {path} failed: {exc}") from exc
         if resp.status_code >= 400:
             try:
                 payload = resp.json()

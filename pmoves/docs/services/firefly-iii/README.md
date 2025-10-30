@@ -59,7 +59,16 @@ API/Contracts
     -G --data-urlencode "category=in.(AI-Enhanced Local Service Business,Sustainable Energy AI Consulting,Community Token Pre-Order System,Creative Content + Token Rewards)" \
     | jq '[.[] | {occurred_at, category, amount, description}]'
   ```
-- Expect Firefly categories for the four projection tracks and paired revenue/cost transactions spanning 2025–2029.
+- Expect Firefly categories for the four projection tracks and paired revenue/cost transactions spanning 2025–2029. The canonical external IDs are:
+  - `pmoves-ai-services-year1`
+  - `pmoves-ai-services-year5`
+  - `pmoves-ai-services-ops-year1`
+  - `pmoves-energy-consulting-year1`
+  - `pmoves-energy-consulting-rnd`
+  - `pmoves-community-token-preorders`
+  - `pmoves-community-adoption-grants`
+  - `pmoves-creative-rewards-year3`
+  - `pmoves-creative-production-costs`
 
 Smoke
 ```
