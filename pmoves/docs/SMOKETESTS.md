@@ -181,7 +181,7 @@ Prereqs: Supabase CLI stack running (`supabase start --network-id pmoves-net`), 
     -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
     | jq 'map({occurred_at, category, amount, description})'
   ```
-  Expect both revenue and expense rows for each of the 5-year projection categories (`AI-Enhanced Local Service Business`, `Sustainable Energy AI Consulting`, `Community Token Pre-Order System`, `Creative Content + Token Rewards`).
+  Expect both revenue and expense rows for each of the 5-year projection categories (`AI-Enhanced Local Service Business`, `Sustainable Energy AI Consulting`, `Community Token Pre-Order System`, `Creative Content + Token Rewards`). The canonical external IDs should match the fixture (`pmoves-ai-services-year1`, `pmoves-ai-services-year5`, `pmoves-ai-services-ops-year1`, `pmoves-energy-consulting-year1`, `pmoves-energy-consulting-rnd`, `pmoves-community-token-preorders`, `pmoves-community-adoption-grants`, `pmoves-creative-rewards-year3`, `pmoves-creative-production-costs`).
 
 ### 5d) Wger Static Proxy Smoke
 - Ensure `make up-external-wger` (or `make up-external`) is running so both `cataclysm-wger` and `cataclysm-wger-nginx`
