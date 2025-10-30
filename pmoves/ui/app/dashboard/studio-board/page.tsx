@@ -209,11 +209,19 @@ export default function StudioBoardDashboardPage() {
   return (
     <div className="p-6 space-y-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold">Studio Board Approvals</h1>
+        <h1 className="text-2xl font-semibold">Studio Board Command Deck</h1>
         <p className="text-sm text-neutral-600">
-          Review Supabase <code>studio_board</code> submissions, approve or
-          reject them inline, and jump to PostgREST for deeper debugging when
-          needed.
+          Steward creator submissions into the cooperative empowerment timeline—DARKXSIDE expects each approval to amplify neighborhood voices.
+          {' '}Coordinate with the{' '}
+          <a
+            className="underline"
+            href="https://github.com/Cataclysm-Studios-Inc/PMOVES.AI/blob/main/pmoves/docs/services/wger/README.md#login--security-defaults"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Wger Axes security notes
+          </a>{' '}
+          when you hand work off to operations so rate limits guard every launchpad.
         </p>
         {restUrl ? (
           <p className="text-xs text-neutral-500">

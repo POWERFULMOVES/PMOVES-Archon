@@ -231,11 +231,19 @@ export default function VideosDashboardPage() {
   return (
     <div className="p-6 space-y-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold">Videos Library</h1>
+        <h1 className="text-2xl font-semibold">Videos Signal Vault</h1>
         <p className="text-sm text-neutral-600">
-          Inspect Supabase <code>videos</code> rows produced by the ingestion
-          workers, track approval status, and link to raw PostgREST responses for
-          debugging.
+          Keep the cooperative empowerment story in motion—DARKXSIDE trusts this vault to surface the clips that rally each crew.
+          {' '}Run the{' '}
+          <a
+            className="underline"
+            href="https://github.com/Cataclysm-Studios-Inc/PMOVES.AI/blob/main/pmoves/docs/SMOKETESTS.md#L143"
+            target="_blank"
+            rel="noreferrer"
+          >
+            ingestion smoke checks
+          </a>{' '}
+          whenever approvals shift so Supabase and MinIO stay in sync.
         </p>
         {restUrl ? (
           <p className="text-xs text-neutral-500">
