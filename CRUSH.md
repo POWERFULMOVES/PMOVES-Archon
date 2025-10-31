@@ -15,11 +15,11 @@ as our interactive coding bestie alongside the PMOVES stack.
    ```bash
    python3 -m pmoves.tools.mini_cli bootstrap --accept-defaults
    ```
-   The command copies the refreshed provisioning PR pack (`pmoves/pmoves_provisioning_pr_pack/`)
-   into `CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/`, including the new
-   `scripts/install/wizard.{sh,ps1}` flow for bring-up across Windows and Linux
-   hosts. Pass `--registry`/`--service` if you need to scope the bootstrap or
-   `--output` to stage the bundle somewhere else.
+   The command curates the provisioning bundle (GPU compose profile, install
+   wizard, Proxmox bootstrap helper, and README) directly from the repo into
+   `CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/`. Pass `--registry`/`--service`
+   if you need to scope the bootstrap or `--output` to stage the bundle
+   somewhere else.
 4. Generate the PMOVES opinionated `crush.json`:
    ```bash
    python3 -m pmoves.tools.mini_cli crush setup

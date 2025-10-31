@@ -77,6 +77,8 @@ PY
 │   ├── notes/
 │   │   └── mermaid-fixes-2025-10-02.md
 │   ├── notesfordev.md
+│   ├── provisioning/
+│   │   └── README_APPLY.txt
 │   └── repoingest/
 │       ├── agent0ai-agent-zero.txt
 │       ├── charmbracelet-crush.txt
@@ -214,11 +216,6 @@ PY
 │   ├── neo4j/
 │   │   ├── cypher/
 │   │   └── datasets/
-│   ├── pmoves_provisioning_pr_pack/
-│   │   ├── README_APPLY.txt
-│   │   ├── docker-compose.gpu.yml
-│   │   ├── patches/
-│   │   └── scripts/
 │   ├── pr_body.md
 │   ├── schemas/
 │   │   ├── analysis.entities.v1.json
