@@ -27,8 +27,19 @@ from pmoves.tools import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROVISIONING_SOURCE = REPO_ROOT / "pmoves" / "pmoves_provisioning_pr_pack"
 DEFAULT_PROVISIONING_DEST = REPO_ROOT / "CATACLYSM_STUDIOS_INC" / "PMOVES-PROVISIONS"
+
+PROVISIONING_BUNDLE_FILES: dict[Path, Path] = {
+    Path("README_APPLY.txt"): REPO_ROOT / "docs" / "provisioning" / "README_APPLY.txt",
+    Path("docker-compose.gpu.yml"): REPO_ROOT / "pmoves" / "docker-compose.gpu.yml",
+    Path("scripts/install/wizard.sh"): REPO_ROOT / "pmoves" / "scripts" / "install" / "wizard.sh",
+    Path("scripts/install/wizard.ps1"): REPO_ROOT / "pmoves" / "scripts" / "install" / "wizard.ps1",
+    Path("scripts/proxmox/pmoves-bootstrap.sh"): REPO_ROOT
+    / "pmoves"
+    / "scripts"
+    / "proxmox"
+    / "pmoves-bootstrap.sh",
+}
 
 
 app = typer.Typer(help="PMOVES mini CLI (alpha)")
@@ -94,6 +105,15 @@ def _resolve_path(path: Path) -> Path:
     return Path.cwd() / expanded
 
 
+def _stage_provisioning_bundle(destination: Path) -> None:
+    for relative_path, source in PROVISIONING_BUNDLE_FILES.items():
+        if not source.exists():
+            raise FileNotFoundError(f"Provisioning source missing: {source}")
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 @app.command(help="Run onboarding helper (status or generate).")
 def init(
     generate: bool = typer.Option(
@@ -154,8 +174,11 @@ def bootstrap(
 
     destination = _resolve_path(output)
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(PROVISIONING_SOURCE, destination, dirs_exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
+        _stage_provisioning_bundle(destination)
+    except FileNotFoundError as exc:  # pragma: no cover - error path
+        typer.echo(f"Failed to stage provisioning bundle: {exc}")
+        raise typer.Exit(1)
     except OSError as exc:  # pragma: no cover - error path
         typer.echo(f"Failed to stage provisioning bundle: {exc}")
         raise typer.Exit(1)

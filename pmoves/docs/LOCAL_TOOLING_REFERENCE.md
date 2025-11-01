@@ -6,11 +6,11 @@ This guide aggregates the entry points that keep local environments consistent a
 
 ## Environment & Secrets
 - `python3 -m pmoves.tools.mini_cli bootstrap --accept-defaults` → wraps the
-  registry-driven env bootstrap and then stages
-  `pmoves/pmoves_provisioning_pr_pack/` into
-  `CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/` (override with `--output`). Use
-  `--registry`/`--service` when you need to scope the env refresh to a subset of
-  services.
+  registry-driven env bootstrap and then stages the curated provisioning
+  bundle (GPU compose profile, install wizard, Proxmox bootstrap helper, and
+  README) into `CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/` (override with
+  `--output`). Use `--registry`/`--service` when you need to scope the env
+  refresh to a subset of services.
 - `python3 -m pmoves.tools.mini_cli deps check` → confirm host tooling like
   `make`, `jq`, and `pytest` are available. `deps install` can automatically
   install missing binaries via your package manager (auto-detects `apt`,
