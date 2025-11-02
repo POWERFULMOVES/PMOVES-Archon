@@ -233,7 +233,7 @@ export default function VideosDashboardPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold">Videos Signal Vault</h1>
         <p className="text-sm text-neutral-600">
-          Keep the cooperative empowerment story in motion—DARKXSIDE trusts this vault to surface the clips that rally each crew.
+          Keep the cooperative empowerment story pulsing—DARKXSIDE counts on this vault to surface the clips that rally each crew.
           {' '}Run the{' '}
           <a
             className="underline"

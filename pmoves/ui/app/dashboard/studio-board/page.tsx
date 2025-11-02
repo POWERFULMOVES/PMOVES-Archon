@@ -211,8 +211,8 @@ export default function StudioBoardDashboardPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold">Studio Board Command Deck</h1>
         <p className="text-sm text-neutral-600">
-          Steward creator submissions into the cooperative empowerment timeline—DARKXSIDE expects each approval to amplify neighborhood voices.
-          {' '}Coordinate with the{' '}
+          Shepherd creator submissions into the cooperative empowerment timeline—DARKXSIDE expects every approval to amplify neighborhood voices.
+          {' '}Sync with the{' '}
           <a
             className="underline"
             href="https://github.com/Cataclysm-Studios-Inc/PMOVES.AI/blob/main/pmoves/docs/services/wger/README.md#login--security-defaults"
@@ -221,7 +221,7 @@ export default function StudioBoardDashboardPage() {
           >
             Wger Axes security notes
           </a>{' '}
-          when you hand work off to operations so rate limits guard every launchpad.
+          before handoff so rate limits guard each community launchpad.
         </p>
         {restUrl ? (
           <p className="text-xs text-neutral-500">
