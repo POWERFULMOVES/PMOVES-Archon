@@ -1,5 +1,5 @@
 # PMOVES v5 • Documentation Index
-_Last updated: 2025-11-02_
+_Last updated: 2025-11-03_
 
 - **Creator Pipeline** — `CREATOR_PIPELINE.md`
 - **ComfyUI End‑to‑End** — `COMFYUI_END_TO_END.md`
@@ -23,7 +23,7 @@ _Last updated: 2025-11-02_
 
 ## UI workspace bring-up
 - Quickstart: [`LOCAL_DEV.md` – Web UI quick links](../LOCAL_DEV.md#web-ui-quick-links)
-  - Supabase CLI prerequisites: run `make supa-start` then `make supa-status` to populate `pmoves/.env.local` before `npm run dev`.
+  - Supabase CLI prerequisites: run `make supa-start` then `make supa-status` to refresh Supabase keys. `npm run dev` now layers `env.shared` + `.env.local` automatically, so keep those root files current.
 - Notebook Workbench: [`UI_NOTEBOOK_WORKBENCH.md`](../UI_NOTEBOOK_WORKBENCH.md) — Supabase prerequisites, smoketest target, and troubleshooting tips for the `/notebook-workbench` page.
 
 ## Creative Tutorials (Automation Inputs)

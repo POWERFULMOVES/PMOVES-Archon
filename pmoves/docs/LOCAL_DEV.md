@@ -1,9 +1,13 @@
 # Local Development & Networking
-_Last updated: 2025-10-26_
+_Last updated: 2025-11-03_
 
 Note: See consolidated index at pmoves/docs/PMOVES.AI PLANS/README_DOCS_INDEX.md for cross-links.
 
 Refer to `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` for the consolidated list of setup scripts, Make targets, and Supabase workflows that pair with the service and port notes below.
+
+## First Run
+- `make first-run` — prompts for missing secrets, launches the Supabase CLI stack, starts core/agent/external services, applies Supabase + Neo4j migrations, seeds the Qdrant/Meili demo corpus, and executes the 12-step smoke harness so every integration ships with branded defaults out of the gate.
+- Optional provisioning bundle: `python3 -m pmoves.tools.mini_cli bootstrap --accept-defaults` produces the same env overlays and stages the provisioning artifacts under `CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS` before you run the stack locally or on a VPS.
 
 ## Services and Ports
 - qdrant: 6333 (internal name `qdrant`)
@@ -83,6 +87,9 @@ Use the bundled `cloudflared` helper when you need to expose local services to c
 Quick start:
 - Windows without Make: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1`
 - With Make: `make env-setup` (runs `python3 -m pmoves.tools.secrets_sync generate` under the hood) to produce `.env.generated` / `env.shared.generated` from `pmoves/chit/secrets_manifest.yaml`, then run `make bootstrap` to capture Supabase CLI endpoints (including Realtime) before `make env-check`. When you populate Supabase values, use the live keys surfaced by `make supa-status` (`sb_publishable_…` / `sb_secret_…`) so Archon, Agent Zero, and other agents load the correct service role credentials.
+- UI scripts: every `npm run` command under `pmoves/ui` now shells through `node scripts/with-env.mjs …`, which layers `env.shared`, `env.shared.generated`, `.env.generated`, `.env.local`, and `pmoves/ui/.env.local`. Keep the canonical secrets in `pmoves/env.shared` and machine-specific overrides in `.env.local`; the UI inherits them automatically.
+- Docker Compose now reads the same set in order: `env.shared.generated` (CHIT secrets) → `env.shared` (branded defaults) → `.env.generated` (local secret bundles) → `.env.local` (per-machine overrides). The root `.env` file is no longer sourced; keep any host-specific tweaks in `.env.local` instead of editing `.env`.
+- Supabase CLI remains the default backend for both local laptops and self-hosted VPS installs; `env.shared` ships with the CLI ports/keys, and `make supa-status` → `make env-setup` keeps `.env.local` aligned with the CLI stack unless you explicitly run `make supa-use-remote`.
 - No Make? `python3 -m pmoves.tools.onboarding_helper generate` produces the same env files and reports any missing CHIT labels before you bring up containers.
 - Configure Crush with `python3 -m pmoves.tools.mini_cli crush setup` so your local Crush CLI session understands PMOVES context paths, providers, and MCP stubs.
   - Optional: install `direnv` and copy `pmoves/.envrc.example` to `pmoves/.envrc` for auto‑loading.
@@ -93,9 +100,9 @@ Quick start:
 
 - Location: `pmoves/ui/` (Next.js App Router + Tailwind). The workspace consumes the same Supabase CLI stack that powers the core services.
 - Prerequisites: run `make supa-start` and `make supa-status` so `pmoves/.env.local` is populated with `SUPABASE_URL`, anon key, service role key, REST URL, and realtime URL.
-- Env loading: `pmoves/ui/next.config.mjs` automatically reads `pmoves/.env.local` and exposes the public variables to the browser bundle. Update that file if you need to point the UI at a remote Supabase instance.
+- Env loading: every `npm run` script shells through `node scripts/with-env.mjs …`, layering `pmoves/env.shared`, `env.shared.generated`, `.env.generated`, `.env.local`, and `pmoves/ui/.env.local`. Update those root files (not the UI directory) when pointing the console at a different Supabase project.
 - Install dependencies: `cd pmoves/ui && npm install` (or `yarn install`).
-- Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
+- Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Because the launcher preloads the root env files, no additional sourcing is required. Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
 - Other scripts: `npm run lint`, `npm run build`, `npm run start`.
 - Tests: `npm run test` (unit/component via Jest + Testing Library) and `npm run test:e2e` (Playwright smoke). Run `npx playwright install` once to download the browser engines before exercising the E2E suite.
 - Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` and `pmoves/ui/lib/supabase.ts` return typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.

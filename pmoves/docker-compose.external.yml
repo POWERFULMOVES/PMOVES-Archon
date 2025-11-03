@@ -5,7 +5,7 @@ services:
     image: ${WGER_IMAGE:-ghcr.io/cataclysm-studios-inc/pmoves-health-wger:main}
     container_name: cataclysm-wger
     restart: unless-stopped
-    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
     networks:
       cataclysm:
         aliases:
@@ -44,7 +44,7 @@ services:
     image: ${FIREFLY_IMAGE:-fireflyiii/core:latest}
     container_name: cataclysm-firefly
     restart: unless-stopped
-    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
     networks:
       cataclysm:
         aliases:
@@ -79,7 +79,7 @@ services:
     image: ${OPEN_NOTEBOOK_IMAGE:-ghcr.io/cataclysmstudios/pmoves-open-notebook:main}
     container_name: cataclysm-open-notebook
     restart: unless-stopped
-    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
     depends_on:
       - open-notebook-surrealdb-ext
     networks:
@@ -135,7 +135,7 @@ services:
     image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:10.11.0}
     container_name: cataclysm-jellyfin
     restart: unless-stopped
-    env_file: [env.shared.generated, env.shared, .env.generated, .env, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
     networks:
       cataclysm:
         aliases:

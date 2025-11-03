@@ -47,10 +47,11 @@
 - Tie summaries to the active roadmap items or checklists so parallel workstreams stay coherent across longer sessions.
 
 ## Core Bring-Up Sequence (Supabase CLI default)
+Prefer the automated path: `make first-run` stitches together the env bootstrap, Supabase CLI bring-up, data seeding, compose profiles, and smoketests described below.
 Follow this flow before running smokes or automation. Commands run from repo root unless noted.
 
-1. `cp pmoves/env.shared.example pmoves/env.shared` → populate secrets (Supabase keys, Discord webhook, MinIO, Firefly, etc.). Keep `.env` entries commented so they don’t override shared secrets.
-2. `make env-setup` – sync `.env`, `.env.local`, and Supabase config defaults.
+1. `cp pmoves/env.shared.example pmoves/env.shared` → populate secrets (Supabase keys, Discord webhook, MinIO, Firefly, etc.). This file now holds the branded defaults the entire stack reads on startup.
+2. `make env-setup` – sync `env.shared`, `.env.generated`, and `.env.local` so Supabase CLI credentials and integration tokens land in both Docker Compose and the UI launcher. All UI `npm run` scripts shell through `pmoves/ui/scripts/with-env.mjs`, so keeping `env.shared` + `.env.local` current automatically hydrates the Next.js workspace.
 3. `make supa-start` – launches the Supabase CLI stack (REST on 65421). Check status with `make supa-status`. Stop with `make supa-stop`.
 4. `make up` – core PMOVES services (presign, render-webhook, hi-rag, etc.).
 5. `make up-agents` – NATS, Agent Zero, Archon, mesh-agent, publisher-discord.
@@ -64,7 +65,7 @@ Follow this flow before running smokes or automation. Commands run from repo roo
 
 ### UI Quickstart & Links
 - Supabase Studio: http://127.0.0.1:65433 (started via `make -C pmoves supa-start`; confirm with `make -C pmoves supa-status`).
-- Notebook Workbench: http://localhost:3000/notebook-workbench (run `npm run dev` inside `pmoves/ui`; lint + REST check via `make -C pmoves notebook-workbench-smoke`).
+- Notebook Workbench: http://localhost:3000/notebook-workbench (run `npm run dev` inside `pmoves/ui`; the script now layers `env.shared` + `.env.local` for you; lint + REST check via `make -C pmoves notebook-workbench-smoke`).
 - TensorZero Playground: http://localhost:4000 (requires `make -C pmoves up-tensorzero`; gateway API at http://localhost:3030).
 - Firefly Finance: http://localhost:8082 (launched with `make -C pmoves up-external-firefly`; populate `FIREFLY_*` secrets).
 - Wger Coach Portal: http://localhost:8000 (`make -C pmoves up-external-wger`; defaults apply automatically).

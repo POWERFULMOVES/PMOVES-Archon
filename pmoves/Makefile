@@ -36,7 +36,7 @@ ENV_SHARED_TEMPLATE ?= env.shared.example
 
 LOAD_ENV_SHARED := set -a; \
         [ -f "$(ENV_SHARED_FILE)" ] && . "$(ENV_SHARED_FILE)"; \
-        [ -f .env ] && . .env; \
+        [ -f .env.generated ] && . .env.generated; \
         [ -f .env.local ] && . .env.local; \
         set +a;
 export LOAD_ENV_SHARED
@@ -932,7 +932,8 @@ help:
 	@echo "  chit-contract-check Run local CHIT contract grep (mirrors CI)"
 	@echo "  flight-check     Run environment preflight (deps, ports, .env)"
 	@echo "  flight-check-retro Retro-styled Rich CLI preflight"
-	@echo "  env-dedupe       Remove duplicate keys from .env (keeps last, writes .bak)"
+	@echo "  env-dedupe       Remove duplicate keys from .env.local (keeps last, writes .bak)"
+	@echo "  first-run        One-shot bootstrap: env, Supabase, seeds, full stack, smoke tests"
 	@echo "  logs-core        Tail core services (docker compose logs -f ...)"
 	@echo "  setup            Run Codex/bootstrap env setup (make, conda deps)"
 	@echo "  venv             Create a local Python virtualenv (.venv) and install deps"
@@ -978,6 +979,32 @@ setup:
 .PHONY: bootstrap
 bootstrap:
 	@$(PYTHON) scripts/bootstrap_env.py $(BOOTSTRAP_FLAGS)
+
+.PHONY: first-run
+first-run: ensure-env-shared ## One-shot env bootstrap, seed data, start full stack, and run smokes
+	@echo "→ Bootstrapping environment registry values..."
+	@$(MAKE) bootstrap
+	@echo "→ Ensuring Supabase backend is running..."
+	@if [ "$(SUPA_PROVIDER)" = "cli" ]; then \
+		if docker ps --format '{{.Names}}' | grep -q '^supabase_db_'; then \
+			echo "   • Supabase CLI stack already running."; \
+		else \
+			$(MAKE) supa-start; \
+		fi; \
+	else \
+		$(MAKE) supabase-up; \
+	fi
+	@echo "→ Starting core PMOVES services (data + workers)..."
+	@$(MAKE) up
+	@echo "→ Applying database seeds and demo corpora..."
+	@$(MAKE) bootstrap-data
+	@echo "→ Bringing agents online..."
+	@$(MAKE) up-agents
+	@echo "→ Starting bundled integrations (Wger, Firefly, Open Notebook, Jellyfin)..."
+	@$(MAKE) up-external
+	@echo "→ Running 12-step smoke harness..."
+	@$(MAKE) smoke
+	@echo "✔ First-run bootstrap complete."
 
 .PHONY: supabase-migrate
 supabase-migrate:
