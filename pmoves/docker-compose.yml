@@ -330,8 +330,11 @@ services:
     depends_on:
       minio:
         condition: service_started
-      bgutil-pot-provider:
-        condition: service_started
+      # bgutil-pot-provider is optional and may be excluded when compose is
+      # invoked with profiles that don't include the 'yt' provider. Remove
+      # the hard dependency so `make up` with different profiles doesn't
+      # fail with an "undefined service" error. The image/service is still
+      # defined below and can be enabled via profiles when needed.
     ports: ["8077:8077"]
     profiles: ["orchestration","workers","agents"]
     networks: [pmoves]
@@ -624,6 +627,17 @@ services:
     profiles: ["orchestration"]
     networks: [pmoves]
 
+  pmoves-ollama:
+    image: ${PMOVES_OLLAMA_IMAGE:-pmoves/ollama:0.12.6}
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      - pmoves-ollama-models:/root/.ollama/models
+    profiles: ["tensorzero"]
+    networks: [pmoves]
+
   tensorzero-clickhouse:
     image: clickhouse/clickhouse-server:24.12-alpine
     restart: unless-stopped
@@ -824,6 +838,7 @@ volumes:
   tensorzero-clickhouse-data: {}
   invidious-postgres-data: {}
   invidious-companion-cache: {}
+  pmoves-ollama-models: {}
 networks:
   pmoves:
     external: true

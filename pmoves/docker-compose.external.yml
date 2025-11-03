@@ -86,6 +86,9 @@ services:
       cataclysm:
         aliases:
           - cataclysm-open-notebook
+      pmoves:
+        aliases:
+          - cataclysm-open-notebook
     environment:
       SURREAL_URL: ${OPEN_NOTEBOOK_SURREAL_URL:-ws://cataclysm-open-notebook-surrealdb:8000/rpc}
       SURREAL_ADDRESS: ${OPEN_NOTEBOOK_SURREAL_ADDRESS:-cataclysm-open-notebook-surrealdb}
@@ -152,6 +155,9 @@ networks:
   cataclysm:
     external: true
     name: cataclysm-net
+  pmoves:
+    external: true
+    name: pmoves-net
 
 volumes:
   firefly-storage:

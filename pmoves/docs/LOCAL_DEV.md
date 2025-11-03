@@ -42,6 +42,19 @@ External bundles (via `make up-external`):
 - Open Notebook UI/API: 8503 / 5055 (override with `OPEN_NOTEBOOK_UI_PORT` / `OPEN_NOTEBOOK_API_PORT`)
 - Jellyfin: 8096 (media server; run `make jellyfin-folders` to create `pmoves/data/jellyfin/` before first launch)
 
+## Web UI Quick Links
+| UI | Default URL | Bring-Up Command | Notes |
+| --- | --- | --- | --- |
+| Supabase Studio | http://127.0.0.1:65433 | `make -C pmoves supa-start` *(CLI-managed)* | Requires the Supabase CLI stack; confirm status with `make -C pmoves supa-status`. |
+| Notebook Workbench (Next.js) | http://localhost:3000/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
+| Agent Zero Admin (FastAPI docs) | http://localhost:8080/docs | `make -C pmoves up` | Useful for manual message dispatch debugging; requires a valid `OPENAI_API_KEY` for full functionality. |
+| TensorZero Playground | http://localhost:4000 | `make -C pmoves up-tensorzero` | Gateway API at http://localhost:3030; ensure `OPENAI_API_KEY` or compatible provider is configured. |
+| Firefly Finance | http://localhost:8082 | `make -C pmoves up-external-firefly` | Set `FIREFLY_APP_KEY`/`FIREFLY_ACCESS_TOKEN` in `pmoves/env.shared` before first login. |
+| Wger Coach Portal | http://localhost:8000 | `make -C pmoves up-external-wger` | Auto-applies brand defaults; admin credentials live in `pmoves/env.shared`. |
+| Jellyfin Media Hub | http://localhost:8096 | `make -C pmoves up-external-jellyfin` | First boot runs schema migrations; mark libraries inside the UI after media folders are populated. |
+| Open Notebook UI | http://localhost:8503 | `docker start cataclysm-open-notebook` *(or `make -C pmoves notebook-up`)* | Ensure SurrealDB is reachable (`OPEN_NOTEBOOK_SURREAL_URL`/`OPEN_NOTEBOOK_SURREAL_ADDRESS`) and keep `OPEN_NOTEBOOK_PASSWORD` aligned with `OPEN_NOTEBOOK_API_TOKEN`. |
+| n8n Automation | http://localhost:5678 | `make -C pmoves up-n8n` | Imports live under `pmoves/integrations/**/n8n/flows`; authenticate with credentials from `pmoves/env.shared`. |
+
 Integrations compose profiles (local containers + n8n automation):
 - `make integrations-up-core` brings up n8n with the integrations-ready configuration.
 - `make integrations-up-wger` / `make integrations-up-firefly` add the corresponding Postgres/MariaDB stacks.
@@ -85,7 +98,9 @@ Quick start:
 - Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
 - Other scripts: `npm run lint`, `npm run build`, `npm run start`.
 - Tests: `npm run test` (unit/component via Jest + Testing Library) and `npm run test:e2e` (Playwright smoke). Run `npx playwright install` once to download the browser engines before exercising the E2E suite.
-- Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` returns typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.
+- Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` and `pmoves/ui/lib/supabase.ts` return typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.
+- Notebook Workbench: visit `http://localhost:3000/notebook-workbench` to manage `message_views`, view groups, and snapshots for a Supabase thread. Follow the dedicated guide at [`pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`](UI_NOTEBOOK_WORKBENCH.md) for setup steps and troubleshooting.
+- Smoketest: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<thread_uuid>"` after UI changes to lint the bundle and confirm Supabase connectivity.
 - Edge auth proxy: `pmoves/ui/proxy.ts` enforces session checks for all non-public routes using the Supabase auth helper. Update its `PUBLIC_PATHS` set when adding new unauthenticated pages.
 - Security expectations: the ingestion dashboard now requires a Supabase-authenticated session. `upload_events` rows are stamped with `owner_id`, and the UI only presigns objects under `namespace/users/<owner-id>/uploads/<uuid>/`. Anonymous callers can no longer generate presigned GETs or mutate upload metadata.
 

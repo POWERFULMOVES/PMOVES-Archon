@@ -235,6 +235,13 @@ notebook-seed-models: ## Seed Open Notebook models based on provider keys from t
 	@echo "Seeding Open Notebook providers..."
 	@bash -c 'set -a; [ -f "$(ENV_SHARED_FILE)" ] && . "$(ENV_SHARED_FILE)"; set +a; exec $(PYTHON) scripts/open_notebook_seed.py'
 
+.PHONY: notebook-workbench-smoke
+notebook-workbench-smoke: ensure-env-shared ## Lint the Notebook Workbench bundle and verify Supabase connectivity
+	@echo "→ Linting Notebook Workbench UI…"
+	@npm --prefix ui run lint
+	@echo "→ Validating Supabase environment…"
+	@bash -c '$(LOAD_ENV_SHARED) node scripts/notebook_workbench_smoke.mjs $(ARGS)'
+
 # Bring only worker services (ensures data deps are active)
 up-workers:
 	docker compose -p $(PROJECT) --profile data --profile workers up -d hi-rag-gateway-v2 retrieval-eval render-webhook langextract extract-worker
@@ -278,7 +285,7 @@ ps:
 up-external: ## Start all external stacks (Wger, Firefly, Open Notebook, Jellyfin)
 	@docker network create cataclysm-net >/dev/null 2>&1 || true
 	@docker network create pmoves-net >/dev/null 2>&1 || true
-	@docker compose -p $(PROJECT) -f docker-compose.external.yml up -d
+	@bash -c 'set -a; [ -f env.shared ] && . env.shared; [ -f .env.local ] && . .env.local; set +a; exec docker compose -p $(PROJECT) -f docker-compose.external.yml up -d'
 
 up-external-wger: ## Start Wger (Django + nginx proxy) on cataclysm-net
 	@docker network create cataclysm-net >/dev/null 2>&1 || true
@@ -860,16 +867,17 @@ up-jellyfin-ai:
 	@mkdir -p $(JELLYFIN_AI_BASE)/qwen/models $(JELLYFIN_AI_BASE)/qwen/cache
 	@mkdir -p $(JELLYFIN_AI_BASE)/logs $(JELLYFIN_AI_BASE)/redis
 	@echo "Starting Jellyfin AI stack..."
-	@JELLYFIN_AI_BASE=$(JELLYFIN_AI_BASE) docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.jellyfin-ai.yml up -d --force-recreate \
+	@set -a; . ./env.jellyfin-ai; set +a; \
+	JELLYFIN_AI_BASE=$(JELLYFIN_AI_BASE) docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.jellyfin-ai.yml up -d --force-recreate \
 		jellyfin jellyfin-neo4j jellyfin-qwen-audio jellyfin-redis jellyfin-audio-processor jellyfin-api-gateway jellyfin-dashboard
 	@echo "✓ Jellyfin AI stack started successfully!"
 	@echo ""
 	@echo "Services:"
-	@echo "  - Jellyfin Media Server:  http://localhost:8096"
-	@echo "  - Dashboard:              http://localhost:8400"
-	@echo "  - API Gateway:            http://localhost:8300"
-	@echo "  - Ollama (Qwen2-Audio):   http://localhost:11434"
-	@echo "  - Neo4j Browser:          bolt://localhost:7687"
+	@. ./env.jellyfin-ai; echo "  - Jellyfin Media Server:  $$JELLYFIN_PUBLIC_BASE_URL"; \
+	  echo "  - Dashboard:              http://localhost:${JELLYFIN_DASHBOARD_PORT:-8400}"; \
+	  echo "  - API Gateway:            http://localhost:${JELLYFIN_API_PORT:-8300}"; \
+	  echo "  - Ollama (Qwen2-Audio):   http://localhost:11434"; \
+	  echo "  - Neo4j Browser:          bolt://localhost:7687"
 	@echo ""
 	@echo "Note: Qwen2-Audio model is already pulled and ready to use!"
 
