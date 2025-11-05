@@ -20,6 +20,7 @@ export default async function HomePage() {
   const primaryLabel = hasBootJwt ? 'Open dashboard' : 'Continue to login';
   const gpuPort = process.env.HIRAG_V2_GPU_HOST_PORT || '8087';
   const links: LinkDef[] = [
+    { label: 'Personas', href: '/dashboard/personas' },
     {
       label: 'Agent Zero',
       href: '/dashboard/agent-zero',

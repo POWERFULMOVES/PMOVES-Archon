@@ -137,6 +137,10 @@ Checks (12):
 11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
 12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
 
+### 5b) Personas
+
+Run `make smoke-personas` to assert the v5.12 persona library is present in the Supabase CLI database (expects at least one row such as `Archon v1.0`). If this fails, run `make supabase-bootstrap` and retry.
+
 ### UI Dropzone smoke
 
 The Dropzone UI rides on the Supabase presign + render webhook path. Once the core stack is live:

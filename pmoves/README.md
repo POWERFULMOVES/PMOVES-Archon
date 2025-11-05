@@ -45,6 +45,14 @@ This aggregates the entire onboarding sequence: env bootstrap, Supabase CLI brin
 - Additional helpers: `make ps`, `make down`, `make clean`. See `docs/MAKE_TARGETS.md` for the full catalogue.
 - Open Notebook workspace: `make notebook-up` starts the Streamlit UI (8502) and REST API (5055) defined in `docker-compose.open-notebook.yml`. Populate `env.shared` with `OPEN_NOTEBOOK_API_URL` (defaults to `http://cataclysm-open-notebook:5055`) plus either `OPEN_NOTEBOOK_PASSWORD` or `OPEN_NOTEBOOK_API_TOKEN` before launching. Once your provider keys (`OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) live in `env.shared`, run `make notebook-seed-models` to register models/defaults in SurrealDB so the UI drop-downs are pre-populated. Use `make notebook-logs` for live output and `make notebook-down` to stop the container while preserving data in `pmoves/data/open-notebook/`.
 
+### Model selection (Ollama / TensorZero / OpenAI-compatible)
+
+- List profiles: `make -C pmoves model-profiles`
+- Apply defaults for Hi‑RAG/Archon: `make -C pmoves model-apply PROFILE=archon HOST=workstation_5090`
+- Apply defaults for Agent Zero: `make -C pmoves model-apply PROFILE=agent-zero HOST=workstation_5090`
+- Pre‑pull local models: `make -C pmoves models-seed-ollama`
+- Restart gateways after changes: `make -C pmoves recreate-v2` (and `recreate-v2-gpu` if using GPU)
+
 ### Dev Environment (Conda + Windows/macOS/Linux)
 
 - Baseline interpreter: Python 3.11 (installed via the provided Conda environment).

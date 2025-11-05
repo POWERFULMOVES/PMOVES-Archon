@@ -96,6 +96,56 @@ Quick start:
 - Windows without Make: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1`
 - With Make: `make env-setup` (runs `python3 -m pmoves.tools.secrets_sync generate` under the hood) to produce `.env.generated` / `env.shared.generated` from `pmoves/chit/secrets_manifest.yaml`, then run `make bootstrap` to capture Supabase CLI endpoints (including Realtime) before `make env-check`. When you populate Supabase values, use the live keys surfaced by `make supa-status` (`sb_publishable_…` / `sb_secret_…`) so Archon, Agent Zero, and other agents load the correct service role credentials.
 - UI scripts: every `npm run` command under `pmoves/ui` now shells through `node scripts/with-env.mjs …`, which layers `env.shared`, `env.shared.generated`, `.env.generated`, `.env.local`, and `pmoves/ui/.env.local`. Keep the canonical secrets in `pmoves/env.shared` and machine-specific overrides in `.env.local`; the UI inherits them automatically.
+
+### Console dev helpers
+- Start the console on port 3001 (auto-loads env and boot JWT):
+  - `make -C pmoves ui-dev-start`
+- Stop and view logs:
+  - `make -C pmoves ui-dev-stop`
+  - `make -C pmoves ui-dev-logs`
+- Auto-auth: the console skips /login when `NEXT_PUBLIC_SUPABASE_BOOT_USER_JWT` is present. Generate/update it with `make -C pmoves supabase-boot-user`, then restart the console.
+
+### Agent UIs (headless MCP with console wrappers)
+- Archon page: `http://localhost:3001/dashboard/archon` — Health/Info, prompts editor link, and a button to open the native API.
+- Agent Zero page: `http://localhost:3001/dashboard/agent-zero` — Health/Info, MCP connection details, and a button to open the native UI/API.
+- Personas page: `http://localhost:3001/dashboard/personas` — Lists personas from `pmoves_core.personas`.
+
+### Use published Agent UI images
+- You can run Agents from prebuilt images (includes native UIs) instead of local builds:
+  - Set/confirm in `pmoves/env.shared`:
+    - `AGENT_ZERO_IMAGE=ghcr.io/cataclysm-studios-inc/pmoves-agent-zero:pmoves-latest`
+    - `ARCHON_IMAGE=ghcr.io/cataclysm-studios-inc/pmoves-archon:pmoves-latest`
+  - Start with images: `make -C pmoves up-agents-published`
+- To pin versions, change the tags above (e.g., `:v0.9.6`).
+- If you maintain your own registry, point the variables at your GHCR/ECR tags.
+
+### Use your forks (integrations-workspace)
+You can build and run Agent Zero and Archon directly from your forks without modifying this repo:
+
+1) Clone your forks into the workspace directory (default `../integrations-workspace` relative to `pmoves/`):
+```
+make -C pmoves agents-integrations-clone
+```
+This clones:
+- https://github.com/POWERFULMOVES/PMOVES-Agent-Zero.git → `$(INTEGRATIONS_WORKSPACE)/PMOVES-Agent-Zero`
+- https://github.com/POWERFULMOVES/PMOVES-Archon.git → `$(INTEGRATIONS_WORKSPACE)/PMOVES-Archon`
+
+2) Build and start agents from your forks:
+```
+make -C pmoves build-agents-integrations
+make -C pmoves up-agents-integrations
+```
+
+3) Update later:
+```
+make -C pmoves agents-integrations-pull
+make -C pmoves build-agents-integrations
+make -C pmoves up-agents-integrations
+```
+
+Notes:
+- Override the workspace path with `INTEGRATIONS_WORKSPACE=/path/to/integrations-workspace`.
+- Ports and env remain the same (Agent Zero on 8080, Archon on 8091); the override compose file only swaps the build contexts.
 - Docker Compose now reads the same set in order: `env.shared.generated` (CHIT secrets) → `env.shared` (branded defaults) → `.env.generated` (local secret bundles) → `.env.local` (per-machine overrides). The root `.env` file is no longer sourced; keep any host-specific tweaks in `.env.local` instead of editing `.env`.
 - Supabase CLI remains the default backend for both local laptops and self-hosted VPS installs; `env.shared` ships with the CLI ports/keys, and `make supa-status` → `make env-setup` keeps `.env.local` aligned with the CLI stack unless you explicitly run `make supa-use-remote`.
 - No Make? `python3 -m pmoves.tools.onboarding_helper generate` produces the same env files and reports any missing CHIT labels before you bring up containers.

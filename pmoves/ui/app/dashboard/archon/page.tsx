@@ -40,10 +40,12 @@ export default async function ArchonPage() {
       </section>
       <section className="rounded border border-slate-200 bg-white p-4">
         <h2 className="mb-2 text-base font-semibold">Prompts & Knowledge Packs</h2>
-        <p className="mb-3 text-sm text-slate-700">Edit Archon prompts in the PMOVES console:</p>
-        <a href="/dashboard/archon-prompts" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open prompts editor</a>
+        <p className="mb-3 text-sm text-slate-700">Edit Archon prompts in the PMOVES console or open the native API root:</p>
+        <div className="flex gap-3">
+          <a href="/dashboard/archon-prompts" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open prompts editor</a>
+          <a href={base} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open native API</a>
+        </div>
       </section>
     </main>
   );
 }
-

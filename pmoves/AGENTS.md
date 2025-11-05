@@ -39,6 +39,14 @@
 - If you intentionally skip one of those checks (docs-only change, etc.), record the rationale in the PR Reviewer Notes so reviewers know the risk envelope.
 - UI updates: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"` to lint the Next.js bundle and validate Supabase connectivity. Reference `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` when collecting smoke evidence.
 - Hi-RAG gateway: after touching reranker or embedding code, run `make -C pmoves smoke-gpu`. The target now pipes the validation query through `docker compose exec` so FlagEmbedding/Qwen rerankers that only accept batch size 1 still report `"used_rerank": true` (first run downloads the 4B checkpoint).
+
+### Console & Personas
+- Console dev helpers: `make -C pmoves ui-dev-start` (port 3001, auto-loads env and boot JWT), `ui-dev-stop`, and `ui-dev-logs`.
+- Personas (v5.12): `pmoves_core.personas` is created and seeded with the `Archon` persona. To reapply schema/seeds: `make -C pmoves supabase-bootstrap`. Verify with:
+  ```bash
+  supadb=$(docker ps --format '{{.Names}}' | grep -m1 '^supabase_db_');
+  docker exec -it "$supadb" psql -U postgres -d postgres -c "select name,version from pmoves_core.personas;"
+  ```
 - JetStream drift can surface as `nats: JetStream.Error cannot create queue subscription…` in the Agent Zero container logs. Rebuild with `docker compose build agent-zero && docker compose up -d agent-zero` so the pull-subscribe controller code ships and the consumer metadata is recreated automatically.
 
 ## Bring-Up Sequence

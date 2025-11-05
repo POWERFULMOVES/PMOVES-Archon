@@ -19,3 +19,11 @@
    VENICE_API_KEY=...
 
 7) (Optional) Expose TensorZero via Cloudflare Tunnel for remote Jetsons/VPS.
+
+Operator entry point
+- If you’re working inside this repository, you don’t need to copy files around. Use:
+  - `make -C pmoves up-tensorzero` to start the gateway + UI (and Ollama sidecar).
+  - `make -C pmoves model-profiles` to list available model profiles.
+  - `make -C pmoves model-apply PROFILE=archon HOST=workstation_5090` to write env values into `pmoves/.env.local`.
+  - `make -C pmoves models-seed-ollama` to pre-pull recommended local models.
+- Project-level notes live at `pmoves/venice-tensorzero-integration/README.md`.

@@ -50,8 +50,10 @@ export default async function AgentZeroPage() {
           <li>Health path: <code>/healthz</code></li>
           <li>Broker: NATS at <code>{process.env.NATS_URL || 'nats://nats:4222'}</code> (internal)</li>
         </ul>
+        <div className="mt-3 flex gap-3">
+          <a href={base} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open native UI/API</a>
+        </div>
       </section>
     </main>
   );
 }
-
