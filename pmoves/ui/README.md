@@ -11,6 +11,25 @@ npm run dev
 
 The development server runs on [http://localhost:3000](http://localhost:3000). Any changes under `app/`, `components/`, or `lib/` trigger automatic reloads.
 
+### Quick Links on the landing page
+The home page renders a “Quick Links” grid to common dashboards when available:
+
+- Agent Zero (8080), Archon health (8091), Hi‑RAG Geometry (GPU), TensorZero UI (4000), TensorZero Gateway (3030), Jellyfin (8096), Open Notebook (8503), and Supabase Studio (65433).
+
+Override any link with:
+
+```
+NEXT_PUBLIC_AGENT_ZERO_URL
+NEXT_PUBLIC_ARCHON_URL
+NEXT_PUBLIC_TENSORZERO_UI
+NEXT_PUBLIC_TENSORZERO_GATEWAY
+NEXT_PUBLIC_JELLYFIN_URL
+NEXT_PUBLIC_OPEN_NOTEBOOK_URL
+NEXT_PUBLIC_SUPABASE_STUDIO_URL
+```
+
+The Hi‑RAG Geometry link respects `HIRAG_V2_GPU_HOST_PORT`.
+
 ## Services dashboard workflow
 
 The dashboard includes a **Services** section under `/dashboard/services` that highlights the external integrations bundled with PMOVES:
@@ -46,6 +65,7 @@ Use the pills at the top of the ingestion, video, and services pages to move bet
      - `NEXT_PUBLIC_SUPABASE_URL`
      - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
      - `NEXT_PUBLIC_SUPABASE_BOOT_USER_JWT` – reproducible JWT managed by `make supabase-boot-user` (invoked automatically by `make first-run`); keeps the UI authenticated as the branded operator instead of the anon role.
+     - Optional UI links (see above) to surface external dashboards on the home page.
      - Optional but recommended: `NEXT_PUBLIC_SUPABASE_REST_URL` (falls back to `<SUPABASE_URL>/rest/v1`).
    - Server components/read routes also honour `SUPABASE_BOOT_USER_JWT`; set it alongside the `NEXT_PUBLIC_…` value so API routes inherit the same session.
 
