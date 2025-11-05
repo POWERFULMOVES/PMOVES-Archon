@@ -1,18 +1,23 @@
 import 'server-only';
 
 async function fetchHealth(base: string) {
-  const url = `${base.replace(/\/$/, '')}/healthz`;
-  try {
-    const res = await fetch(url, { next: { revalidate: 0 } });
-    if (res.ok) {
-      const text = await res.text();
-      try {
-        return { url, payload: JSON.parse(text) };
-      } catch {
-        return { url, payload: { status: res.status, body: text } };
+  const urls = [
+    `${base.replace(/\/$/, '')}/healthz`,
+    `${base.replace(/\/$/, '')}/`,
+  ];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { next: { revalidate: 0 } });
+      if (res.ok) {
+        const text = await res.text();
+        try {
+          return { url, payload: JSON.parse(text) };
+        } catch {
+          return { url, payload: { status: res.status, body: text } };
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  }
   return null;
 }
 
