@@ -22,7 +22,7 @@ Refer to `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` for the consolidated list of s
 - hi-rag-gateway-v2 (CPU): `${HIRAG_V2_HOST_PORT:-8086}` → 8086 (internal name `hi-rag-gateway-v2`)
 - hi-rag-gateway-v2-gpu (GPU): `${HIRAG_V2_GPU_HOST_PORT:-8087}` → 8086 (internal name `hi-rag-gateway-v2-gpu`)
   - Tip: when local tools already bind to 8086/8087 (e.g., legacy uvicorn processes), set `HIRAG_V2_HOST_PORT` / `HIRAG_V2_GPU_HOST_PORT` in `.env.local` (or the shell) before running `make up` to remap the published ports (for example `18086` / `18087`).
-- Embedding defaults: the v2 gateways now pull embeddings from TensorZero (`http://tensorzero-gateway:3000`) which proxies Ollama’s `embeddinggemma` family. Bring up the tensorzero profile (`make -C pmoves up-tensorzero`) and pull `embeddinggemma:latest` plus `embeddinggemma:300m` on `pmoves-ollama` so GPU queries don’t fall back to CPU sentence-transformer models. citeturn0search0turn0search2
+- Embedding defaults: the v2 gateways now pull embeddings from TensorZero (`http://tensorzero-gateway:3000`) which proxies Ollama’s `embeddinggemma` family. `make -C pmoves up-tensorzero` now starts ClickHouse, the gateway/UI, **and** the bundled `pmoves-ollama` sidecar so `embeddinggemma:latest`/`300m` respond immediately. On hardware where Ollama cannot run (Jetson, low-memory VPS) point `TENSORZERO_BASE_URL` at a remote gateway or leave `EMBEDDING_BACKEND` unset so services fall back to sentence-transformers. citeturn0search0turn0search2
 - retrieval-eval: 8090 (internal name `retrieval-eval`)
 - render-webhook: 8085 (internal name `render-webhook`)
 - pdf-ingest: 8092 (internal name `pdf-ingest`)
@@ -31,10 +31,16 @@ Refer to `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` for the consolidated list of s
 - channel-monitor: 8097 (internal name `channel-monitor`) – watches YouTube channels and queues new videos for pmoves-yt ingestion.
   - Tune yt-dlp via env: `YT_ARCHIVE_DIR` + `YT_ENABLE_DOWNLOAD_ARCHIVE` manage archive files, `YT_SUBTITLE_LANGS`/`YT_SUBTITLE_AUTO` pull captions, `YT_POSTPROCESSORS_JSON` overrides post-processing (defaults embed metadata + thumbnails).
 
-Optional TensorZero gateway profile (`docker compose --profile tensorzero up tensorzero-clickhouse tensorzero-gateway tensorzero-ui`):
+Optional TensorZero gateway profile (`make -C pmoves up-tensorzero` or `docker compose --profile tensorzero up tensorzero-clickhouse tensorzero-gateway tensorzero-ui pmoves-ollama`):
 - tensorzero-clickhouse: 8123 (internal name `tensorzero-clickhouse`)
 - tensorzero-gateway: 3030 -> 3000 (internal name `tensorzero-gateway`)
 - tensorzero-ui: 4000 (internal name `tensorzero-ui`)
+- pmoves-ollama: 11434 (internal name `pmoves-ollama`) — optional; skip and point `TENSORZERO_BASE_URL` at a remote gateway when Ollama runs on another host or you’re deploying to Jetson-class hardware.
+
+Remote inference quick switch:
+- To use a remote TensorZero instead of the local one, set `TENSORZERO_BASE_URL=http://<remote>:3000` before `make up` (or place it in `.env.local`).
+- hi-rag v2 will automatically send embedding requests to that URL when `EMBEDDING_BACKEND=tensorzero` is set (default in the gateway).
+- You can keep the local `pmoves-ollama` running or stop it via `docker stop pmoves-pmoves-ollama-1`; the gateway will prefer the configured backend.
 
 ### Supabase runtime modes
 - **Supabase CLI stack (`make supa-start`)** — launches the official Supabase Docker bundle (Postgres, auth, storage, Realtime, Studio) managed by the CLI. Requires the `supabase` binary in your `PATH`; monitor with `make supa-status` and shut down via `make supa-stop`.
@@ -54,7 +60,7 @@ External bundles (via `make up-external`):
 | Supabase Studio | http://127.0.0.1:65433 | `make -C pmoves supa-start` *(CLI-managed)* | Requires the Supabase CLI stack; confirm status with `make -C pmoves supa-status`. |
 | Notebook Workbench (Next.js) | http://localhost:3000/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
 | Agent Zero Admin (FastAPI docs) | http://localhost:8080/docs | `make -C pmoves up` | Useful for manual message dispatch debugging; requires a valid `OPENAI_API_KEY` for full functionality. |
-| TensorZero Playground | http://localhost:4000 | `make -C pmoves up-tensorzero` | Gateway API at http://localhost:3030; ensure `OPENAI_API_KEY` or compatible provider is configured. |
+| TensorZero Playground | http://localhost:4000 | `make -C pmoves up-tensorzero` | Brings up ClickHouse, gateway/UI, and `pmoves-ollama`. Gateway API at http://localhost:3030; set `TENSORZERO_BASE_URL` to a remote gateway if Ollama runs elsewhere. |
 | Firefly Finance | http://localhost:8082 | `make -C pmoves up-external-firefly` | Set `FIREFLY_APP_KEY`/`FIREFLY_ACCESS_TOKEN` in `pmoves/env.shared` before first login. |
 | Wger Coach Portal | http://localhost:8000 | `make -C pmoves up-external-wger` | Auto-applies brand defaults; admin credentials live in `pmoves/env.shared`. |
 | Jellyfin Media Hub | http://localhost:8096 | `make -C pmoves up-external-jellyfin` | First boot runs schema migrations; mark libraries inside the UI after media folders are populated. |
@@ -95,7 +101,7 @@ Quick start:
 - No Make? `python3 -m pmoves.tools.onboarding_helper generate` produces the same env files and reports any missing CHIT labels before you bring up containers.
 - Configure Crush with `python3 -m pmoves.tools.mini_cli crush setup` so your local Crush CLI session understands PMOVES context paths, providers, and MCP stubs.
   - Optional: install `direnv` and copy `pmoves/.envrc.example` to `pmoves/.envrc` for auto‑loading.
-- TensorZero gateway (optional): copy `pmoves/tensorzero/config/tensorzero.toml.example` to `pmoves/tensorzero/config/tensorzero.toml`, then set `TENSORZERO_BASE_URL=http://localhost:3030` (and `TENSORZERO_API_KEY` if required). Setting `LANGEXTRACT_PROVIDER=tensorzero` routes LangExtract through the gateway; populate `LANGEXTRACT_REQUEST_ID` / `LANGEXTRACT_FEEDBACK_*` variables to tag observability traces. Pull the Ollama backing model once (`ollama pull embeddinggemma:300m`) so the gateway's default `gemma_embed_local` route succeeds.
+- TensorZero gateway (optional): copy `pmoves/tensorzero/config/tensorzero.toml.example` to `pmoves/tensorzero/config/tensorzero.toml`, then set `TENSORZERO_BASE_URL=http://localhost:3030` (and `TENSORZERO_API_KEY` if required). `make -C pmoves up-tensorzero` now starts ClickHouse, the gateway/UI, and `pmoves-ollama`, so the default `gemma_embed_local` route works without manual pulls. If you deploy on hardware that cannot run Ollama (Jetson, remote inference nodes), skip the sidecar and point `TENSORZERO_BASE_URL` at a remote gateway instead. Setting `LANGEXTRACT_PROVIDER=tensorzero` routes LangExtract through the gateway; populate `LANGEXTRACT_REQUEST_ID` / `LANGEXTRACT_FEEDBACK_*` variables to tag observability traces.
   - Advanced toggles: `TENSORZERO_MODEL` overrides the default chat backend, `TENSORZERO_TIMEOUT_SECONDS` adjusts request timeouts, and `TENSORZERO_STATIC_TAGS` (JSON or `key=value,key2=value2`) forwards deployment metadata as `tensorzero::tags`.
 
 ### UI Workspace (Next.js + Supabase Platform Kit)
@@ -295,7 +301,7 @@ OpenAI-compatible presets:
 - Live/offline toggle: `NOTEBOOK_SYNC_MODE` (`live` or `offline`) controls whether the worker processes updates at all.
 - Source filter: `NOTEBOOK_SYNC_SOURCES` (comma list of `notebooks`, `notes`, `sources`) limits which resources feed LangExtract.
 - Cursor storage: `NOTEBOOK_SYNC_DB_PATH` (default `/data/notebook_sync.db` mounted via the `notebook-sync-data` volume).
-- Extract worker routing: set `EMBEDDING_BACKEND=tensorzero` to call the TensorZero gateway for chunk embeddings (uses `TENSORZERO_BASE_URL` + `TENSORZERO_EMBED_MODEL`, defaults to `gemma_embed_local`, which proxies to Ollama's `embeddinggemma:300m`). Leave unset for local `sentence-transformers`.
+- Extract worker routing: set `EMBEDDING_BACKEND=tensorzero` to call the TensorZero gateway for chunk embeddings (uses `TENSORZERO_BASE_URL` + `TENSORZERO_EMBED_MODEL`, defaults to `tensorzero::embedding_model_name::gemma_embed_local`, which proxies to Ollama's `embeddinggemma:300m`). Leave unset for local `sentence-transformers`.
 
 ### Mindmap + Open Notebook integration
 

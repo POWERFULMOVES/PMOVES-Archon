@@ -94,6 +94,24 @@ Agents Profile
 - Defaults: agents read `NATS_URL=nats://nats:4222`; override via `.env`/`.env.local` if you are targeting an external broker.
 - Explore architecture and workflows in `docs/PMOVES_Multi-Agent_System_Crush_CLI_Integration_and_Guidelines.md`.
 
+## Dashboards & UIs
+- Supabase Studio (CLI): http://127.0.0.1:65433 — `make supa-start`.
+- Agent Zero UI: http://localhost:8080 — `make up-agents`.
+- Archon Health: http://localhost:8091/healthz — `make up-agents`.
+- Hi‑RAG v2 Geometry Console (GPU): http://localhost:${HIRAG_V2_GPU_HOST_PORT:-8087}/geometry/ — `make up`.
+- TensorZero UI: http://localhost:4000; Gateway: http://localhost:3030 — `make up-tensorzero`.
+- Jellyfin: http://localhost:8096 — `make -C pmoves up-jellyfin-ai`.
+- Jellyfin API Dashboard: http://localhost:8400; Gateway: http://localhost:8300 — `make -C pmoves up-jellyfin-ai`.
+- Open Notebook: http://localhost:8503 — `make -C pmoves notebook-up`.
+- Invidious: http://127.0.0.1:3000 (companion http://127.0.0.1:8282) — `make -C pmoves up-invidious`.
+- n8n: http://localhost:5678 — `make -C pmoves up-n8n`.
+
+### Default access and operator credentials
+- Supabase boot operator is provisioned by `make supabase-boot-user` and written to `pmoves/env.shared` / `pmoves/.env.local`:
+  - `SUPABASE_BOOT_USER_EMAIL`, `SUPABASE_BOOT_USER_PASSWORD`, `SUPABASE_BOOT_USER_JWT`.
+  - The console auto‑auths via `NEXT_PUBLIC_SUPABASE_BOOT_USER_JWT`; to sign in manually, copy the email/password from your env files.
+- Jellyfin admin/API: confirm user and key in the Jellyfin UI; keep `JELLYFIN_API_KEY` and `JELLYFIN_USER_ID` in sync in `pmoves/env.shared` or `pmoves/env.jellyfin-ai` if rotated.
+
 Supabase (Full)
 - Recommended: Supabase CLI (see `docs/SUPABASE_FULL.md`). Or use `docker-compose.supabase.yml` with `./scripts/pmoves.ps1 up-fullsupabase`.
 - Realtime demo: `http://localhost:8090/static/realtime.html` (subscribe to `studio_board`, `it_errors`; upload avatar and assign to a row).

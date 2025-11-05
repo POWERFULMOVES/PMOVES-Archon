@@ -49,7 +49,7 @@ Optional secret bundle:
 - Start data + workers profile (v2 gateway) after the Supabase CLI stack is online:
   - `make up`
 - Wait ~15–30s for services to become ready. If you see `service missing` errors (Neo4j, Realtime, etc.), confirm the CLI stack is running and that `make up-external` completed successfully for Wger/Firefly/Open Notebook/Jellyfin.
-- TensorZero/Ollama embeddings: for hi‑rag v2 smokes run `make -C pmoves up-tensorzero` (brings up the ClickHouse store, gateway, and UI) and ensure `pmoves-ollama` has `embeddinggemma:latest` plus `embeddinggemma:300m` pulled. The gateway exposes an OpenAI-compatible `/v1/embeddings` endpoint that the smoketests now hit before falling back to CPU sentence-transformers. citeturn0search0turn0search2
+- TensorZero/Ollama embeddings: for hi‑rag v2 smokes run `make -C pmoves up-tensorzero` (starts ClickHouse, gateway/UI, and `pmoves-ollama`). The sidecar automatically serves `embeddinggemma:latest`/`300m`; if you host embeddings elsewhere, point `TENSORZERO_BASE_URL` at that gateway before running smoketests. The gateway exposes an OpenAI-compatible `/v1/embeddings` endpoint that smokes hit before falling back to CPU sentence-transformers. citeturn0search0turn0search2
 
 Useful health checks:
 - Presign: `curl http://localhost:8088/healthz`

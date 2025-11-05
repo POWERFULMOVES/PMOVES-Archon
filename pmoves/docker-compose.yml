@@ -630,7 +630,7 @@ services:
     restart: unless-stopped
     env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
     environment:
-      JELLYFIN_URL: http://jellyfin-ai:8096
+      JELLYFIN_URL: ${JELLYFIN_INTERNAL_URL:-http://cataclysm-jellyfin:8096}
       SUPA_REST_URL: ${SUPA_REST_INTERNAL_URL:-${SUPA_REST_URL:-http://postgrest:3000}}
     ports: ["8093:8093"]
     profiles: ["orchestration"]
@@ -703,6 +703,7 @@ services:
         condition: service_started
     ports: ["4000:4000"]
     profiles: ["tensorzero"]
+    networks: [pmoves]
   invidious-db:
     image: postgres:14
     restart: unless-stopped

@@ -57,7 +57,7 @@
 ### UI Quickstart & Links
 - Supabase Studio → http://127.0.0.1:65433 (`make -C pmoves supa-start`; status via `make -C pmoves supa-status`).
 - Notebook Workbench → http://localhost:3000/notebook-workbench (`npm run dev` in `pmoves/ui`; the launcher now layers `env.shared` + `.env.local` automatically; smoke with `make -C pmoves notebook-workbench-smoke`).
-- TensorZero Playground → http://localhost:4000 (`make -C pmoves up-tensorzero`; gateway API exposed on http://localhost:3030).
+- TensorZero Playground → http://localhost:4000 (`make -C pmoves up-tensorzero`; this target now launches ClickHouse, the gateway/UI, and `pmoves-ollama` so embeddings resolve on http://localhost:3030). If you’re on Jetson/arm64 or delegating inference, point `TENSORZERO_BASE_URL` at a remote gateway instead.
 - Firefly Finance → http://localhost:8082 (`make -C pmoves up-external-firefly`; configure `FIREFLY_*` secrets).
 - Wger Coach Portal → http://localhost:8000 (`make -C pmoves up-external-wger`; brand defaults apply automatically).
 - Jellyfin Media Hub → http://localhost:8096 (`make -C pmoves up-external-jellyfin`; run `make -C pmoves jellyfin-folders` and drop media into `pmoves/data/jellyfin` if you need the legacy stack).

@@ -264,7 +264,7 @@ up-invidious:
 # TensorZero model gateway stack
 .PHONY: up-tensorzero down-tensorzero
 up-tensorzero:
-	docker compose -p $(PROJECT) --profile tensorzero up -d tensorzero-clickhouse tensorzero-gateway tensorzero-ui
+	docker compose -p $(PROJECT) --profile tensorzero up -d tensorzero-clickhouse tensorzero-gateway tensorzero-ui pmoves-ollama
 
 down-tensorzero:
 	docker compose -p $(PROJECT) --profile tensorzero stop tensorzero-clickhouse tensorzero-gateway tensorzero-ui >/dev/null 2>&1 || true
@@ -1275,7 +1275,8 @@ jellyfin-smoke:
 	     done; \
 	   fi; \
 	   if [ -z "$$APIKEY" ]; then echo "  ↳ missing JELLYFIN_API_KEY for fallback"; exit 1; fi; \
-	   FALLBACK_ID=$$(curl -s "http://localhost:9096/Items?Recursive=true&IncludeItemTypes=Video,Audio&SortBy=DateCreated&SortOrder=Descending&Limit=1&api_key=$$APIKEY" | jq -r '.Items[0].Id // empty'); \
+   FALLBACK_BASE="$${JELLYFIN_PUBLIC_BASE_URL:-http://localhost:8096}"; \
+   FALLBACK_ID=$$(curl -s "$$FALLBACK_BASE/Items?Recursive=true&IncludeItemTypes=Video,Audio&SortBy=DateCreated&SortOrder=Descending&Limit=1&api_key=$$APIKEY" | jq -r '.Items[0].Id // empty'); \
 	   if [ -z "$$FALLBACK_ID" ]; then echo "  ↳ unable to locate fallback Jellyfin item"; exit 1; fi; \
 	   echo "  ↳ linking $$VID to fallback item $$FALLBACK_ID"; \
 	   curl -sS -X POST http://localhost:8093/jellyfin/link -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"jellyfin_item_id\":\"$$FALLBACK_ID\"}" | jq -e '.ok==true' >/dev/null || { echo "  ↳ fallback link failed"; exit 1; }; \
