@@ -47,6 +47,20 @@ Quick Links (local default)
 - Console (Archon UI): http://localhost:3737  • Archon API: http://localhost:8091/healthz
 - Grafana: http://localhost:3002 • Prometheus: http://localhost:9090
 
+## What Should Be Running Now
+- Supabase CLI stack (REST on 65421) — check: `make -C pmoves supa-status`.
+- Hi‑RAG v2 CPU/GPU — `curl http://localhost:8086/hirag/admin/stats` and `:8087` return 200.
+- Invidious on 127.0.0.1:3005 — `curl http://127.0.0.1:3005/api/v1/stats` 200.
+- Channel Monitor on :8097 — `GET /healthz`, `GET /api/monitor/status`, `GET /api/monitor/stats` all 200.
+- Archon API/UI — API `GET http://localhost:8091/healthz` 200; UI on http://localhost:3737.
+- Monitoring — Prometheus http://localhost:9090, Grafana http://localhost:3002; cAdvisor present when `MON_INCLUDE_CADVISOR=true`.
+- Agent Zero UI — http://localhost:8081 (headless API still usable without UI).
+- Optional stacks: n8n http://localhost:5678, Jellyfin http://localhost:8096, Notebook http://localhost:8503.
+
+Quick checks
+- `make -C pmoves smoke` (core), `make -C pmoves smoke-gpu` (rerank when re‑enabled).
+- `make -C pmoves monitoring-report` summarises service probes and recent errors.
+
 Decisions
 - Single‑env: Supabase-only object storage; standalone MinIO is stopped by default.
 - YouTube ingest: Force offline transcription provider during smoke when SABR is detected.

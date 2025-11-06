@@ -3,6 +3,13 @@
 Note: Consolidated plan index at pmoves/docs/PMOVES.AI PLANS/README_DOCS_INDEX.md.
 _Last updated: 2025-11-06_
 
+## Stabilization Sprint — Running Baseline (Nov 6, 2025)
+- Supabase REST exposes `public, pmoves_core, pmoves_kb` (CLI stack up).
+- Hi‑RAG v2 CPU/GPU healthy; health path `/hirag/admin/stats`.
+- Channel Monitor GETs available: `/healthz`, `/api/monitor/status`, `/api/monitor/stats`.
+- Monitoring: Prometheus, Grafana, Blackbox up; cAdvisor gated by `MON_INCLUDE_CADVISOR`.
+- Archon API/UI up; Agent Zero UI up; NATS echo diagnostics available.
+
 ## Immediate
 
 ### Completed on 2025-10-19
@@ -34,6 +41,7 @@ Next 48 hours
 - [ ] GPU rerank: re‑enable and add a targeted integration smoke (batch==1 guarded path); capture stats in evidence.
 - [ ] Document Hi‑RAG health path (`/hirag/admin/stats`) in service README and smoketest docs.
 - [ ] Update docs index with Supabase‑only storage policy and presign health check.
+ - [ ] Real Data Bring‑Up: run `make -C pmoves seed-repo-docs index-repo-docs`, then set `YT_SMOKE_STRICT_JUMP=true` by default.
 
 ### 1. Finish the M2 Automation Loop
 - [ ] Execute the Supabase → Agent Zero → Discord activation checklist (`pmoves/docs/SUPABASE_DISCORD_AUTOMATION.md`) and log validation timestamps in the runbook.
