@@ -492,7 +492,7 @@ up-agents-published: ## Start Agents (NATS, Agent Zero, Archon, etc.) using publ
 
 .PHONY: up-agents-ui
 up-agents-ui: ## Start Agents APIs + UIs (NATS, Agent Zero, Archon, Archon UI, DeepResearch)
-	@docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.agents.images.yml --profile agents up -d nats agent-zero archon archon-ui mesh-agent deepresearch publisher-discord
+	@docker compose -p $(PROJECT) -f docker-compose.yml -f docker-compose.agents.images.yml --profile agents up -d nats agent-zero archon archon-ui mesh-agent deepresearch supaserch publisher-discord
 	@echo "✔ Agents (APIs + UIs) started. Open Agent Zero UI: $${NEXT_PUBLIC_AGENT_ZERO_UI_URL:-http://localhost:8081}  Archon UI: $${NEXT_PUBLIC_ARCHON_UI_URL:-http://localhost:3737}"
 
 .PHONY: a0-mcp-seed
@@ -516,6 +516,20 @@ deepresearch-health: ## Check DeepResearch health endpoint (200 expected)
 	@code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8098/healthz || true); \
 	if [ "$$code" != "200" ]; then echo "✖ deepresearch /healthz => $$code" && exit 1; fi; \
 	echo "✔ deepresearch /healthz 200"
+
+.PHONY: supaserch-health
+supaserch-health: ## Check SupaSerch health endpoint (200 expected)
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${SUPASERCH_HOST_PORT:-8099}/healthz || true); \
+	if [ "$$code" != "200" ]; then echo "✖ supaserch /healthz => $$code" && exit 1; fi; \
+	echo "✔ supaserch /healthz 200"
+
+.PHONY: build-push-supaserch
+build-push-supaserch: buildx-setup docker-login ## Build+push SupaSerch multi-arch image
+	@ctx=$$(pwd); \
+	 df=$$ctx/services/supaserch/Dockerfile; \
+	 img=$(REGISTRY)/$(IMAGE_NAMESPACE)/pmoves-supaserch:$(IMAGE_TAG); \
+	 echo "→ Building $$img"; \
+	 docker buildx build --platform $(TARGET_PLATFORMS) -f "$$df" -t "$$img" "$$ctx" --push
 
 .PHONY: deepresearch-smoke
 deepresearch-smoke: ## Publish a sample DeepResearch request and wait for a result (requires worker running)
@@ -1809,8 +1823,8 @@ build-push-archon-ui: buildx-setup docker-login ## Build+push Archon UI multi-ar
 	 docker buildx build --platform $(TARGET_PLATFORMS) -f "$$df" -t "$$img" "$$ctx" --push
 
 build-push-deepresearch: buildx-setup docker-login ## Build+push DeepResearch worker multi-arch image
-	@ctx=$$(pwd)/pmoves/services; \
-	 df=$$ctx/deepresearch/Dockerfile; \
+	@ctx=$$(pwd); \
+	 df=$$ctx/services/deepresearch/Dockerfile; \
 	 img=$(REGISTRY)/$(IMAGE_NAMESPACE)/pmoves-deepresearch:$(IMAGE_TAG); \
 	 echo "→ Building $$img"; \
 	 docker buildx build --platform $(TARGET_PLATFORMS) -f "$$df" -t "$$img" "$$ctx" --push
