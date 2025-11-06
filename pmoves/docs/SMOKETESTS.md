@@ -597,4 +597,7 @@ make -C pmoves archon-ui-smoke
 
 # DeepResearch health (worker)
 make -C pmoves deepresearch-health
+
+# DeepResearch NATS smoke (requires worker running)
+make -C pmoves deepresearch-smoke
 ```

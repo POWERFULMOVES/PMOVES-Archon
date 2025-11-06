@@ -517,6 +517,10 @@ deepresearch-health: ## Check DeepResearch health endpoint (200 expected)
 	if [ "$$code" != "200" ]; then echo "✖ deepresearch /healthz => $$code" && exit 1; fi; \
 	echo "✔ deepresearch /healthz 200"
 
+.PHONY: deepresearch-smoke
+deepresearch-smoke: ## Publish a sample DeepResearch request and wait for a result (requires worker running)
+	@$(LOAD_ENV_SHARED) python3 tools/deepresearch_smoke.py --timeout $${DEEPRESEARCH_SMOKE_TIMEOUT:-30}
+
 .PHONY: agents-integrations-clone agents-integrations-pull build-agents-integrations up-agents-integrations
 agents-integrations-clone: ## Clone your forks into $(INTEGRATIONS_WORKSPACE)
 	@mkdir -p "$(INTEGRATIONS_WORKSPACE)" && cd "$(INTEGRATIONS_WORKSPACE)"; \
