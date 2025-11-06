@@ -1783,3 +1783,34 @@ yt-integrations-push: ## Push fork-built image to GHCR (requires docker login gh
 
 yt-image-local: ## Build pmoves-yt locally from services/pmoves-yt with optional YTDLP_VERSION
 	@bash -lc 'cd services/pmoves-yt && docker build --build-arg YTDLP_VERSION="$${YTDLP_VERSION:-}" -t ghcr.io/powerfulmoves/pmoves-yt:local .'
+# -------- Multi-arch builds (local) --------
+.PHONY: buildx-setup docker-login build-push-archon-ui build-push-deepresearch
+
+REGISTRY ?= docker.io
+TARGET_PLATFORMS ?= linux/amd64,linux/arm64
+IMAGE_NAMESPACE ?= $(DOCKER_USERNAME)
+IMAGE_TAG ?= pmoves-latest
+
+buildx-setup: ## Enable QEMU + buildx for multi-arch builds
+	@docker run --privileged --rm tonistiigi/binfmt --install all >/dev/null 2>&1 || true
+	@docker buildx create --use --name pmoves-builder >/dev/null 2>&1 || docker buildx use pmoves-builder
+	@echo "✔ buildx ready (platforms: $(TARGET_PLATFORMS))"
+
+docker-login: ## Login to registry (set DOCKER_USERNAME/DOCKER_PASS and optionally REGISTRY)
+	@if [ -z "$$DOCKER_USERNAME" ] || [ -z "$$DOCKER_PASS" ]; then echo "✖ Set DOCKER_USERNAME and DOCKER_PASS" && exit 1; fi
+	@echo "$$DOCKER_PASS" | docker login -u "$$DOCKER_USERNAME" --password-stdin $(REGISTRY)
+	@echo "✔ Logged in to $(REGISTRY) as $$DOCKER_USERNAME"
+
+build-push-archon-ui: buildx-setup docker-login ## Build+push Archon UI multi-arch image
+	@ctx=$${ARCHON_UI_BUILD_CONTEXT:-$$(pwd)/../integrations-workspace/PMOVES-Archon/archon-ui-main}; \
+	 df=$${ARCHON_UI_DOCKERFILE:-$$ctx/Dockerfile}; \
+	 img=$(REGISTRY)/$(IMAGE_NAMESPACE)/pmoves-archon-ui:$(IMAGE_TAG); \
+	 echo "→ Building $$img from $$ctx"; \
+	 docker buildx build --platform $(TARGET_PLATFORMS) -f "$$df" -t "$$img" "$$ctx" --push
+
+build-push-deepresearch: buildx-setup docker-login ## Build+push DeepResearch worker multi-arch image
+	@ctx=$$(pwd)/pmoves/services; \
+	 df=$$ctx/deepresearch/Dockerfile; \
+	 img=$(REGISTRY)/$(IMAGE_NAMESPACE)/pmoves-deepresearch:$(IMAGE_TAG); \
+	 echo "→ Building $$img"; \
+	 docker buildx build --platform $(TARGET_PLATFORMS) -f "$$df" -t "$$img" "$$ctx" --push
