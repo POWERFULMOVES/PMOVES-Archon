@@ -33,6 +33,13 @@ Defaults
 - Meilisearch lexical: enabled by default for v2‑GPU (compose sets `USE_MEILI=true`). CPU v2 honors `USE_MEILI` from env.
 - v2‑GPU reranker default: `RERANK_MODEL=Qwen/Qwen3-Reranker-4B` (overridable with env).
 - CUDA compatibility: Blackwell‑class GPUs (e.g., RTX 5090) require PyTorch wheels built with CUDA 12.8+ (`cu128`). The GPU compose target now defaults to `TORCH_CUDA_VERSION=cu128` and installs `torch==2.9.0` with those kernels. Rebuild the image (`docker compose build hi-rag-gateway-v2-gpu`) after pulling these changes so the container picks up the new runtime.
+
+Stable GHCR image (no local build)
+- If you prefer the published, prebuilt image (known‑good CUDA + Torch combo), use the override file:
+  ```bash
+  docker compose -p pmoves -f docker-compose.yml -f docker-compose.gpu-image.yml --profile gpu up -d hi-rag-gateway-v2-gpu
+  ```
+- Or set `HIRAG_V2_GPU_IMAGE=ghcr.io/cataclysm-studios-inc/hi-rag-gateway-v2-gpu:cu128-py310-stable` in `pmoves/env.shared` and run `make -C pmoves up-gpu-gateways`.
 - Embedding pipeline: services now try TensorZero first (`TENSORZERO_BASE_URL`, defaulting to `http://tensorzero-gateway:3000`) using the bundled Ollama-backed `embeddinggemma:latest` / `embeddinggemma:300m` models. Ensure `make up-tensorzero` and `ollama pull embeddinggemma:latest` (requires Ollama ≥ 0.11.10) so the gateway can answer GPU queries without falling back to `sentence-transformers/all-MiniLM-L6-v2`. citeturn0search0turn0search2
 
 Neo4j warm dictionary
