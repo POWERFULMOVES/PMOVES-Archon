@@ -517,6 +517,18 @@ deepresearch-health: ## Check DeepResearch health endpoint (200 expected)
 	if [ "$$code" != "200" ]; then echo "✖ deepresearch /healthz => $$code" && exit 1; fi; \
 	echo "✔ deepresearch /healthz 200"
 
+.PHONY: up-nats-echo nats-echo-logs deepresearch-diag
+up-nats-echo: ## Start NATS echo subscribers for request/result subjects
+	@docker compose -p $(PROJECT) up -d nats-echo-req nats-echo-res
+	@echo "✔ nats-echo subscribers started"
+
+nats-echo-logs: ## Tail logs from NATS echo subscribers
+	@docker compose -p $(PROJECT) logs -n 40 nats-echo-req nats-echo-res
+
+deepresearch-diag: ## Publish a diagnostic DeepResearch request via worker and show echo logs
+	@curl -s -X POST http://localhost:8098/diag/publish -H 'content-type: application/json' -d '{"query":"diag smoke","mode":"local","correlation_id":"diag-echo"}' | jq .
+	@$(MAKE) nats-echo-logs
+
 .PHONY: supaserch-health
 supaserch-health: ## Check SupaSerch health endpoint (200 expected)
 	@code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${SUPASERCH_HOST_PORT:-8099}/healthz || true); \
@@ -533,7 +545,13 @@ build-push-supaserch: buildx-setup docker-login ## Build+push SupaSerch multi-ar
 
 .PHONY: deepresearch-smoke
 deepresearch-smoke: ## Publish a sample DeepResearch request and wait for a result (requires worker running)
-	@$(LOAD_ENV_SHARED) python3 tools/deepresearch_smoke.py --timeout $${DEEPRESEARCH_SMOKE_TIMEOUT:-30}
+	@ENV_FILE="$(CURDIR)/env.shared" bash -lc '. ./scripts/with-env.sh "$$ENV_FILE" && python3 tools/deepresearch_smoke.py --nats nats://localhost:4222 --timeout $${DEEPRESEARCH_SMOKE_TIMEOUT:-60}'
+
+.PHONY: deepresearch-smoke-in-net
+deepresearch-smoke-in-net: ## Run DeepResearch NATS smoke inside the compose network (reliable visibility)
+	@echo "[DeepResearch] In-network NATS smoke (compose cp+exec)"
+	@docker compose -p $(PROJECT) cp tools/dr_smoke_in_net.py deepresearch:/tmp/dr_smoke_in_net.py >/dev/null
+	@docker compose -p $(PROJECT) exec -T deepresearch python /tmp/dr_smoke_in_net.py
 
 .PHONY: agents-integrations-clone agents-integrations-pull build-agents-integrations up-agents-integrations
 agents-integrations-clone: ## Clone your forks into $(INTEGRATIONS_WORKSPACE)
