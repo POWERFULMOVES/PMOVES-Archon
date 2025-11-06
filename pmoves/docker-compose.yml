@@ -651,8 +651,10 @@ services:
       - OPEN_NOTEBOOK_API_URL=${OPEN_NOTEBOOK_API_URL}
       - OPEN_NOTEBOOK_API_TOKEN=${OPEN_NOTEBOOK_API_TOKEN}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEEPRESEARCH_HEALTH_PORT=${DEEPRESEARCH_HEALTH_PORT:-8098}
     depends_on: [nats]
     profiles: ["agents"]
+    ports: ["8098:8098"]
     networks: [pmoves]
 
   publisher-discord:
