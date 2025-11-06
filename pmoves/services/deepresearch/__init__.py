@@ -1,3 +1,8 @@
+"""Deep research parsing helpers."""
+
+from .parser import parse_model_output, prepare_result
+
+__all__ = ["parse_model_output", "prepare_result"]
 """DeepResearch worker utilities."""
 
 from .worker import _extract_message_content, _run_openrouter
