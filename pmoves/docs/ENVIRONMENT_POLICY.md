@@ -18,6 +18,25 @@
 - Restart UI dev: `make -C pmoves ui-dev-stop && make -C pmoves ui-dev-start`.
 - One‑click Agents (APIs+UIs): `make -C pmoves up-agents-ui`.
 
+## Tailscale (optional)
+
+You can auto-join a tailnet during `make first-run` by setting the following in `pmoves/env.shared`:
+
+```
+TAILSCALE_AUTO_JOIN=true
+TAILSCALE_TAGS=tag:pmoves,tag:homelab
+# Provide a key via either of these
+TAILSCALE_AUTHKEY=tskey-...
+TAILSCALE_AUTHKEY_FILE=CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/tailscale/tailscale_authkey.txt
+```
+
+- Save/update the key interactively: `make -C pmoves tailscale-save-key` (or pass `TAILSCALE_AUTHKEY=… make -C pmoves tailscale-save-key`).
+- Join manually anytime: `make -C pmoves tailscale-join`.
+- Force re-auth: `make -C pmoves tailscale-rejoin`.
+- Status: `make -C pmoves tailscale-status`.
+
+When Tailnet Lock is enabled, the init script attempts to sign the key (configurable via `TAILSCALE_SIGN_AUTHKEY`). If a new signed key is returned, it is written back to the secret file with 0600 permissions.
+
 ## PostgREST vs Supabase REST
 - Preferred: the Supabase CLI REST at `http://host.docker.internal:65421/rest/v1`.
 - Historical note: a standalone PostgREST (3010/3011) previously served the `pmoves_core` schema via `Accept-Profile` because Supabase REST was only exposing `public`.

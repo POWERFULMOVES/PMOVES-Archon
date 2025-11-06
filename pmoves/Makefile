@@ -311,7 +311,42 @@ monitoring-smoke: up-monitoring ## Confirm blackbox exporter is scraping endpoin
 
 .PHONY: monitoring-report
 monitoring-report: ## Print a quick Prometheus summary (targets, failures, top CPU containers)
-	@python3 tools/monitoring_report.py --prom http://localhost:$${PROMETHEUS_HOST_PORT:-9090}
+		@python3 tools/monitoring_report.py --prom http://localhost:$${PROMETHEUS_HOST_PORT:-9090}
+
+# -------- Tailscale helpers --------
+.PHONY: tailscale-save-key tailscale-join tailscale-rejoin tailscale-status tailscale-logout
+
+TAILSCALE_KEY_FILE?=$(abspath $(CURDIR)/../CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/tailscale/tailscale_authkey.txt)
+
+tailscale-save-key: ## Save/update Tailscale auth key to CATACLYSM_STUDIOS_INC/.../tailscale_authkey.txt (or TAILSCALE_KEY_FILE)
+	@mkdir -p $(dir $(TAILSCALE_KEY_FILE))
+	@if [ -n "$$TAILSCALE_AUTHKEY" ]; then \
+	  printf "%s" "$$TAILSCALE_AUTHKEY" > "$(TAILSCALE_KEY_FILE)"; \
+	else \
+	  stty -echo 2>/dev/null || true; \
+	  printf "Enter Tailscale auth key: "; \
+	  read KEY; \
+	  stty echo 2>/dev/null || true; printf "\n"; \
+	  printf "%s" "$$KEY" > "$(TAILSCALE_KEY_FILE)"; \
+	fi
+	@chmod 600 "$(TAILSCALE_KEY_FILE)" 2>/dev/null || true
+	@echo "✔ Saved auth key to $(TAILSCALE_KEY_FILE)"
+
+tailscale-join: ## Join tailnet using saved key and env defaults
+	@ENV_FILE="$(CURDIR)/env.shared" bash -lc '. ./scripts/with-env.sh "$(CURDIR)/env.shared" && \
+	  export TAILSCALE_AUTHKEY_FILE="$(TAILSCALE_KEY_FILE)" TAILSCALE_AUTO_JOIN=true; \
+	  bash ./scripts/tailscale_brand_init.sh'
+
+tailscale-rejoin: ## Force re-auth join
+	@ENV_FILE="$(CURDIR)/env.shared" bash -lc '. ./scripts/with-env.sh "$(CURDIR)/env.shared" && \
+	  export TAILSCALE_AUTHKEY_FILE="$(TAILSCALE_KEY_FILE)" TAILSCALE_FORCE_REAUTH=true TAILSCALE_AUTO_JOIN=true; \
+	  bash ./scripts/tailscale_brand_init.sh'
+
+tailscale-status: ## Show tailscale status JSON (best effort)
+	@tailscale status --json || tailscale status || true
+
+tailscale-logout: ## Log out of tailnet on this host
+	@tailscale logout || true
 
 # -------- Brand defaults (branded env + first-run resources) --------
 .PHONY: brand-defaults brand-verify
@@ -1235,9 +1270,16 @@ bootstrap:
 
 .PHONY: first-run
 first-run: ensure-env-shared ## One-shot env bootstrap, seed data, start full stack, and run smokes
-	@echo "→ Bootstrapping environment registry values..."
-	@$(MAKE) bootstrap
-	@echo "→ Ensuring Supabase backend is running..."
+		@echo "→ Bootstrapping environment registry values..."
+		@$(MAKE) bootstrap
+		@echo "→ Optional: joining Tailnet if enabled (TAILSCALE_AUTO_JOIN=true)..."
+		@bash -lc '. ./scripts/with-env.sh "$(CURDIR)/env.shared" >/dev/null 2>&1 || true; \
+		  if [ "$$TAILSCALE_AUTO_JOIN" = "true" ] || [ "$$TAILSCALE_AUTO_JOIN" = "1" ]; then \
+		    $(MAKE) tailscale-join || true; \
+		  else \
+		    echo "   • tailscale auto-join disabled"; \
+		  fi'
+		@echo "→ Ensuring Supabase backend is running..."
 	@if [ "$(SUPA_PROVIDER)" = "cli" ]; then \
 		if docker ps --format '{{.Names}}' | grep -q '^supabase_db_'; then \
 			echo "   • Supabase CLI stack already running."; \
