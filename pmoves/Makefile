@@ -511,6 +511,12 @@ archon-ui-smoke: ## Verify Archon API and UI endpoints are reachable (200)
 	if [ "$$ui" != "200" ]; then echo "✖ archon UI / => $$ui" && exit 1; fi; \
 	echo "✔ archon API/ UI healthy (API $$api, UI $$ui)"
 
+.PHONY: deepresearch-health
+deepresearch-health: ## Check DeepResearch health endpoint (200 expected)
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8098/healthz || true); \
+	if [ "$$code" != "200" ]; then echo "✖ deepresearch /healthz => $$code" && exit 1; fi; \
+	echo "✔ deepresearch /healthz 200"
+
 .PHONY: agents-integrations-clone agents-integrations-pull build-agents-integrations up-agents-integrations
 agents-integrations-clone: ## Clone your forks into $(INTEGRATIONS_WORKSPACE)
 	@mkdir -p "$(INTEGRATIONS_WORKSPACE)" && cd "$(INTEGRATIONS_WORKSPACE)"; \
