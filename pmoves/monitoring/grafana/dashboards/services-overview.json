@@ -1,7 +1,7 @@
 {
   "title": "PMOVES Services Overview",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "panels": [
     {
       "type": "stat",
@@ -61,15 +61,30 @@
       "type": "logs",
       "title": "Recent Logs (Loki)",
       "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true
-      },
+      "options": { "dedupStrategy": "none", "enableLogDetails": true },
+      "targets": [ { "expr": "{job=\"docker\"}" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Channel Monitor: Status Updates (5m)",
+      "gridPos": { "x": 0, "y": 22, "w": 6, "h": 4 },
+      "targets": [ { "expr": "sum(increase(channel_monitor_status_updates_total[5m]))" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Channel Monitor: Checks (5m)",
+      "gridPos": { "x": 6, "y": 22, "w": 6, "h": 4 },
+      "targets": [ { "expr": "sum(increase(channel_monitor_checks_total[5m]))" } ]
+    },
+    {
+      "type": "graph",
+      "title": "Channel Monitor Activity",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "{job=\"docker\"}" }
+        { "expr": "sum by (result) (increase(channel_monitor_status_updates_total[5m]))", "legendFormat": "updates:{{result}}" },
+        { "expr": "sum by (kind) (increase(channel_monitor_checks_total[5m]))", "legendFormat": "checks:{{kind}}" }
       ]
     }
   ],
   "time": { "from": "now-6h", "to": "now" }
 }
-
