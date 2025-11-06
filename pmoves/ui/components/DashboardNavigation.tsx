@@ -5,16 +5,22 @@ import Link from 'next/link';
 const NAV_LINKS: Array<{ href: string; label: string; key: NavKey }> = [
   { href: '/dashboard/ingest', label: 'Ingestion', key: 'ingest' },
   { href: '/dashboard/videos', label: 'Video reviews', key: 'videos' },
+  { href: '/dashboard/monitor', label: 'Monitor', key: 'monitor' },
+  { href: '/dashboard/notebook', label: 'Notebook', key: 'notebook' },
+  { href: '/dashboard/chat', label: 'Chat', key: 'chat' },
   { href: '/dashboard/services', label: 'Services', key: 'services' },
 ];
 
-export type NavKey = 'ingest' | 'videos' | 'services';
+export type NavKey = 'ingest' | 'videos' | 'monitor' | 'notebook' | 'chat' | 'services';
 
 interface DashboardNavigationProps {
   active: NavKey;
 }
 
 export function DashboardNavigation({ active }: DashboardNavigationProps) {
+  const singleUser =
+    String(process.env.NEXT_PUBLIC_SINGLE_USER_MODE || process.env.SINGLE_USER_MODE || '1') ===
+    '1';
   return (
     <nav className="flex flex-wrap items-center gap-2">
       {NAV_LINKS.map((link) => {
@@ -33,6 +39,11 @@ export function DashboardNavigation({ active }: DashboardNavigationProps) {
           </Link>
         );
       })}
+      {singleUser ? (
+        <span className="ml-2 rounded-full border border-emerald-500 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+          Owner mode
+        </span>
+      ) : null}
     </nav>
   );
 }

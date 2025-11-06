@@ -70,7 +70,12 @@ MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SEC
 MINIO_SECURE = (os.environ.get("MINIO_SECURE","false").lower() == "true")
 DEFAULT_BUCKET = os.environ.get("YT_BUCKET","assets")
 DEFAULT_NAMESPACE = os.environ.get("INDEXER_NAMESPACE","pmoves")
-SUPA = os.environ.get("SUPA_REST_URL","http://postgrest:3000")
+# Prefer unified Supabase REST; fall back to legacy compose PostgREST only if neither is present
+SUPA = (
+    os.environ.get("SUPABASE_REST_URL")
+    or os.environ.get("SUPA_REST_URL")
+    or "http://postgrest:3000"
+)
 SUPA_SERVICE_KEY = (
     os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     or os.environ.get("SUPABASE_SERVICE_KEY")
@@ -575,19 +580,31 @@ def _collect_video_metadata(video_id: str) -> Dict[str, Any]:
 def _should_use_invidious(exc: Exception) -> bool:
     if not (INVIDIOUS_BASE_URL or (INVIDIOUS_COMPANION_URL and INVIDIOUS_COMPANION_KEY)):
         return False
-    msg = str(exc)
+    # Allow operator to force fallback unconditionally (e.g., during SABR waves)
+    if (os.environ.get("YT_FORCE_FALLBACK", "false").lower() in {"1","true","yes","y"}):
+        return True
+    msg = (str(exc) or "").lower()
     indicators = (
-        "Requested format is not available",
-        "Sign in to confirm you're not a bot",
-        "Sign in to confirm you’re not a bot",
-        "Sign in to view this video",
-        "This video is only available on certain devices",
-        "nsig extraction failed",
+        # yt-dlp / SABR / nsig symptoms
+        "signature extraction failed",
+        "nsig",
+        "sabr streaming",
+        "missing a url",
+        # client gating
+        "player_ias",
+        "innertube",
+        # auth/throttling/region blocks
+        "sign in to confirm",
+        "sign in to view",
+        "only available on certain devices",
+        # http blocks and generic failures
+        "http error 410",
+        "http error 403",
+        "http error 429",
         "unable to rename file",
         "downloaded file is empty",
         "did not get any data blocks",
-        "Did not get any data blocks",
-        "All connection attempts failed",
+        "all connection attempts failed",
         "yt_dlp returned no info",
     )
     return any(indicator in msg for indicator in indicators)
@@ -1246,6 +1263,19 @@ def yt_transcript(body: Dict[str,Any] = Body(...)):
     if not vid: raise HTTPException(400, 'video_id required')
     ns = body.get('namespace') or DEFAULT_NAMESPACE
     audio_key = f"{base_prefix(vid)}/audio.m4a"
+    # Ensure raw.mp4 exists before attempting transcription. This triggers
+    # yt-dlp with SABR-aware fallbacks (companion/invidious) when needed.
+    try:
+        yt_url = f"https://www.youtube.com/watch?v={vid}"
+        _ = yt_download({'url': yt_url, 'namespace': ns, 'bucket': bucket})
+    except HTTPException as dl_exc:
+        # If download still fails, continue to ffmpeg-whisper which may be
+        # able to transcribe from an existing raw.mp4 if it was uploaded by
+        # another path; otherwise we’ll return its error below.
+        logger.warning(
+            "yt_transcript_prefetch_failed",
+            extra={"event": "yt_transcript_prefetch_failed", "video_id": vid, "error": str(dl_exc.detail) if hasattr(dl_exc, 'detail') else str(dl_exc)},
+        )
     # If audio not present, try to extract from raw.mp4 using ffmpeg-whisper
     payload = {
         'bucket': bucket,
@@ -2336,6 +2366,30 @@ def yt_emit(background_tasks: BackgroundTasks, body: Dict[str, Any] = Body(...))
     tr = _get_transcript(vid)
     text = body.get('text') or tr.get('text')
     segs = tr.get('segments') or []
+    if not (text or segs):
+        # Auto-fallback: attempt an on-demand transcript via ffmpeg-whisper, then re-check
+        try:
+            payload = {
+                'video_id': vid,
+                'namespace': ns,
+                'bucket': body.get('bucket') or DEFAULT_BUCKET,
+            }
+            # Respect configured defaults
+            if YT_TRANSCRIPT_PROVIDER:
+                payload['provider'] = YT_TRANSCRIPT_PROVIDER
+            if YT_WHISPER_MODEL:
+                payload['whisper_model'] = YT_WHISPER_MODEL
+            res = yt_transcript(payload)  # may raise HTTPException
+            # Prefer immediate result if DB is slow to reflect
+            text = body.get('text') or (res.get('text') if isinstance(res, dict) else None)
+            segs = (res.get('segments') if isinstance(res, dict) else None) or []
+            if not (text or segs):
+                tr = _get_transcript(vid)
+                text = body.get('text') or tr.get('text')
+                segs = tr.get('segments') or []
+        except HTTPException:
+            # fall through to 404 below if still missing
+            pass
     if not (text or segs):
         raise HTTPException(404, 'transcript not found; run /yt/transcript first')
     doc_id = f"yt:{vid}"

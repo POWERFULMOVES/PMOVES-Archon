@@ -27,6 +27,7 @@ async function fetchHealth(base: string) {
 
 export default async function AgentZeroPage() {
   const base = (process.env.NEXT_PUBLIC_AGENT_ZERO_URL || 'http://localhost:8080').replace(/\/$/, '');
+  const uiUrl = (process.env.NEXT_PUBLIC_AGENT_ZERO_UI_URL || 'http://localhost:8081').replace(/\/$/, '');
   const health = await fetchHealth(base);
   return (
     <main className="mx-auto max-w-3xl p-6">
@@ -55,7 +56,8 @@ export default async function AgentZeroPage() {
           <li>Broker: NATS at <code>{process.env.NATS_URL || 'nats://nats:4222'}</code> (internal)</li>
         </ul>
         <div className="mt-3 flex gap-3">
-          <a href={base} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open native UI/API</a>
+          <a href={uiUrl} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open native UI</a>
+          <a href={base} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open API root</a>
         </div>
       </section>
     </main>

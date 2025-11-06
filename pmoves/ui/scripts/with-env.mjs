@@ -9,16 +9,23 @@ import dotenv from 'dotenv';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load environment from the pmoves/ folder (not repo root)
 const pmovesRoot = path.resolve(__dirname, '..', '..');
 const uiRoot = path.resolve(__dirname, '..');
 
-const envCandidates = [
-  path.join(pmovesRoot, 'env.shared'),
-  path.join(pmovesRoot, 'env.shared.generated'),
-  path.join(pmovesRoot, '.env.generated'),
-  path.join(pmovesRoot, '.env.local'),
-  path.join(uiRoot, '.env.local'),
-];
+const singleMode = String(process.env.SINGLE_ENV_MODE || '1') === '1';
+const envCandidates = singleMode
+  ? [
+      path.join(pmovesRoot, 'env.shared'),
+      path.join(pmovesRoot, 'env.shared.generated'),
+    ]
+  : [
+      path.join(pmovesRoot, 'env.shared'),
+      path.join(pmovesRoot, 'env.shared.generated'),
+      path.join(pmovesRoot, '.env.generated'),
+      path.join(pmovesRoot, '.env.local'),
+      path.join(uiRoot, '.env.local'),
+    ];
 
 for (const file of envCandidates) {
   if (!fs.existsSync(file)) continue;

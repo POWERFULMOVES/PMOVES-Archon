@@ -39,3 +39,29 @@ This PR captures infra/app hardening completed today and a short plan to finish 
 - pmoves/docs/PMOVES.AI PLANS/ROADMAP.md — new sprint milestone
 - pmoves/monitoring/loki/local-config.yaml — 3.1‑compatible config
 
+
+### Tailscale integration & latest smoke results
+- Added optional auto-join in first-run; Makefile targets (tailscale-save-key/join/rejoin/status/logout) and mini_cli join/rejoin commands.
+- Key stored locally at CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/tailscale/tailscale_authkey.txt (0600). Not versioned.
+- ARC docs updated with overlay/admin guards section.
+
+### Current status (Nov 6, 2025)
+- Core 12-step smoke: PASS
+- Monitoring: Prometheus/Grafana/Loki/Blackbox up; quick report prints healthy probes
+- Jellyfin verify (single): PASS at http://localhost:8096
+- pmoves-yt → geometry:
+  - /yt/emit OK (chunks upserted; /hirag/upsert-batch 200; /geometry/event 200)
+  - /shape/point jump returns {detail: point not found} for p:yt:<vid>:0 after 10 retries via in-container curl; CGP reaching gateway confirmed. Follow-up: align point-id expectation or wait for async indexing.
+
+### Commands from this pass
+```
+make -C pmoves tailscale-save-key   # local only; not committed
+make -C pmoves tailscale-join
+make -C pmoves up
+make -C pmoves up-agents
+make -C pmoves up-external
+make -C pmoves up-invidious
+make -C pmoves smoke
+make -C pmoves jellyfin-verify-single
+make -C pmoves yt-emit-smoke URL=https://www.youtube.com/watch?v=jNQXAC9IVRw
+```

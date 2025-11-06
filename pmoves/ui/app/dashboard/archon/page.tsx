@@ -27,6 +27,7 @@ async function fetchHealth(base: string) {
 
 export default async function ArchonPage() {
   const base = (process.env.NEXT_PUBLIC_ARCHON_URL || 'http://localhost:8091').replace(/\/$/, '');
+  const uiUrl = (process.env.NEXT_PUBLIC_ARCHON_UI_URL || 'http://localhost:3737').replace(/\/$/, '');
   const health = await fetchHealth(base);
   return (
     <main className="mx-auto max-w-3xl p-6">
@@ -52,7 +53,9 @@ export default async function ArchonPage() {
         <p className="mb-3 text-sm text-slate-700">Edit Archon prompts in the PMOVES console or open the native API root:</p>
         <div className="flex gap-3">
           <a href="/dashboard/archon-prompts" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open prompts editor</a>
+          <a href={uiUrl} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open Archon UI</a>
           <a href={base} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open native API</a>
+          <a href={`${base}/docs`} target="_blank" rel="noreferrer" className="inline-block rounded border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400">Open API docs</a>
         </div>
       </section>
     </main>
