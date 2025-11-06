@@ -12,6 +12,8 @@ A production-ready, self-hostable orchestration mesh for creative + agent worklo
   - Channel Monitor GET probes added; Grafana dashboard updated with tiles for Archon, Channel Monitor, DeepResearch, SupaSerch.
   - YouTube ingest hardened (SABR detection broadened; offline transcript fallback). Continue pinning yt‑dlp and fallback heuristics.
   - Next: finalize Loki readiness, re‑enable GPU rerank smokes, complete Real Data Bring‑Up and enforce strict geometry jump.
+  - Agent Zero: UI port fix (80 in‑container); JetStream auto‑fallback to core NATS for resilience.
+  - DeepResearch: in‑network NATS smoke and diagnostics; echo reliability improved.
 ### M1 — Core Retrieval & Data Plane ✅
 
 - Hybrid **Hi‑RAG Gateway v2** (vector+lexical alpha, warm Neo4j dict, optional Meili, admin stats) — implemented
