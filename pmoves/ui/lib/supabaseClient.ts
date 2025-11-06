@@ -45,12 +45,13 @@ export type TypedSupabaseClient = SupabaseClient<Database>;
 
 export const createSupabaseBrowserClient = (): TypedSupabaseClient => {
   const bootJwt = resolveBootJwt();
+  const validBoot = bootJwt && !isBootJwtExpired(5);
   const client = createClient<Database>(ensureUrl(), ensureAnonKey(), {
     auth: {
-      autoRefreshToken: !bootJwt,
-      persistSession: !bootJwt,
+      autoRefreshToken: !validBoot,
+      persistSession: !validBoot,
     },
-    global: bootJwt
+    global: validBoot
       ? {
           headers: {
             Authorization: `Bearer ${bootJwt}`,
@@ -93,12 +94,13 @@ export const createSupabaseServerClient = (
   const { serviceRole = false } = options;
   const key = serviceRole ? ensureServiceRoleKey() : ensureAnonKey();
   const bootJwt = !serviceRole ? resolveBootJwt() : undefined;
+  const validBoot = bootJwt && !isBootJwtExpired(5);
   return createClient<Database>(ensureUrl(), key, {
     auth: {
-      autoRefreshToken: serviceRole ? false : !bootJwt,
+      autoRefreshToken: serviceRole ? false : !validBoot,
       persistSession: false,
     },
-    global: bootJwt
+    global: validBoot
       ? {
           headers: {
             Authorization: `Bearer ${bootJwt}`,
@@ -115,9 +117,31 @@ export const getBootJwt = (): string | undefined => resolveBootJwt();
 
 export const hasBootJwt = (): boolean => Boolean(resolveBootJwt());
 
+function decodeJwtExp(token: string | undefined): number | null {
+  try {
+    if (!token) return null;
+    const [, payload] = token.split('.') as [string, string, string];
+    const json = JSON.parse(Buffer.from(payload, 'base64').toString('utf-8')) as { exp?: number };
+    return typeof json.exp === 'number' ? json.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+export const isBootJwtExpired = (graceSeconds = 0): boolean => {
+  const exp = decodeJwtExp(resolveBootJwt());
+  if (!exp) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return now + graceSeconds >= exp;
+};
+
 export const getBootUser = async (client: TypedSupabaseClient) => {
   const bootJwt = resolveBootJwt();
   if (!bootJwt) {
+    return null;
+  }
+  // Short-circuit if obviously expired to avoid noisy loops
+  if (isBootJwtExpired(5)) {
     return null;
   }
   try {

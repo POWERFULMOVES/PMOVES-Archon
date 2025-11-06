@@ -132,8 +132,8 @@ The Jest coverage exercises the services index/detail routes and Notebook Workbe
 
 Additional headless services surfaced via the console:
 
-- Agent Zero (MCP): UI wrapper at `/dashboard/agent-zero` (reads `NEXT_PUBLIC_AGENT_ZERO_URL`, default `http://localhost:8080`). Start with `make -C pmoves up-agents`.
-- Archon (MCP): UI wrapper at `/dashboard/archon` (reads `NEXT_PUBLIC_ARCHON_URL`, default `http://localhost:8091`). Start with `make -C pmoves up-agents`.
+- Agent Zero (MCP): UI wrapper at `/dashboard/agent-zero` (reads `NEXT_PUBLIC_AGENT_ZERO_URL`, default `http://localhost:8080`). Start with `make -C pmoves up-agents`. The native Agent Zero UI runs in the upstream container; the console uses `NEXT_PUBLIC_AGENT_ZERO_UI_URL` (default `http://localhost:8081`) for the “Open native UI” link when available.
+- Archon (MCP): UI wrapper at `/dashboard/archon` (reads `NEXT_PUBLIC_ARCHON_URL`, default `http://localhost:8091`). Start with `make -C pmoves up-agents`. When using your fork via `up-agents-integrations`, the Archon front-end is exposed on `http://localhost:3737` and the console uses `NEXT_PUBLIC_ARCHON_UI_URL` to link to it (default `http://localhost:3737`).
 
 Health endpoints used for badges can be customized:
 
