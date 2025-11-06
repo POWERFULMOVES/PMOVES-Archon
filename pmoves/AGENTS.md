@@ -40,6 +40,28 @@
 - UI updates: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"` to lint the Next.js bundle and validate Supabase connectivity. Reference `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` when collecting smoke evidence.
 - Hi-RAG gateway: after touching reranker or embedding code, run `make -C pmoves smoke-gpu`. The target now pipes the validation query through `docker compose exec` so FlagEmbedding/Qwen rerankers that only accept batch size 1 still report `"used_rerank": true` (first run downloads the 4B checkpoint).
 
+## Stabilization Snapshot (Nov 6, 2025)
+- Storage unified to Supabase Storage S3 endpoint. Ensure in `pmoves/env.shared`:
+  - `MINIO_ENDPOINT=http://host.docker.internal:65421/storage/v1/s3`
+  - `MINIO_REGION=local`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` from `make -C pmoves supa-status`.
+- Invidious bound to `127.0.0.1:3005` (stats 200). Companion/HMAC keys stamped in `pmoves/.env`.
+- Hi‑RAG v2: GPU on `:8087`, CPU on `:8086`. Health path is `/hirag/admin/stats`.
+- Core smoke: PASS. GPU smoke: rerank temporarily disabled (`RERANK_ENABLE=false`) while model/runtime is validated.
+- Jellyfin: server 8096 OK; bridge 8093 OK.
+- Monitoring: Prometheus/Grafana OK; Loki config upgrade pending.
+
+### Operator quick links
+- Supabase Studio: http://127.0.0.1:65433  • REST: http://127.0.0.1:65421/rest/v1
+- Hi‑RAG v2 GPU: http://localhost:8087/hirag/admin/stats
+- Invidious: http://127.0.0.1:3005
+- Jellyfin: http://localhost:8096 • Bridge API: http://localhost:8093
+- Grafana: http://localhost:3002 • Prometheus: http://localhost:9090
+
+### Next actions
+- Finish Loki config and confirm `/ready` 200.
+- Re‑enable GPU rerank and add an integration smoke.
+- Force offline transcript provider (`YT_TRANSCRIPT_PROVIDER=qwen2-audio`) in smoketest IDs; broaden fallback detection.
+
 ### Console & Personas
 - Console dev helpers: `make -C pmoves ui-dev-start` (port 3001, auto-loads env and boot JWT), `ui-dev-stop`, and `ui-dev-logs`.
 - Personas (v5.12): `pmoves_core.personas` is created and seeded with the `Archon` persona. To reapply schema/seeds: `make -C pmoves supabase-bootstrap`. Verify with:
@@ -59,9 +81,35 @@ The console Quick Links probe Agent Zero and Archon using `/healthz` by default.
 Personas page fallback when Supabase CLI REST hides `pmoves_core`:
 
 - Start a PostgREST bound to the CLI DB: `docker compose -p pmoves up -d postgrest-cli` (host `http://localhost:3011`).
-- Set `POSTGREST_URL=http://localhost:3011` and reload `/dashboard/personas`.
+- Personas page now uses Supabase REST by default. Ensure the Supabase CLI stack is running (REST on `http://host.docker.internal:65421/rest/v1`). Only set `POSTGREST_URL=http://localhost:3011` if you explicitly bring up the legacy compose PostgREST fallback.
 
 See also: `pmoves/docs/SERVICE_HEALTH_ENDPOINTS.md`.
+
+### Agents UIs one‑click bring‑up
+
+- Published images (default):
+  - `make -C pmoves up-agents-ui` — starts NATS, Agent Zero API, Archon API, and the Archon UI. Open the UIs:
+    - Agent Zero UI: `${NEXT_PUBLIC_AGENT_ZERO_UI_URL:-http://localhost:8081}`
+    - Archon UI: `${NEXT_PUBLIC_ARCHON_UI_URL:-http://localhost:3737}`
+- From your forks (integrations workspace):
+  - `make -C pmoves agents-integrations-clone` (once)
+  - `make -C pmoves build-agents-integrations`
+  - `make -C pmoves up-agents-integrations`
+
+### Reproducible integration images (GHCR)
+
+The GHCR workflow (`.github/workflows/integrations-ghcr.yml`) builds/publishes multi‑arch images nightly and on demand for:
+
+- Agent Zero API (`pmoves-agent-zero`)
+- Archon API (`pmoves-archon`)
+- Archon UI (`pmoves-archon-ui`)
+- Open Notebook (`pmoves-open-notebook`)
+- Jellyfin (`pmoves-jellyfin`)
+- Firefly III (`pmoves-firefly-iii`)
+- Wger (`pmoves-health-wger`)
+- PMOVES.YT (`pmoves-yt`)
+
+Pin images by setting `AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `ARCHON_UI_IMAGE`, and `PMOVES_YT_IMAGE` in `pmoves/env.shared`.
 
 ## Bring-Up Sequence
 - Prefer `make first-run` to bootstrap secrets, start the Supabase CLI stack, launch core/agent/external services, seed Supabase + Neo4j + Qdrant, and run the smoketests in one shot (see `docs/FIRST_RUN.md`).
