@@ -76,7 +76,7 @@ Use the pills at the top of the ingestion, video, and services pages to move bet
    ```bash
    npm run dev
    ```
-   Visit [http://localhost:3000/notebook-workbench](http://localhost:3000/notebook-workbench) to open the workbench UI.
+   Visit [http://localhost:4482/notebook-workbench](http://localhost:4482/notebook-workbench) to open the workbench UI.
 
 5. **Connect to a thread**: paste a `thread_id` from `chat_messages` into the Thread ID input. The page subscribes to Supabase realtime channels and renders message views, group membership, and snapshot data for that thread.
 

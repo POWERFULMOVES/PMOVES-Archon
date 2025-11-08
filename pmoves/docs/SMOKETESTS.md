@@ -174,7 +174,7 @@ Prereqs: Supabase CLI stack online (`make supa-start`), env synced via `make env
    - Step 1 lints the Next.js bundle (`npm --prefix ui run lint`).
    - Step 2 loads Supabase env vars from `env.shared`/`.env.local` and hits the REST endpoint for the supplied thread ID.
 2. Review the output; non-zero exit codes signal missing env vars or REST connectivity issues. Capture the console log in PR evidence when validating UI/runtime changes.
-3. Optional manual check: `npm run dev` inside `pmoves/ui` and visit `http://localhost:3000/notebook-workbench` to interactively confirm layout edits, group management, and snapshot persistence.
+3. Optional manual check: `npm run dev` inside `pmoves/ui` and visit `http://localhost:4482/notebook-workbench` to interactively confirm layout edits, group management, and snapshot persistence.
 
 See `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` for extended workflows and troubleshooting tips.
 

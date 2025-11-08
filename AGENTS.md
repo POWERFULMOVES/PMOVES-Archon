@@ -131,7 +131,7 @@ Follow this flow before running smokes or automation. Commands run from repo roo
 
 ### UI Quickstart & Links
 - Supabase Studio: http://127.0.0.1:65433 (started via `make -C pmoves supa-start`; confirm with `make -C pmoves supa-status`).
-- Notebook Workbench: http://localhost:3000/notebook-workbench (run `npm run dev` inside `pmoves/ui`; default is single‑env mode — `pmoves/env.shared` is the source of truth; lint + REST check via `make -C pmoves notebook-workbench-smoke`).
+- Notebook Workbench: http://localhost:4482/notebook-workbench (run `npm run dev` inside `pmoves/ui`; default is single‑env mode — `pmoves/env.shared` is the source of truth; lint + REST check via `make -C pmoves notebook-workbench-smoke`).
 - TensorZero Playground: http://localhost:4000 (run `make -C pmoves up-tensorzero`; this now boots ClickHouse, the gateway/UI, and the bundled `pmoves-ollama` sidecar so `gemma_embed_local` is reachable at http://localhost:3030). Set `TENSORZERO_BASE_URL` to an external gateway if you can’t run Ollama locally (Jetson or low-power nodes).
 - Firefly Finance: http://localhost:8082 (launched with `make -C pmoves up-external-firefly`; populate `FIREFLY_*` secrets).
 - Wger Coach Portal: http://localhost:8000 (`make -C pmoves up-external-wger`; defaults apply automatically).

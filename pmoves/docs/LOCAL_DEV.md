@@ -75,7 +75,7 @@ External bundles (via `make up-external`):
 | UI | Default URL | Bring-Up Command | Notes |
 | --- | --- | --- | --- |
 | Supabase Studio | http://127.0.0.1:65433 | `make -C pmoves supa-start` *(CLI-managed)* | Requires the Supabase CLI stack; confirm status with `make -C pmoves supa-status`. |
-| Notebook Workbench (Next.js) | http://localhost:3000/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
+| Notebook Workbench (Next.js) | http://localhost:4482/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
 | Agent Zero Admin (FastAPI docs) | http://localhost:8080/docs | `make -C pmoves up` | Useful for manual message dispatch debugging; default UI badge probes `/healthz` (override with `NEXT_PUBLIC_AGENT_ZERO_HEALTH_PATH`). |
 | TensorZero Playground | http://localhost:4000 | `make -C pmoves up-tensorzero` | Brings up ClickHouse, gateway/UI, and `pmoves-ollama`. Gateway API at http://localhost:3030; set `TENSORZERO_BASE_URL` to a remote gateway if Ollama runs elsewhere. |
 | Firefly Finance | http://localhost:8082 | `make -C pmoves up-external-firefly` | Set `FIREFLY_APP_KEY`/`FIREFLY_ACCESS_TOKEN` in `pmoves/env.shared` before first login. |
@@ -186,11 +186,11 @@ If your fork’s internal port differs, adjust `AGENT_ZERO_EXTRA_ARGS` / `ARCHON
 - Prerequisites: run `make supa-start` and `make supa-status` so `pmoves/.env.local` is populated with `SUPABASE_URL`, anon key, service role key, REST URL, and realtime URL.
 - Env loading: every `npm run` script shells through `node scripts/with-env.mjs …`, layering `pmoves/env.shared`, `env.shared.generated`, `.env.generated`, `.env.local`, and `pmoves/ui/.env.local`. Update those root files (not the UI directory) when pointing the console at a different Supabase project.
 - Install dependencies: `cd pmoves/ui && npm install` (or `yarn install`).
-- Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Because the launcher preloads the root env files, no additional sourcing is required. Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
+- Dev server: `npm run dev` / `yarn dev` (default http://localhost:4482). Because the launcher preloads the root env files, no additional sourcing is required. Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
 - Other scripts: `npm run lint`, `npm run build`, `npm run start`.
 - Tests: `npm run test` (unit/component via Jest + Testing Library) and `npm run test:e2e` (Playwright smoke). Run `npx playwright install` once to download the browser engines before exercising the E2E suite.
 - Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` and `pmoves/ui/lib/supabase.ts` return typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.
-- Notebook Workbench: visit `http://localhost:3000/notebook-workbench` to manage `message_views`, view groups, and snapshots for a Supabase thread. Follow the dedicated guide at [`pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`](UI_NOTEBOOK_WORKBENCH.md) for setup steps and troubleshooting.
+- Notebook Workbench: visit `http://localhost:4482/notebook-workbench` to manage `message_views`, view groups, and snapshots for a Supabase thread. Follow the dedicated guide at [`pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`](UI_NOTEBOOK_WORKBENCH.md) for setup steps and troubleshooting.
 - Smoketest: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<thread_uuid>"` after UI changes to lint the bundle and confirm Supabase connectivity.
 - Edge auth proxy: `pmoves/ui/proxy.ts` enforces session checks for all non-public routes using the Supabase auth helper. Update its `PUBLIC_PATHS` set when adding new unauthenticated pages.
 - Security expectations: the ingestion dashboard now requires a Supabase-authenticated session. `upload_events` rows are stamped with `owner_id`, and the UI only presigns objects under `namespace/users/<owner-id>/uploads/<uuid>/`. Anonymous callers can no longer generate presigned GETs or mutate upload metadata.
