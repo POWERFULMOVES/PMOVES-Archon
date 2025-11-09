@@ -64,6 +64,7 @@ Remote inference quick switch:
 - **Compose overlay (`make supabase-up`)** — reuses the main PMOVES Postgres container while attaching Gotrue, Realtime, Storage, and Studio through `docker-compose.supabase.yml`.
 - Run `make supabase-bootstrap` after either approach to replay `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and `db/v5_12_grounded_personas.sql` into the CLI Postgres container. This keeps the CLI stack aligned with repo-owned schema changes.
 - Use `make supa-use-local` / `make supa-use-remote` to swap `.env.local` presets so services know whether to hit the CLI stack (`http://postgrest:3000`) or a hosted Supabase project (`SUPABASE_URL`, `SUPABASE_KEY`). Refresh `.env.supa.remote` with `supabase db diff` output whenever production schema drifts.
+- When you upgrade the Supabase CLI, follow the maintenance checklist in `pmoves/docs/services/supabase/README.md#6-upgrade--maintenance` and re-run `make -C pmoves smoke` afterwards to confirm downstream services still pass the 14-step harness.
 
 External bundles (via `make up-external`):
 - wger: 8000 (nginx proxy to Django; override host mapping with `WGER_ROOT_URL` when reverse-proxying)
@@ -179,6 +180,13 @@ If your fork’s internal port differs, adjust `AGENT_ZERO_EXTRA_ARGS` / `ARCHON
   - Optional: install `direnv` and copy `pmoves/.envrc.example` to `pmoves/.envrc` for auto‑loading.
 - TensorZero gateway (optional): copy `pmoves/tensorzero/config/tensorzero.toml.example` to `pmoves/tensorzero/config/tensorzero.toml`, then set `TENSORZERO_BASE_URL=http://localhost:3030` (and `TENSORZERO_API_KEY` if required). `make -C pmoves up-tensorzero` now starts ClickHouse, the gateway/UI, and `pmoves-ollama`, so the default `gemma_embed_local` route works without manual pulls. If you deploy on hardware that cannot run Ollama (Jetson, remote inference nodes), skip the sidecar and point `TENSORZERO_BASE_URL` at a remote gateway instead. Setting `LANGEXTRACT_PROVIDER=tensorzero` routes LangExtract through the gateway; populate `LANGEXTRACT_REQUEST_ID` / `LANGEXTRACT_FEEDBACK_*` variables to tag observability traces.
   - Advanced toggles: `TENSORZERO_MODEL` overrides the default chat backend, `TENSORZERO_TIMEOUT_SECONDS` adjusts request timeouts, and `TENSORZERO_STATIC_TAGS` (JSON or `key=value,key2=value2`) forwards deployment metadata as `tensorzero::tags`.
+
+### Model provider registry (Archon)
+- Archon persists model API keys and default provider choices inside Supabase so downstream agents pull credentials at runtime. Populate the registry with `uv run python pmoves/scripts/credentials/set_archon_provider.py --provider <slug> --key <api-key> [--service-type llm|embedding] [--make-default]`. Run with `--dry-run` to inspect the payload without storing secrets.
+- Provider slugs are lowercase and match Archon’s adapters (`openai`, `anthropic`, `google`, `gemini`, `groq`, `mistral`, `deepseek`, `xai`, `together`, `tensorzero`, `ollama`, etc.). Use `--service-type embedding` when registering embedding-only backends (TensorZero, Voyage, sentence-transformers proxies) so the correct default flips.
+- `--make-default` promotes the uploaded credential to the active provider for the chosen service type. Archon, Agent Zero, and Hi‑RAG v2 pull the active `llm` provider for chat/orchestration and the active `embedding` provider for rerank + retrieval tasks within a few seconds thanks to cache invalidation in the new `/api/credentials/provider` endpoint.
+- When you point `TENSORZERO_BASE_URL` at a local or remote gateway, register it once via `--provider tensorzero --service-type embedding --make-default` so Archon and Agent Zero rely on TensorZero for embeddings while keeping OpenAI (or any other slug) as the LLM default. To drive LLM traffic through TensorZero’s OpenAI-compatible route, upload the same key with `--service-type llm --make-default` and ensure `OPENAI_COMPATIBLE_BASE_URL[_LLM]` in `pmoves/env.shared` targets the gateway.
+- Keys live in the `archon_settings` table; rotate them by rerunning the helper or delete the row via `DELETE /api/credentials/<key>` if you prefer manual cleanup. After updates, rerun `make -C pmoves smoke` (or at minimum `make -C pmoves archon-ui-smoke`) to confirm the new defaults propagate through the stack.
 
 ### UI Workspace (Next.js + Supabase Platform Kit)
 

@@ -13,7 +13,7 @@ Compose
 
 Environment (selected)
 - Core: `QDRANT_URL`, `QDRANT_COLLECTION`, `SENTENCE_MODEL`, `INDEXER_NAMESPACE`, `ALPHA`
-- Rerank: `RERANK_ENABLE`, `RERANK_MODEL`, `RERANK_TOPN`, `RERANK_K`, `RERANK_FUSION`
+- Rerank: `RERANK_ENABLE`, `RERANK_MODEL`, `RERANK_TOPN`, `RERANK_K`, `RERANK_FUSION`, `RERANK_PROVIDER`, `TENSORZERO_RERANK_FUNCTION`, `TENSORZERO_RERANK_TIMEOUT`
 - Search: `USE_MEILI`, `MEILI_URL`, `MEILI_API_KEY`
 - Graph: `NEO4J_URL`, `NEO4J_USER`, `NEO4J_PASSWORD`, `GRAPH_BOOST`, `ENTITY_CACHE_TTL`, `ENTITY_CACHE_MAX`, `NEO4J_DICT_REFRESH_SEC`, `NEO4J_DICT_LIMIT`
 - Optional: `USE_OLLAMA_EMBED`, `OLLAMA_URL`, `TAILSCALE_ONLY`, `TAILSCALE_CIDRS`
@@ -33,6 +33,9 @@ Defaults
 - Meilisearch lexical: enabled by default for v2‑GPU (compose sets `USE_MEILI=true`). CPU v2 honors `USE_MEILI` from env.
 - v2‑GPU reranker default: `RERANK_MODEL=Qwen/Qwen3-Reranker-4B` (overridable with env).
 - CUDA compatibility: Blackwell‑class GPUs (e.g., RTX 5090) require PyTorch wheels built with CUDA 12.8+ (`cu128`). The GPU compose target now defaults to `TORCH_CUDA_VERSION=cu128` and installs `torch==2.9.0` with those kernels. Rebuild the image (`docker compose build hi-rag-gateway-v2-gpu`) after pulling these changes so the container picks up the new runtime.
+- Set `RERANK_PROVIDER=tensorzero` to route rerank scoring through the TensorZero gateway. Responses report `rerank_provider` so smokes can verify which backend was used.
+- Query hits now surface a `persona` object (when chunk payloads include persona metadata) for downstream UI/agent awareness.
+- `scripts/load_csv.py` now reuses the shared embedding provider cascade (TensorZero → Ollama → OpenAI-compatible → HF → SentenceTransformer) so ingestion matches runtime embeddings.
 
 Stable GHCR image (no local build)
 - If you prefer the published, prebuilt image (known‑good CUDA + Torch combo), use the override file:

@@ -88,8 +88,39 @@ When the CLI stack is active, the Makefile detects `supabase_db_<project>` conta
 | `hi-rag-gateway` logs `Configured SUPABASE_REALTIME_URL host does not resolve` | Ensure Supabase CLI is running with `--network-id pmoves-net`, and confirm `SUPABASE_REALTIME_URL=ws://host.docker.internal:65421/realtime/v1` (or another resolvable websocket host) before restarting the gateways. |
 | `Neo4jUnavailable` warnings during shape warmup | Start the data profile (`make up` or `docker compose --profile data up -d neo4j qdrant`). |
 | Need to reset CLI data | `make supa-stop` → delete the `.supabase` Docker volumes → `make supa-start` → `make supabase-bootstrap`. |
+| Supabase CLI fails to start with `no space left on device` | Stop the stack (`make supa-stop`), inspect disk usage (`docker system df`, `df -h`), free space by pruning unused images/volumes (`docker system prune -a`) or expanding the storage pool, then restart (`make supa-start`) and rerun `make supabase-bootstrap`. |
 
-## 6. References
+## 6. Upgrade & maintenance
+
+Keep the CLI aligned with upstream releases so Postgres extensions, GoTrue, and Storage stay compatible.
+
+1. **Check the current version**
+   ```bash
+   supabase --version
+   ```
+2. **Stop the local stack** to prevent mid-upgrade container restarts:
+   ```bash
+   make supa-stop
+   ```
+3. **Upgrade the CLI** using the same channel you originally installed:
+   - Homebrew: `brew upgrade supabase`
+   - npm: `npm install -g supabase`
+   - winget: `winget upgrade supabase.supabase`
+4. **Restart the services** and relink environment files:
+   ```bash
+   make supa-start
+   make supa-status   # capture fresh anon/service keys if they rotated
+   make supa-use-local
+   ```
+5. **Replay migrations/seeds** to ensure schema parity: `make supabase-bootstrap`.
+6. **Run the full smoke harness** to confirm downstream services are healthy: `make -C pmoves smoke`.
+
+### Backup reminder
+
+- Snapshot your `.supabase` Docker volumes (`docker run --rm -v supabase_db:/data busybox tar -czf /backups/supabase_db.tgz /data`) before a major upgrade when you need a rollback option.
+- After large upgrades, verify Supabase Studio loads and PostgREST returns `200` before resuming feature work.
+
+## 7. References
 
 - [Supabase CLI configuration (`config.toml` service toggles)](https://supabase.com/docs/reference/cli/config#service-options)
 - [Supabase CLI `start` command options (`-x/--exclude`)](https://supabase.com/docs/reference/cli/start#options)
