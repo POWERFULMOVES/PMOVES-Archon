@@ -15,18 +15,22 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "PMOVES .env Setup (initializing)"
 
-function Read-DotenvKeys {
+function Read-DotenvExample {
   param([string]$Path)
   if (-not (Test-Path $Path)) { return @() }
   $lines = Get-Content -Path $Path -Encoding UTF8
-  $keys = @()
+  $entries = @()
   foreach ($ln in $lines) {
     $t = $ln.Trim()
     if ($t -eq '' -or $t.StartsWith('#')) { continue }
     $eq = $t.IndexOf('=')
-    if ($eq -gt 0) { $keys += $t.Substring(0,$eq).Trim() }
+    if ($eq -lt 0) { continue }
+    $key = $t.Substring(0,$eq).Trim()
+    $value = ''
+    if ($eq + 1 -lt $t.Length) { $value = $t.Substring($eq + 1) }
+    $entries += [pscustomobject]@{ Key = $key; Default = $value }
   }
-  ($keys | Sort-Object -Unique)
+  return $entries
 }
 
 function Read-DotenvMap {
@@ -116,15 +120,18 @@ if ($From -ne 'none') {
   Pull-FromProvider -Provider $From -OutPath $generatedPath
 }
 
-$exampleKeys = Read-DotenvKeys -Path '.env.example'
+$exampleEntries = Read-DotenvExample -Path '.env.example'
 $envMap = Read-DotenvMap -Path $EnvPath
 
 $added = @()
-foreach ($key in $exampleKeys) {
+foreach ($entry in $exampleEntries) {
+  $key = $entry.Key
+  $sample = $entry.Default
   $exists = $envMap.ContainsKey($key) -and ($envMap[$key] -ne '')
   if ($exists -and -not $Force) { continue }
   $default = ''
   if ($envMap.ContainsKey($key) -and $envMap[$key] -ne '') { $default = $envMap[$key] }
+  if (-not $default -and $sample) { $default = $sample }
   if (-not $default) { $default = [Environment]::GetEnvironmentVariable($key, 'Process') }
   if (-not $default) { $default = Suggest-Default -Key $key }
 
@@ -151,11 +158,23 @@ foreach ($key in $exampleKeys) {
 if ($added.Count -eq 0) {
   Write-Host "Nothing to add; $EnvPath already covers .env.example keys." -ForegroundColor Green
 } else {
-  if (-not (Test-Path $EnvPath)) { New-Item -ItemType File -Path $EnvPath | Out-Null }
-  $content = Get-Content -Path $EnvPath -Encoding UTF8
-  $content += "# --- Added by env_setup to align with .env.example (local dev defaults) ---"
-  foreach ($pair in $added) { $content += ("{0}={1}" -f $pair.k, $pair.v) }
-  $content | Set-Content -Encoding UTF8 -Path $EnvPath
+  if (-not (Test-Path $EnvPath)) { New-Item -ItemType File -Path $EnvPath -Force | Out-Null }
+  $comment = '# --- Added by env_setup to align with .env.example (local dev defaults) ---'
+  $hasComment = $false
+  try {
+    $hasComment = Select-String -Path $EnvPath -Pattern $comment -SimpleMatch -Quiet
+  } catch {
+    $hasComment = $false
+  }
+  $needsNewline = $false
+  $item = Get-Item -LiteralPath $EnvPath -ErrorAction SilentlyContinue
+  if ($null -ne $item -and $item.Length -gt 0) {
+    $lastLine = Get-Content -Path $EnvPath -Encoding UTF8 -Tail 1
+    if ($lastLine -and $lastLine.TrimEnd() -ne '') { $needsNewline = $true }
+  }
+  if ($needsNewline) { Add-Content -Path $EnvPath -Encoding UTF8 -Value '' }
+  if (-not $hasComment) { Add-Content -Path $EnvPath -Encoding UTF8 -Value $comment }
+  foreach ($pair in $added) { Add-Content -Path $EnvPath -Encoding UTF8 -Value ("{0}={1}" -f $pair.k, $pair.v) }
   Write-Host ("Updated {0} with {1} keys." -f $EnvPath, $added.Count) -ForegroundColor Green
 }
 

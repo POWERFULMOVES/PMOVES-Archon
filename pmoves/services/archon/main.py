@@ -29,7 +29,6 @@ logger = logging.getLogger("archon.main")
 
 NATS_URL = os.environ.get("NATS_URL", "nats://nats:4222")
 PORT = int(os.environ.get("PORT", 8090))
-VENICE_DEFAULT_OPENAI_BASE = "https://api.venice.ai/api/v1"
 
 
 def _strip_rest_suffix(url: str) -> str:
@@ -96,35 +95,61 @@ def _ensure_supabase_env() -> None:
 _ensure_supabase_env()
 
 
-def _prefer_venice_openai() -> None:
-    venice_key = os.environ.get("VENICE_API_KEY")
-    if not venice_key:
-        return
-
-    venice_base = os.environ.get("VENICE_OPENAI_BASE", VENICE_DEFAULT_OPENAI_BASE)
-    targets = (
-        "OPENAI_COMPATIBLE_BASE_URL_LLM",
-        "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
-        "OPENAI_COMPATIBLE_BASE_URL_TTS",
-        "OPENAI_COMPATIBLE_BASE_URL_STT",
-    )
-
-    os.environ["OPENAI_API_BASE"] = venice_base
-    os.environ["OPENAI_COMPATIBLE_BASE_URL"] = venice_base
-    os.putenv("OPENAI_API_BASE", venice_base)
-    os.putenv("OPENAI_COMPATIBLE_BASE_URL", venice_base)
-
-    for target in targets:
-        os.environ[target] = venice_base
-        os.putenv(target, venice_base)
-
-    os.environ.setdefault("OPENAI_API_KEY", venice_key)
-    logger.info(
-        "Venice OpenAI endpoint active: %s", os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-    )
+def _tensorzero_openai_base() -> str:
+    base = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
+    if not base:
+        return ""
+    base = base.rstrip("/")
+    if base.endswith("/openai/v1"):
+        return base
+    if base.endswith("/openai"):
+        return f"{base.rstrip('/')}/v1"
+    return f"{base}/openai/v1"
 
 
-_prefer_venice_openai()
+def _sync_openai_compat_env() -> None:
+    resolved_base = ""
+    for candidate in (
+        os.environ.get("OPENAI_COMPATIBLE_BASE_URL"),
+        os.environ.get("OPENAI_API_BASE"),
+        _tensorzero_openai_base(),
+    ):
+        value = (candidate or "").strip()
+        if value:
+            resolved_base = value
+            break
+
+    if resolved_base:
+        targets = (
+            "OPENAI_COMPATIBLE_BASE_URL",
+            "OPENAI_API_BASE",
+            "OPENAI_COMPATIBLE_BASE_URL_LLM",
+            "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
+            "OPENAI_COMPATIBLE_BASE_URL_TTS",
+            "OPENAI_COMPATIBLE_BASE_URL_STT",
+        )
+        updated = []
+        for target in targets:
+            current = (os.environ.get(target) or "").strip()
+            if current:
+                continue
+            os.environ[target] = resolved_base
+            os.putenv(target, resolved_base)
+            updated.append(target)
+        if updated:
+            logger.info("OpenAI-compatible base resolved to %s", resolved_base)
+        else:
+            logger.debug("OpenAI-compatible base already set to %s", resolved_base)
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        tz_key = (os.environ.get("TENSORZERO_API_KEY") or "").strip()
+        if tz_key:
+            os.environ["OPENAI_API_KEY"] = tz_key
+            os.putenv("OPENAI_API_KEY", tz_key)
+            logger.info("OpenAI-compatible API key derived from TensorZero settings")
+
+
+_sync_openai_compat_env()
 
 from .orchestrator import ArchonOrchestrator
 
@@ -573,9 +598,9 @@ def _import_archon_app():
 
 app = _import_archon_app()
 
-# Re-apply Venice overrides after the vendored app loads, since upstream imports
+# Re-sync OpenAI-compatible env after the vendored app loads, since upstream imports
 # may mutate OpenAI-compatible environment variables.
-_prefer_venice_openai()
+_sync_openai_compat_env()
 
 
 @app.get("/healthz")
@@ -757,7 +782,7 @@ def _prepare_agents_app() -> str:
                         agents_module.logger.info("Set credential: %s", key)
 
                 agents_module.AGENT_CREDENTIALS = credentials
-                _prefer_venice_openai()
+                _sync_openai_compat_env()
                 agents_module.logger.info(
                     "Successfully fetched %s credentials from server",
                     len(credentials),

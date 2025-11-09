@@ -135,7 +135,7 @@ Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-Checks (12):
+Checks (14):
 1. Qdrant ready (`6333`)
 2. Meilisearch health (`7700`, warning only)
 3. Neo4j UI reachable (`7474`, warning only)
@@ -144,10 +144,12 @@ Checks (12):
 6. PostgREST reachable (`3000`)
 7. Insert a demo row via Render Webhook
 8. Verify a `studio_board` row exists via PostgREST
-9. Run a Hi-RAG v2 query (`${HIRAG_V2_GPU_HOST_PORT:-8087}`)
+9. Run a Hi-RAG v2 query (`${HIRAG_V2_GPU_HOST_PORT:-8087}`) and assert `/hirag/admin/rerank-status` reports numeric `topn`/`k`
 10. Agent Zero `/healthz` reports JetStream controller running
 11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
 12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
+13. Convert the sample health summary into CGP via `tools/events_to_cgp.py`
+14. Convert the sample finance summary into CGP via `tools/events_to_cgp.py`
 
 ### 5b) Personas
 

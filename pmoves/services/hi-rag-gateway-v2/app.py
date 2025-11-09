@@ -27,14 +27,86 @@ COLL = os.environ.get("QDRANT_COLLECTION","pmoves_chunks")
 MODEL = os.environ.get("SENTENCE_MODEL","all-MiniLM-L6-v2")
 ALPHA = float(os.environ.get("ALPHA", "0.7"))
 
-RERANK_ENABLE = os.environ.get("RERANK_ENABLE","true").lower()=="true"
-RERANK_MODEL = os.environ.get("RERANK_MODEL","BAAI/bge-reranker-base")
+# Collect rerank validation notes so startup logs and admin routes can expose them.
+_RERANK_CONFIG_ERRORS: List[str] = []
+_RERANK_CONFIG_WARNINGS: List[str] = []
+
+
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    truthy = {"1", "true", "yes", "y", "on"}
+    falsy = {"0", "false", "no", "n", "off"}
+    if val in truthy:
+        return True
+    if val in falsy:
+        return False
+    _RERANK_CONFIG_WARNINGS.append(f"{name} value {raw!r} not recognised; using default {default}")
+    return default
+
+
+def _parse_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        _RERANK_CONFIG_ERRORS.append(f"{name} must be an integer; received {raw!r}")
+        return default
+    if value <= 0:
+        _RERANK_CONFIG_ERRORS.append(f"{name} must be positive; received {value}")
+        return default
+    return value
+
+
+RERANK_ENABLE = _parse_bool("RERANK_ENABLE", True)
+RERANK_MODEL = (os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-base") or "BAAI/bge-reranker-base").strip()
 # Optional label override for reporting (does not force reload)
 _rerank_model_label = os.environ.get("RERANK_MODEL_LABEL")
-RERANK_TOPN = int(os.environ.get("RERANK_TOPN","50"))
-RERANK_K = int(os.environ.get("RERANK_K","10"))
-RERANK_FUSION = os.environ.get("RERANK_FUSION","mul").lower()  # mul|wsum
-RERANK_PROVIDER = (os.environ.get("RERANK_PROVIDER", "flag") or "flag").strip().lower()
+RERANK_TOPN = _parse_positive_int("RERANK_TOPN", 50)
+RERANK_K = _parse_positive_int("RERANK_K", 10)
+RERANK_FUSION = (os.environ.get("RERANK_FUSION", "mul") or "mul").strip().lower()  # mul|wsum
+if RERANK_FUSION not in {"mul", "wsum"}:
+    _RERANK_CONFIG_WARNINGS.append(f"RERANK_FUSION {RERANK_FUSION!r} not recognised; using 'mul'")
+    RERANK_FUSION = "mul"
+_provider_raw = (os.environ.get("RERANK_PROVIDER", "flag") or "flag").strip().lower()
+_allowed_providers = {"flag", "tensorzero", "tz", "tzero"}
+if _provider_raw not in _allowed_providers:
+    _RERANK_CONFIG_WARNINGS.append(f"RERANK_PROVIDER {_provider_raw!r} not recognised; using 'flag'")
+    RERANK_PROVIDER = "flag"
+else:
+    RERANK_PROVIDER = _provider_raw
+
+if RERANK_K > RERANK_TOPN:
+    _RERANK_CONFIG_WARNINGS.append(
+        f"RERANK_K {RERANK_K} exceeds RERANK_TOPN {RERANK_TOPN}; truncating to topn"
+    )
+    RERANK_K = RERANK_TOPN
+
+
+# lazy-init reranker to reduce cold start time; declared early for diagnostics
+_reranker = None
+
+
+def get_rerank_status() -> Dict[str, Any]:
+    return {
+        "enabled": RERANK_ENABLE,
+        "model": RERANK_MODEL,
+        "model_label": _rerank_model_label,
+        "provider": RERANK_PROVIDER,
+        "topn": RERANK_TOPN,
+        "k": RERANK_K,
+        "fusion": RERANK_FUSION,
+        "device": "cuda" if DEVICE == "cuda" else "cpu",
+        "cuda_available": _CUDA_AVAILABLE,
+        "loaded": bool(_reranker),
+        "errors": list(_RERANK_CONFIG_ERRORS),
+        "warnings": list(_RERANK_CONFIG_WARNINGS),
+    }
+
 TENSORZERO_BASE_URL = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
 TENSORZERO_RERANK_FUNCTION = (os.environ.get("TENSORZERO_RERANK_FUNCTION", "hi_rag_rerank") or "hi_rag_rerank").strip()
 TENSORZERO_RERANK_TIMEOUT = float(os.environ.get("TENSORZERO_RERANK_TIMEOUT", "20"))
@@ -47,6 +119,8 @@ MEILI_API_KEY = os.environ.get("MEILI_API_KEY","master_key")
 _USE_CUDA_ENV = os.environ.get("USE_CUDA", "true").lower() == "true"
 _CUDA_AVAILABLE = torch.cuda.is_available()
 DEVICE = "cuda" if _USE_CUDA_ENV and _CUDA_AVAILABLE else "cpu"
+
+_RERANK_STATUS_CACHE = get_rerank_status()
 
 from libs.providers.embedding import embed_text as _embed_via_providers
 
@@ -96,6 +170,30 @@ NAMESPACE_DEFAULT = os.environ.get("INDEXER_NAMESPACE","pmoves")
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger("hirag.gateway.v2")
+
+if RERANK_ENABLE:
+    logger.info(
+        "Rerank enabled with model=%s provider=%s topn=%s k=%s fusion=%s device=%s",
+        _rerank_model_label or RERANK_MODEL,
+        _RERANK_STATUS_CACHE["provider"],
+        _RERANK_STATUS_CACHE["topn"],
+        _RERANK_STATUS_CACHE["k"],
+        _RERANK_STATUS_CACHE["fusion"],
+        _RERANK_STATUS_CACHE["device"],
+    )
+else:
+    logger.info(
+        "Rerank disabled (model=%s provider=%s device=%s)",
+        _rerank_model_label or RERANK_MODEL,
+        _RERANK_STATUS_CACHE["provider"],
+        _RERANK_STATUS_CACHE["device"],
+    )
+
+for _warn in _RERANK_STATUS_CACHE["warnings"]:
+    logger.warning("Rerank config warning: %s", _warn)
+
+for _err in _RERANK_STATUS_CACHE["errors"]:
+    logger.error("Rerank config error: %s", _err)
 
 if DEVICE == "cuda":
     logger.info("CUDA detected; embeddings and reranker will run on GPU")
@@ -1034,6 +1132,15 @@ def stats(request: Request):
         "collection": COLL
     }
 
+
+@app.get("/hirag/admin/rerank-status")
+def admin_rerank_status(request: Request):
+    if os.environ.get("SMOKE_ALLOW_ADMIN_STATS", "false").lower() != "true":
+        require_admin_tailscale(request)
+    status = get_rerank_status()
+    status["model_report"] = _rerank_model_label or status["model"]
+    return status
+
 @app.post("/hirag/admin/reranker/model/label")
 def set_rerank_model_label(body: Dict[str, Any], request: Request):
     # Allow local smoke to set a label for reporting without changing the loaded model
@@ -1280,10 +1387,6 @@ def mindmap_route(
         "has_more": has_more,
         "stats": {"per_modality": stats_map},
     }
-
-# lazy-init reranker to reduce cold start time
-_reranker = None
-
 
 def _tensorzero_rerank(query: str, pool: List[Dict[str, Any]]) -> Optional[List[float]]:
     base = TENSORZERO_BASE_URL.rstrip("/")

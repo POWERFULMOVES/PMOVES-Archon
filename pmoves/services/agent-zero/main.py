@@ -25,7 +25,6 @@ except Exception:
 
 logger = logging.getLogger("pmoves.agent_zero.service")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-VENICE_DEFAULT_OPENAI_BASE = "https://api.venice.ai/api/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -40,36 +39,61 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
-def _prefer_venice_openai() -> None:
-    venice_key = os.environ.get("VENICE_API_KEY")
-    if not venice_key:
-        return
+def _tensorzero_openai_base() -> str:
+    base = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
+    if not base:
+        return ""
+    base = base.rstrip("/")
+    if base.endswith("/openai/v1"):
+        return base
+    if base.endswith("/openai"):
+        return f"{base.rstrip('/')}/v1"
+    return f"{base}/openai/v1"
 
-    venice_base = os.environ.get("VENICE_OPENAI_BASE", VENICE_DEFAULT_OPENAI_BASE)
-    targets = (
-        "OPENAI_COMPATIBLE_BASE_URL_LLM",
-        "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
-        "OPENAI_COMPATIBLE_BASE_URL_TTS",
-        "OPENAI_COMPATIBLE_BASE_URL_STT",
-    )
 
-    os.environ["OPENAI_API_BASE"] = venice_base
-    os.environ["OPENAI_COMPATIBLE_BASE_URL"] = venice_base
-    os.putenv("OPENAI_API_BASE", venice_base)
-    os.putenv("OPENAI_COMPATIBLE_BASE_URL", venice_base)
-
-    for target in targets:
-        os.environ[target] = venice_base
-        os.putenv(target, venice_base)
-
-    os.environ.setdefault("OPENAI_API_KEY", venice_key)
-    logger.info(
-        "Venice OpenAI endpoint active: %s",
+def _sync_openai_compat_env() -> None:
+    resolved_base = ""
+    for candidate in (
         os.environ.get("OPENAI_COMPATIBLE_BASE_URL"),
-    )
+        os.environ.get("OPENAI_API_BASE"),
+        _tensorzero_openai_base(),
+    ):
+        value = (candidate or "").strip()
+        if value:
+            resolved_base = value
+            break
+
+    if resolved_base:
+        targets = (
+            "OPENAI_COMPATIBLE_BASE_URL",
+            "OPENAI_API_BASE",
+            "OPENAI_COMPATIBLE_BASE_URL_LLM",
+            "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
+            "OPENAI_COMPATIBLE_BASE_URL_TTS",
+            "OPENAI_COMPATIBLE_BASE_URL_STT",
+        )
+        updated = []
+        for target in targets:
+            current = (os.environ.get(target) or "").strip()
+            if current:
+                continue
+            os.environ[target] = resolved_base
+            os.putenv(target, resolved_base)
+            updated.append(target)
+        if updated:
+            logger.info("OpenAI-compatible base resolved to %s", resolved_base)
+        else:
+            logger.debug("OpenAI-compatible base already set to %s", resolved_base)
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        tz_key = (os.environ.get("TENSORZERO_API_KEY") or "").strip()
+        if tz_key:
+            os.environ["OPENAI_API_KEY"] = tz_key
+            os.putenv("OPENAI_API_KEY", tz_key)
+            logger.info("OpenAI-compatible API key derived from TensorZero settings")
 
 
-_prefer_venice_openai()
+_sync_openai_compat_env()
 
 from services.agent_zero.controller import AgentZeroController, ControllerSettings
 from services.common.forms import (
@@ -577,9 +601,9 @@ class MCPExecuteResponse(BaseModel):
 
 
 service_config = load_service_config()
-# Re-apply Venice overrides after configuration load, as some helpers may
+# Re-sync OpenAI-compatible endpoints after configuration load, as some helpers may
 # populate default OpenAI-compatible URLs while constructing the config.
-_prefer_venice_openai()
+_sync_openai_compat_env()
 runtime_config = AgentZeroRuntimeConfig()
 client = AgentZeroClient(runtime_config)
 process_manager = AgentZeroProcessManager(runtime_config, client)

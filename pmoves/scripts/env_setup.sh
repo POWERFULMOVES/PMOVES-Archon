@@ -72,7 +72,11 @@ while IFS= read -r line; do
   key="${line%%=*}"
   cur="${envmap[$key]:-}"
   if [[ -n "$cur" && $force -eq 0 ]]; then continue; fi
-  def="${cur:-${!key:-}}"
+  sample="${line#*=}"
+  [[ "$sample" == "$line" ]] && sample=""
+  def="$cur"
+  [[ -z "$def" ]] && def="$sample"
+  [[ -z "$def" ]] && def="${!key:-}"
   [[ -z "$def" ]] && def="$(suggest_default "$key")"
   val="$def"
   if [[ $yes -eq 0 ]]; then
@@ -90,7 +94,13 @@ done < .env.example
 
 if [[ $added -gt 0 ]]; then
   touch .env
-  printf "\n# --- Added by env_setup to align with .env.example (local dev defaults) ---\n" >> .env
+  comment="# --- Added by env_setup to align with .env.example (local dev defaults) ---"
+  if [[ -s .env && $(tail -c 1 .env) != $'\n' ]]; then
+    echo >> .env
+  fi
+  if ! grep -Fxq "$comment" .env; then
+    printf "%s\n" "$comment" >> .env
+  fi
   cat .env.tmp.$$ >> .env
   rm -f .env.tmp.$$
   echo "Updated .env with $added keys."

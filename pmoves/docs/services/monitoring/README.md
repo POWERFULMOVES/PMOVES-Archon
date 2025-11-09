@@ -13,6 +13,7 @@ Quickstart
 - Open:  `make -C pmoves monitoring-open`
   - Grafana: http://localhost:3002 (admin/admin)
   - Prometheus: http://localhost:9090
+  - cAdvisor UI/metrics: http://localhost:${CADVISOR_HOST_PORT:-9180}
 - Smoke: `make -C pmoves monitoring-smoke` (wait ~15s on first run)
 
 What’s wired by default
@@ -34,11 +35,17 @@ Env knobs
 - `PROMETHEUS_HOST_PORT=9090`
 - `GRAFANA_HOST_PORT=3002`
 - `LOKI_HOST_PORT=3100`
-- `CADVISOR_HOST_PORT=8080`
+- `CADVISOR_HOST_PORT=9180`
 - `MON_INCLUDE_CADVISOR=true` to force-start cAdvisor on non-Linux hosts
+- `MON_INCLUDE_NODE_EXPORTER=true` to add host metrics (requires Linux + shared root mount)
 
-Notes
+- Notes
 - On Docker Desktop for Windows/macOS, cAdvisor’s kernel mounts can be limited. If cAdvisor reports unhealthy or fails to start, it will auto-retry; you can also temporarily comment out the service or run only on Linux hosts. The rest of the monitoring stack (Prometheus, Grafana, Blackbox, Loki/Promtail) works cross‑platform.
+- When Docker is configured with the containerd image store (`storage-driver overlayfs` / `driver-type: io.containerd.snapshotter.v1`), keep the extra bind mount to `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs` intact so cAdvisor can read layer metadata. Without it you will see repeated `failed to identify the read-write layer ID` errors and the container list will be empty.
+- When Docker Desktop rewrites the image store to the containerd snapshotter, create the overlay shim directory once before starting the stack. Either run `sudo mkdir -p /var/lib/docker/image/overlayfs` or use `docker run --rm --privileged -v /:/host alpine sh -c "mkdir -p /host/var/lib/docker/image/overlayfs"` to seed it without root access. This gives cAdvisor a mount point to bind the snapshotter path onto.
+- Node Exporter is now opt-in; enable it with `MON_INCLUDE_NODE_EXPORTER=true make -C pmoves up-monitoring`. It still requires Linux with a shared `/` mount (bare metal or WSL2 with nested virtualization enabled).
+- On WSL2 or Docker Desktop, run `sudo mount --make-rshared /` before starting the stack with node exporter enabled; the propagation flag resets after each reboot.
+- When cAdvisor runs privileged it refreshes container metadata correctly (no more stale container lists). Restart the monitoring stack after changing Docker storage paths so the new mounts are detected.
 - DeepResearch health is a lightweight FastAPI endpoint inside the worker (port `8098`); it reports `nats_connected` and returns 200 if the process is live.
 
 Linking Agent Zero / Archon traces (future)

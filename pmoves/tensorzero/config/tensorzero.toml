@@ -2,13 +2,7 @@
 
 [gateway]
 observability.enabled = true
-
-[gateway.observability.clickhouse]
-enabled = true
-url = "${TENSORZERO_OBS_CLICKHOUSE_URL}"
-username = "${TENSORZERO_OBS_CLICKHOUSE_USER}"
-password = "${TENSORZERO_OBS_CLICKHOUSE_PASSWORD}"
-database = "${TENSORZERO_OBS_CLICKHOUSE_DB}"
+# ClickHouse connection settings now rely on TENSORZERO_CLICKHOUSE_* env vars
 
 # --- Chat models: Agent Zero orchestration (local GPU and edge) ------------
 
