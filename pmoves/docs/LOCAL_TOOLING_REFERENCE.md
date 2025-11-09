@@ -107,6 +107,7 @@ This guide aggregates the entry points that keep local environments consistent a
 - `scripts/proxmox/pmoves-bootstrap.sh` & `CATACLYSM_STUDIOS_INC/**` → unattended provisioning bundles (refer to the Proxmox or Coolify docs before running on remote hosts).
 - `scripts/install/wizard.{sh,ps1}` → interactive bootstrap that chains env setup, dependency installs, and smoke prompts for greenfield machines.
 - `make smoke` (Bash) / `scripts/smoke.ps1` (PowerShell) → end-to-end health check of data services, render webhook, Agent Zero, and geometry bus. See `docs/SMOKETESTS.md` for expected output.
+- `make update-service-docs` → runs `pmoves/scripts/update_service_logs.py` to snapshot the most recent commits (use `ARGS="--limit N"`) and detected version metadata for each service with a companion documentation folder. The helper writes `UPDATE_NOTES.md` to `pmoves/docs/services/<service>/`; pass `ARGS="--dry-run"` to preview or `ARGS="--services agent-zero render-webhook"` to scope the refresh.
 
 ## Persistent Data Layout (`pmoves/data/`)
 The repository keeps opinionated `gitkeep` stubs so local volumes land in predictable places when Docker mounts bind into the workspace. Buckets and databases still live in Docker volumes; this hierarchy houses agent-specific state that benefits from git-backed defaults:
