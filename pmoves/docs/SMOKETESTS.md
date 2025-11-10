@@ -27,6 +27,8 @@ This guide covers preflight wiring, starting the core stack, and running the loc
    - Supabase REST endpoints:
    - `SUPA_REST_URL=http://127.0.0.1:65421/rest/v1` (host-side smoke harness + curl snippets)
      - `SUPA_REST_INTERNAL_URL=http://api.supabase.internal:8000/rest/v1` (compose services targeting the Supabase CLI stack)
+   - `OPENROUTER_API_KEY` (required for DeepResearch OpenRouter mode)
+   - `OPEN_NOTEBOOK_API_TOKEN`, `OPEN_NOTEBOOK_PASSWORD`, `DEEPRESEARCH_NOTEBOOK_ID` for Notebook mirroring / DeepResearch sync
    - After the CLI stack is running, execute `make bootstrap-data` to apply Supabase SQL, seed Neo4j, and load the demo Qdrant/Meili corpus before smokes. Re-run components individually with `make supabase-bootstrap`, `make neo4j-bootstrap`, or `make seed-data` if you only need one layer.
 4. External integrations: copy tokens into `pmoves/.env.local` so the health/finance automations can run without errors.
    - `WGER_API_TOKEN`, `WGER_BASE_URL=http://cataclysm-wger:8000`
@@ -135,7 +137,7 @@ Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-Checks (14):
+Checks (15):
 1. Qdrant ready (`6333`)
 2. Meilisearch health (`7700`, warning only)
 3. Neo4j UI reachable (`7474`, warning only)
@@ -150,6 +152,7 @@ Checks (14):
 12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
 13. Convert the sample health summary into CGP via `tools/events_to_cgp.py`
 14. Convert the sample finance summary into CGP via `tools/events_to_cgp.py`
+15. DeepResearch NATS smoke (`make deepresearch-smoke`) — publishes a `research.deepresearch.request.v1` job, waits for the `...result.v1` payload, and asserts Notebook mirroring when `OPENROUTER_API_KEY`, `OPEN_NOTEBOOK_API_TOKEN`, and `DEEPRESEARCH_NOTEBOOK_ID` are present (skips otherwise)
 
 ### 5b) Personas
 
