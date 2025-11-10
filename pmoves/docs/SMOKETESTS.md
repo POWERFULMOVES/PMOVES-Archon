@@ -151,7 +151,17 @@ Checks (14):
 13. Convert the sample health summary into CGP via `tools/events_to_cgp.py`
 14. Convert the sample finance summary into CGP via `tools/events_to_cgp.py`
 
-### 5b) Personas
+### 5b) SupaSerch multimodal bridge
+
+`make supaserch-smoke` validates the NATS wiring and HTTP fallback for SupaSerch:
+
+1. Publishes a labelled request on `supaserch.request.v1` via NATS.
+2. Waits for `supaserch.result.v1` and asserts the fallback stage reports `status: ok`.
+3. Calls `http://localhost:${SUPASERCH_HOST_PORT:-8099}/v1/search?q=…` to confirm the HTTP surface returns the same fallback metadata.
+
+The command prints the fallback latency and which transport (`via`) served the response. The default fallback hits the SupaSerch `/healthz` endpoint, but you can set `SUPASERCH_HTTP_FALLBACK_URL` to a search API (use `{query}` or `{encoded_query}` placeholders) before running the smoke to exercise external providers.
+
+### 5c) Personas
 
 Run `make smoke-personas` to assert the v5.12 persona library is present in the Supabase CLI database (expects at least one row such as `Archon v1.0`). If this fails, run `make supabase-bootstrap` and retry.
 
@@ -180,7 +190,7 @@ Prereqs: Supabase CLI stack online (`make supa-start`), env synced via `make env
 
 See `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` for extended workflows and troubleshooting tips.
 
-### 5b) Workflow Automations
+### 5d) Workflow Automations
 Prereqs: Supabase CLI stack running (`supabase start --network-id pmoves-net`), `make bootstrap` secrets populated, `make up`, external services (`make -C pmoves up-external`), and `make up-n8n`.
 1. Import/activate domain flows (shipped in repo):
    - `pmoves/n8n/flows/health_weekly_to_cgp.webhook.json`
