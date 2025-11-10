@@ -63,5 +63,10 @@ Dashboards
   - Recent logs (via Loki)
   Import your own dashboards as needed.
 
+Readiness & Alerts
+- Loki readiness endpoint: `GET http://localhost:3100/ready` (CLI: `make -C pmoves loki-ready`).
+- Example stat panel JSON: `docs/grafana/loki_readiness_panel.json`.
+- Example alert rule JSON: `docs/grafana/alerts/loki_readiness_alert.json` (import into Grafana alerting and wire a contact point).
+
 CLI helper
 - `python pmoves/tools/monitoring_report.py` prints a quick status summary (targets, failures, top CPU containers).

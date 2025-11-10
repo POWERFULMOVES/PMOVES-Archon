@@ -54,6 +54,22 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.propagate = True
 
+# Optional import for docs sync helpers (underscore package path is import-safe)
+try:
+    from pmoves.services.pmoves_yt.docs_sync import collect_yt_dlp_docs, sync_to_supabase  # type: ignore
+except Exception:  # pragma: no cover
+    collect_yt_dlp_docs = None  # type: ignore
+    sync_to_supabase = None  # type: ignore
+try:
+    from .docs_catalog import options_catalog, extractor_count, version_info  # type: ignore
+except Exception:  # pragma: no cover
+    def options_catalog():  # type: ignore
+        return {"options": [], "counts": {"options": 0}}
+    def extractor_count():  # type: ignore
+        return 0
+    def version_info():  # type: ignore
+        return {"yt_dlp_version": "unknown"}
+
 def _parse_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
         return None
@@ -352,10 +368,38 @@ async def startup():
     global _nc, _nc_connect_task
     if not YT_NATS_ENABLE or not NATS_URL:
         _nc = None
-        return
+    else:
+        if _nc_connect_task is None or _nc_connect_task.done():
+            _nc_connect_task = asyncio.create_task(_nats_connect_loop(), name="pmoves-yt-nats-connect")
 
-    if _nc_connect_task is None or _nc_connect_task.done():
-        _nc_connect_task = asyncio.create_task(_nats_connect_loop(), name="pmoves-yt-nats-connect")
+    # Docs sync at startup + optional periodic schedule
+    try:
+        if collect_yt_dlp_docs and sync_to_supabase:
+            if os.environ.get("YT_DOCS_SYNC_ON_START", "true").lower() in {"1","true","yes","y"}:
+                try:
+                    docs = collect_yt_dlp_docs()
+                    sync_to_supabase(docs)
+                    logger.info("yt-dlp docs synced on start")
+                except Exception as exc:
+                    logger.warning("docs sync on start failed: %s", exc)
+            interval_env = os.environ.get("YT_DOCS_SYNC_INTERVAL_SECONDS") or os.environ.get("YT_DOCS_SYNC_INTERVAL")
+            if interval_env:
+                try:
+                    interval = int(interval_env)
+                except Exception:
+                    interval = 86400
+                async def _periodic_docs_sync():
+                    while True:
+                        await asyncio.sleep(interval)
+                        try:
+                            docs = collect_yt_dlp_docs()
+                            sync_to_supabase(docs)
+                            logger.info("yt-dlp docs synced (periodic)")
+                        except Exception as exc:
+                            logger.warning("periodic docs sync failed: %s", exc)
+                asyncio.create_task(_periodic_docs_sync(), name="pmoves-yt-docs-sync")
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")
@@ -378,7 +422,16 @@ async def shutdown():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    meta = version_info()
+    prov = {
+        "channel": os.environ.get("YT_CHANNEL") or os.environ.get("CHANNEL"),
+        "origin": os.environ.get("YT_ORIGIN") or os.environ.get("ORIGIN"),
+        "ytdlp_arg_version": os.environ.get("YTDLP_VERSION"),
+        "ytdlp_pip_url": os.environ.get("YTDLP_PIP_URL"),
+    }
+    # Compact None values
+    prov = {k: v for k, v in prov.items() if v}
+    return {"ok": True, "yt_dlp": meta, "provenance": prov}
 
 def _publish_event(topic: str, payload: Dict[str, Any]):
     nc = _nc
@@ -1843,6 +1896,29 @@ def yt_chapters(body: Dict[str,Any] = Body(...)):
     except Exception:
         pass
     return {'ok': True, 'video_id': vid, 'chapters': chapters}
+
+@app.post('/yt/docs/sync')
+def yt_docs_sync():
+    """Upsert yt-dlp CLI docs into Supabase (pmoves_core.tool_docs)."""
+    if not (collect_yt_dlp_docs and sync_to_supabase):
+        raise HTTPException(500, 'docs sync helpers unavailable')
+    try:
+        docs = collect_yt_dlp_docs()
+        result = sync_to_supabase(docs)
+        return {"ok": True, **result}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(500, f"docs sync failed: {exc}")
+
+@app.get('/yt/docs/catalog')
+def yt_docs_catalog():
+    """Return a structured options catalog and extractor count for UIs/agents."""
+    try:
+        cat = options_catalog()
+        meta = version_info()
+        meta["extractor_count"] = extractor_count()
+        return {"ok": True, "meta": meta, **cat}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(500, f"catalog error: {exc}")
 
 # -------------------- Segmentation → JSONL + CGP emit --------------------
 

@@ -42,15 +42,15 @@ Completed
 - Monitoring baseline: Prometheus/Grafana up.
 
 Next 48 hours
-- [ ] Loki: finalize config for 3.1.x and confirm `/ready` 200; wire into Grafana dashboard set.
+- [x] Loki: finalize config for 3.1.x and confirm `/ready` 200; wire into Grafana dashboard set. (Completed 2025-11-10)
 - [ ] YT emit: set `YT_TRANSCRIPT_PROVIDER=qwen2-audio` during smoke; broaden SABR fallback and add a stable test ID list.
-- [ ] GPU rerank: re‑enable and add a targeted integration smoke (batch==1 guarded path); capture stats in evidence.
+- [x] GPU rerank: re‑enable and add a targeted integration smoke (batch==1 guarded path); capture stats in evidence. (Completed 2025-11-10; strict smoke target added and evidence helper `gpu-rerank-evidence`.)
 - [ ] Document Hi‑RAG health path (`/hirag/admin/stats`) in service README and smoketest docs.
-- [ ] Update docs index with Supabase‑only storage policy and presign health check.
+- [x] Update docs index with Supabase‑only storage policy and presign health check. (Completed 2025-11-10)
 - [ ] Real Data Bring‑Up: run `make -C pmoves seed-repo-docs index-repo-docs`, then set `YT_SMOKE_STRICT_JUMP=true` by default.
 
 ### Next commit targets
-- [ ] Re‑enable GPU strict smokes by default on the GPU node (pin reranker/runtime).
+- [x] Re‑enable GPU strict smokes by default on the GPU node (pin reranker/runtime). (Completed 2025-11-10)
 - [ ] SupaSerch NATS subjects + metrics; console health badge.
 - [ ] Loki `/ready` 200 and basic alerting in Grafana.
 - [ ] n8n: assert `N8N_API_AUTH_ACTIVE=true` and add monitoring probe.
@@ -128,6 +128,9 @@ Next 48 hours
 - [ ] Draft the faster-whisper GPU migration plan (language auto-detect, diarization flags, partial transcript updates) and confirm smoke expectations defined in `SESSION_IMPLEMENTATION_PLAN.md`.
 - [ ] Document Gemma integration paths: Ollama (`gemma2:9b-instruct`) and HF Transformers (`google/gemma-2-9b-it`), including feature toggles and embedding backstops.
 - [ ] Define API hardening, observability, and security tasks (validation, OpenAPI, health/readiness probes, metrics, signed URL enforcement, optional content filters).
+- [x] Fork leverage + dynamic tracking (initial): add `/yt/docs/sync` (Supabase upsert), `/yt/docs/catalog` (options + extractor counts), and startup/periodic sync env (`YT_DOCS_SYNC_ON_START`, `YT_DOCS_SYNC_INTERVAL_SECONDS`). Documented in `services/pmoves-yt/README.md`.
+- [ ] Console tile: “yt‑dlp Status” (version, channel/origin, extractor count, last sync) pulled from `pmoves_core.tool_docs` + `/yt/docs/catalog`.
+- [ ] n8n nightly: run docs sync and post diffs (new/removed extractors, notable option changes) to Discord.
 
 ### 5. Platform Operations & Tooling
 - [x] Publish Windows/WSL smoke scripts (`scripts/smoke.ps1`) with instructions in `pmoves/docs/LOCAL_DEV.md`.

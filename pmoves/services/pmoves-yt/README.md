@@ -54,7 +54,12 @@ YouTube ingest helper that emits CHIT geometry after analysis.
   that version, otherwise the latest is installed. Example:
 
 ```
+# Pin by version
 docker build --build-arg YTDLP_VERSION=2025.10.15 -t ghcr.io/powerfulmoves/pmoves-yt:dev services/pmoves-yt
+
+# Or install from a fork/commit (full pip URL)
+docker build --build-arg YTDLP_PIP_URL='git+https://github.com/POWERFULMOVES/yt-dlp.git@main#egg=yt-dlp[default]' \
+  -t ghcr.io/powerfulmoves/pmoves-yt:dev services/pmoves-yt
 ```
 
 #### Fork & GHCR for reproducible builds
@@ -88,6 +93,54 @@ and tag a local image quickly with a custom `YTDLP_VERSION`.
   (`FFmpegMetadata` + `EmbedThumbnail`). Leave empty (`[]`) to skip embedding.
   Channel configs can set `yt_options.postprocessors` for one-off tweaks.
 
+### Keep yt-dlp options discoverable (docs → Supabase)
+
+To surface the full, current yt‑dlp CLI options to the UI and automations,
+pmoves-yt can ingest its own help into Supabase:
+
+```
+curl -X POST http://localhost:8091/yt/docs/sync
+```
+
+This captures `yt-dlp --help`, `--list-extractors`, and `--dump-user-agent` and
+upserts them into `pmoves_core.tool_docs` keyed by `(tool, version, doc_type)`.
+Ensure the Supabase REST URL/key env vars are set (compose does this by default).
+
+### Options Catalog endpoint (new)
+
+- `GET /yt/docs/catalog` returns:
+  - `meta.yt_dlp_version`, `meta.extractor_count`
+  - a structured `options[]` catalog (flags, dest, help, default, choices)
+  - counts for quick UI rendering
+
+### Automatic docs sync
+
+- Env: `YT_DOCS_SYNC_ON_START=true` to sync on container start (default true)
+- Env: `YT_DOCS_SYNC_INTERVAL_SECONDS=86400` to enable periodic sync
+
+### Using external yt-dlp configs (new)
+
+If you have a classic `yt-dlp` `config.txt`, convert it into a `yt_options` JSON
+that this service understands:
+
+```
+python pmoves/services/pmoves-yt/tools/ytdlp_config_to_options.py \
+  pmoves/docs/PMOVES.AI\ PLANS/PMOVES.yt/yt-dlp-config/config.txt \
+  > /tmp/yt_options.json
+
+curl -sS -X POST http://localhost:8091/yt/download \
+  -H 'content-type: application/json' \
+  -d @/tmp/yt_options.json | jq .
+```
+
+The converter maps common flags (`-f`, `--merge-output-format`, `--sub-langs`,
+`--write-auto-subs`, `--sponsorblock-*`, `--download-archive`, retries/pacing,
+cookies, and embed postprocessors) into the `yt_options` structure while leaving
+unknown flags out for safety. See the detailed mapping and caveats in:
+
+- `pmoves/docs/PMOVES.AI PLANS/PMOVES.yt/YTDLP_CONFIG_ADAPTATION.md`
+
+
 ## Hi‑RAG upsert pacing (2025-10-24)
 - `/yt/emit` switches to a background task when `YT_ASYNC_UPSERT_ENABLED=true` and the
   segmented chunk count ≥ `YT_ASYNC_UPSERT_MIN_CHUNKS` (defaults: enabled, 200 chunks).
@@ -98,3 +151,7 @@ and tag a local image quickly with a custom `YTDLP_VERSION`.
 - `YT_UPSERT_BATCH_SIZE` (default `200`) defines how many chunks each
   `/hirag/upsert-batch` call carries. Tune alongside the lexical threshold when
   dealing with hour-long transcripts.
+- Build provenance in healthz
+
+- `GET /healthz` returns `{ ok: true, yt_dlp: { yt_dlp_version }, provenance: { channel, origin, ytdlp_arg_version, ytdlp_pip_url } }`.
+- Set `YT_CHANNEL`/`YT_ORIGIN` during integration builds (the upstream bundle uses `CHANNEL`/`ORIGIN`; both names are read).

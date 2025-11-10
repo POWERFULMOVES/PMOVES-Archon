@@ -8,7 +8,8 @@ _Last updated: 2025-11-03_
 - **Retrieval Eval Guide** — `RETRIEVAL_EVAL_GUIDE.md`
 - **Publisher Enrichments** — `CREATOR_PIPELINE.md` (see “Publisher enrichments” section)
 - **Render Completion Webhook** — `RENDER_COMPLETION_WEBHOOK.md`
-- **Presign Service** — `COMFYUI_MINIO_PRESIGN.md`
+- **Presign Service** — `COMFYUI_MINIO_PRESIGN.md` (includes health check for presign API)
+  - Storage policy: Supabase Storage is the default S3-compatible backend for local bring-up; standalone MinIO is off by default. See `ENVIRONMENT_POLICY.md` for single‑env mode expectations and storage endpoints.
 - **Smoke Tests** — `SMOKETESTS.md`
 - **Local CI Checklists** — `LOCAL_CI_CHECKS.md`
 - **First-Run Bootstrap** — `FIRST_RUN.md`

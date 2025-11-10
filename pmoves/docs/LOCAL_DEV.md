@@ -135,6 +135,22 @@ You can customize the badge probe paths if your forks expose different health en
 See also: `pmoves/docs/SERVICE_HEALTH_ENDPOINTS.md`.
 - Personas page: `http://localhost:3001/dashboard/personas` — Lists personas from `pmoves_core.personas`.
 
+### Full‑stack bring‑up helper
+
+Use the one‑shot bring‑up to start Supabase, core PMOVES services, Agents/APIs/UIs, external stacks, monitoring, and the Console UI, then wait for health and auto‑capture evidence (yt‑dlp docs, Loki /ready, Hi‑RAG stats, etc.). This is handy for smoke‑ready demos:
+
+```
+make -C pmoves bringup-with-ui
+```
+
+Tuning waits (slow GPU model warm‑up):
+
+```
+WAIT_T_LONG=300 make -C pmoves bringup-with-ui
+```
+
+Parallelization: readiness checks are sequential for robustness and clear logs. If you’d like a parallel mode (background curls + barrier), we can add it.
+
 ### Use published Agent UI images
 - You can run Agents from prebuilt images (includes native UIs) instead of local builds:
   - Set/confirm in `pmoves/env.shared`:

@@ -20,6 +20,16 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
 
 ## Evidence
 - See `pmoves/PR_EVIDENCE/*` for current smoke/health outputs appended to the PR.
+- Loki readiness:
+  - `make -C pmoves loki-ready` → HTTP 200 on `/ready` (Grafana panel+alert provisioned)
+  - Dashboard: Services Overview includes “Loki /ready” stat; alert fires after 5m of failures
+- PMOVES.YT docs tracking:
+  - `make -C pmoves yt-docs-sync` (upserts to `pmoves_core.tool_docs`)
+  - `make -C pmoves yt-docs-catalog-smoke` (shows `yt_dlp_version`, `extractor_count`)
+  - n8n nightly diff: imported `pmoves/n8n/flows/yt_docs_sync_diff.json` → Discord summary
+- GPU rerank (strict):
+  - `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu` (requires `used_rerank==true`)
+  - Evidence helper: `make -C pmoves gpu-rerank-evidence` writes `pmoves/docs/logs/<timestamp>_gpu_rerank_smoke.txt`
 - JetStream fallback log capture (Nov 7, 2025):
 
    ```bash
@@ -38,11 +48,11 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
    - Add NATS subjects `supaserch.request.v1`/`supaserch.result.v1` and Prometheus metrics in services/supaserch.
    - Console tile: add health badge + quick links.
 2) Loki readiness & alerts
-   - Finalize `/ready` 200 for Loki; wire basic alerts in Grafana (Services Overview dashboard).
+   - Finalize `/ready` 200 for Loki; wire basic alerts in Grafana (Services Overview dashboard). (Completed 2025-11-10)
 3) Real Data Bring-Up
    - Complete repo indexing (`make -C pmoves index-repo-docs`) and flip strict geometry jump by default.
 4) GPU Smokes
-   - Pin reranker model/runtime for 5090 node; enable strict GPU smokes by default.
+   - Pin reranker model/runtime for 5090 node; enable strict GPU smokes by default. (Completed 2025-11-10 — Qwen default; strict smoke targets added)
 5) n8n monitoring
    - Ensure `N8N_API_AUTH_ACTIVE=true`; add blackbox probe to monitoring dashboard.
 6) Image pinning
@@ -52,4 +62,3 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
 - Single-env policy remains active; Supabase REST is canonical for `public,pmoves_core,pmoves_kb`.
 - Node Exporter is Linux-only; on macOS/Windows, keep using cAdvisor only.
 - JetStream fallback ensures Agent Zero remains responsive even when JetStream is warming up.
-

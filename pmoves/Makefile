@@ -77,6 +77,66 @@ update: ensure-env-shared  ## Pull repo + images, recreate stack
 	@docker compose up -d
 	@echo "✔ Updated & reconciled containers."
 
+# -------- PMOVES.YT docs helpers ----------
+.PHONY: yt-docs-sync yt-docs-catalog-smoke
+
+yt-docs-sync: ## Ask PMOVES.YT to capture yt-dlp help/extractors and upsert into Supabase
+	@$(LOAD_ENV_SHARED); \
+	  base=$${PMOVES_YT_BASE_URL:-http://localhost:8091}; \
+	  echo "→ Syncing yt-dlp docs via $$base/yt/docs/sync"; \
+	  curl -fsS -X POST "$$base/yt/docs/sync" | jq .
+
+yt-docs-catalog-smoke: ## Smoke check for /yt/docs/catalog (counts + version)
+	@$(LOAD_ENV_SHARED); \
+	  base=$${PMOVES_YT_BASE_URL:-http://localhost:8091}; \
+	  echo "→ Hitting $$base/yt/docs/catalog"; \
+	  curl -fsS "$$base/yt/docs/catalog" | jq '{ok, meta, counts}'
+
+.PHONY: gpu-rerank-evidence
+gpu-rerank-evidence: ## Run strict GPU rerank smoke and save evidence under pmoves/docs/logs/
+	@mkdir -p pmoves/docs/logs
+	@STAMP=$$(date +%Y-%m-%d_%H-%M-%S); \
+	  echo "→ Strict GPU rerank smoke (this will fail if rerank not enabled/model missing)"; \
+	  (GPU_SMOKE_STRICT=true $(MAKE) smoke-gpu) > pmoves/docs/logs/$${STAMP}_gpu_rerank_smoke.txt 2>&1 || true; \
+	  echo "Wrote pmoves/docs/logs/$${STAMP}_gpu_rerank_smoke.txt"
+
+.PHONY: evidence-auto
+evidence-auto: ## Capture basic evidence (yt-dlp, Loki, hi-rag v2 CPU/GPU, presign) into pmoves/PR_EVIDENCE
+	@bash tools/capture_evidence.sh
+
+.PHONY: preflight-retro
+preflight-retro: ## Retro-styled parallel readiness check (Rich UI)
+	@python3 tools/flight_check_retro.py || true
+
+.PHONY: bringup-with-ui
+bringup-with-ui: ## One-shot: supabase, core, agents, externals, monitoring, UI (dev), then auto-capture evidence
+	@bash tools/bringup_with_ui.sh
+
+.PHONY: verify-all
+verify-all: ## Full verify: bring-up (parallel waits), then retro preflight + monitoring report + core/gpu smokes
+	@echo "→ Full verify starting (parallel readiness)"; \
+	  PARALLEL=1 WAIT_T_LONG=$${WAIT_T_LONG:-300} $(MAKE) bringup-with-ui; \
+	  echo "→ Retro preflight"; \
+	  $(MAKE) preflight-retro; \
+	  echo "→ Monitoring report"; \
+	  $(MAKE) monitoring-report || true; \
+	  echo "→ yt-dlp catalog smoke"; \
+	  $(MAKE) yt-docs-catalog-smoke || true; \
+	  echo "→ Core smoke"; \
+	  $(MAKE) smoke || true; \
+	  echo "→ GPU smoke (relaxed)"; \
+	  $(MAKE) smoke-gpu || true; \
+	  echo "→ Channel monitor smoke"; \
+	  $(MAKE) channel-monitor-smoke || true; \
+	  echo "✔ Verify-all sequence executed. Review console + Grafana."
+
+.PHONY: loki-ready
+loki-ready: ## Check Loki readiness endpoint (/ready)
+	@echo "→ Checking Loki /ready"; \
+	  code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3100/ready || true); \
+	  echo "Loki /ready HTTP $$code"; \
+	  [ "$$code" = "200" ] || (echo "Loki not ready" && exit 1)
+
 # -------- Backups / Restore helpers ----------
 .PHONY: backup restore
 BACKUP_DIR ?= backups/$$(date +%Y%m%d_%H%M%S)

@@ -6,6 +6,10 @@ FastAPI service providing retrieval and CHIT geometry endpoints.
 - Compose service: `hi-rag-gateway-v2` (CPU) and `hi-rag-gateway-v2-gpu` (GPU)
 - Ports: CPU `:8086`, GPU `:8087`
 
+## Health
+- Admin stats path: `GET /hirag/admin/stats` returns 200 with basic gateway metrics.
+- Healthz: `GET /healthz` returns 200 when the process is accepting requests.
+
 ## Make / Compose
 - Start core stack (includes v2 CPU): `make up`
 - Ensure both v2 variants up: `make up-both-gateways`
@@ -71,4 +75,3 @@ curl -s http://localhost:8086/geometry/decode/text \
 
 ## Related Docs
 - See `pmoves/docs/SMOKETESTS.md` (geometry steps) and `pmoves/Makefile` targets listed above.
-
