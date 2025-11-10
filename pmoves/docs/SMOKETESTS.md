@@ -59,6 +59,7 @@ Useful health checks:
 - PostgREST (optional fallback): `curl http://localhost:3010`
 - Hi‑RAG v2 stats: `curl http://localhost:${HIRAG_V2_GPU_HOST_PORT:-8087}/hirag/admin/stats` (CPU fallback: `${HIRAG_V2_HOST_PORT:-8086}`)
   - When `8086`/`8087` are already bound (for example by legacy uvicorn services), export `HIRAG_V2_HOST_PORT` / `HIRAG_V2_GPU_HOST_PORT` before running `make up` (e.g., `18086` / `18087`) so the high-RAG gateways bind to free ports.
+ - Loki readiness: `curl -s -o /dev/null -w "%{http_code}" http://localhost:3100/ready` (expects `200`), or run `make -C pmoves loki-ready`.
 - Discord Publisher: `curl http://localhost:8092/healthz`
 
 ### Optional GPU smoke

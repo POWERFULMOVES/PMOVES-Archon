@@ -15,9 +15,18 @@ export default function ServicesIndexPage() {
       <DashboardNavigation active="services" />
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold text-slate-900">Integration services</h1>
-        <p className="text-sm text-slate-600">
-          Quick links to the external integrations that power ingestion, review, and finance workflows across the PMOVES stack.
-        </p>
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-slate-600">
+            Quick links to the external integrations that power ingestion, review, and finance workflows across the PMOVES stack.
+          </p>
+          <Link
+            href="/dashboard/services/yt-dlp"
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-slate-400 hover:text-slate-900"
+            title="Open yt-dlp live status"
+          >
+            yt-dlp Status →
+          </Link>
+        </div>
       </header>
       <div className="flex flex-wrap gap-4">
         {INTEGRATION_SERVICES.map((service) => (

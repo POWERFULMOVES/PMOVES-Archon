@@ -18,7 +18,7 @@ Environment (selected)
 - `GRAPH_BOOST`, `ENTITY_CACHE_TTL`, `ENTITY_CACHE_MAX`
 - `USE_MEILI`, `MEILI_URL`, `MEILI_API_KEY`
 - `TAILSCALE_ONLY`, `TAILSCALE_ADMIN_ONLY`, `TAILSCALE_CIDRS`
-- Rerank (optional): `RERANK_ENABLE` (default false on CPU; true on GPU), `RERANK_MODEL` (default `BAAI/bge-reranker-base`), `RERANK_TOPN` (50), `RERANK_K` (10)
+- Rerank (optional): `RERANK_ENABLE` (default false on CPU; true on GPU), `RERANK_MODEL` (CPU default `BAAI/bge-reranker-base`; GPU profile defaults to `Qwen/Qwen3-Reranker-4B`), `RERANK_TOPN` (50), `RERANK_K` (10)
 
 GPU notes
 - The GPU variant installs CUDA Torch wheels and prefers CUDA automatically; falls back to CPU when unavailable.
