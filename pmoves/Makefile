@@ -6,22 +6,22 @@
 compose_profiles = data,workers,gateway
 ifeq ($(EXTERNAL_NEO4J),true)
   neo4j_profile :=
-else
+		else
   neo4j_profile := ,neo4j-local
 endif
 ifeq ($(EXTERNAL_MEILI),true)
   meili_profile :=
-else
+		else
   meili_profile := ,meili-local
 endif
 ifeq ($(EXTERNAL_QDRANT),true)
   qdrant_profile :=
-else
+		else
   qdrant_profile := ,qdrant-local
 endif
 ifeq ($(EXTERNAL_SUPABASE),true)
   supa_profile :=
-else
+		else
 supa_profile := ,supabase-local
 SUPABASE_RUNTIME ?= cli
 SUPA_PROVIDER := $(SUPABASE_RUNTIME)
@@ -43,7 +43,7 @@ ifeq ($(SINGLE_ENV_MODE),1)
         [ -f "$(ENV_SHARED_FILE)" ] && . "$(ENV_SHARED_FILE)"; \
         [ -f env.shared.generated ] && . env.shared.generated; \
         set +a;
-else
+		else
   LOAD_ENV_SHARED := set -a; \
         [ -f "$(ENV_SHARED_FILE)" ] && . "$(ENV_SHARED_FILE)"; \
         [ -f env.shared.generated ] && . env.shared.generated; \
@@ -56,14 +56,18 @@ export LOAD_ENV_SHARED
 .PHONY: ensure-env-shared
 ensure-env-shared:
 	@if [ ! -f "$(ENV_SHARED_FILE)" ]; then \
-	  if [ -f "$(ENV_SHARED_TEMPLATE)" ]; then \
-	    echo "→ Seeding $(ENV_SHARED_FILE) from $(ENV_SHARED_TEMPLATE)"; \
-	    cp "$(ENV_SHARED_TEMPLATE)" "$(ENV_SHARED_FILE)"; \
-	  else \
-	    echo "→ Creating empty $(ENV_SHARED_FILE) (no template found)"; \
-	    touch "$(ENV_SHARED_FILE)"; \
-	  fi; \
+		if [ -f "$(ENV_SHARED_TEMPLATE)" ]; then \
+		echo "→ Seeding $(ENV_SHARED_FILE) from $(ENV_SHARED_TEMPLATE)"; \
+		cp "$(ENV_SHARED_TEMPLATE)" "$(ENV_SHARED_FILE)"; \
+		else \
+		echo "→ Creating empty $(ENV_SHARED_FILE) (no template found)"; \
+		touch "$(ENV_SHARED_FILE)"; \
+		fi; \
 	fi
+
+.PHONY: update-service-docs
+update-service-docs: ## Regenerate service update notes from git metadata
+	@$(PYTHON) scripts/update_service_logs.py $(ARGS)
 
 # -------- Updates ----------
 .PHONY: update
@@ -184,24 +188,24 @@ SUPA_PROVIDER ?= $(SUPABASE_RUNTIME)
 DATA_SERVICES := minio presign
 
 ifeq ($(EXTERNAL_QDRANT),true)
-else
+		else
 DATA_SERVICES += qdrant
 endif
 
 ifeq ($(EXTERNAL_NEO4J),true)
-else
+		else
 DATA_SERVICES += neo4j
 endif
 
 ifeq ($(EXTERNAL_MEILI),true)
-else
+		else
 DATA_SERVICES += meilisearch
 endif
 
 ifeq ($(SUPA_PROVIDER),cli)
-else
+		else
 ifeq ($(EXTERNAL_SUPABASE),true)
-else
+		else
 DATA_SERVICES += postgres postgrest
 endif
 endif
@@ -217,7 +221,7 @@ up-cloudflare: ensure-env-shared ## Start the Cloudflare tunnel connector (profi
 	if [ -z "$$CLOUDFLARE_TUNNEL_TOKEN" ] && [ -z "$$CLOUDFLARE_TUNNEL_NAME" ]; then \
 	echo "↷ Set CLOUDFLARE_TUNNEL_TOKEN (Zero Trust token) or CLOUDFLARE_TUNNEL_NAME + credentials in $(ENV_SHARED_FILE) before running make up-cloudflare."; \
 	exit 1; \
-	fi; \
+		fi; \
 	exec docker compose -p $(PROJECT) --profile cloudflare up -d cloudflared'
 	@$(MAKE) --no-print-directory cloudflare-url || true
 
@@ -303,6 +307,13 @@ up-monitoring: ## Start monitoring stack and print URLs
 	  echo "→ Skipping cAdvisor (set MON_INCLUDE_CADVISOR=true to force)"; \
 	  docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) up -d; \
 	fi
+	@if [ "$$MON_INCLUDE_CADVISOR" = "true" ] || [ "$$MON_INCLUDE_NODE_EXPORTER" = "true" ] || [ "`uname -s`" = "Linux" ]; then \
+		echo "→ Including linux profile (cAdvisor/Node Exporter)"; \
+		docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) --profile linux up -d; \
+		else \
+		echo "→ Skipping cAdvisor (set MON_INCLUDE_CADVISOR=true to force)"; \
+		docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) up -d; \
+	  fi
 	@echo "Grafana:      http://localhost:$${GRAFANA_HOST_PORT:-3002} (admin/admin)"
 	@echo "Prometheus:   http://localhost:$${PROMETHEUS_HOST_PORT:-9090}"
 	@echo "Loki:         http://localhost:$${LOKI_HOST_PORT:-3100}"
@@ -335,7 +346,7 @@ tailscale-save-key: ## Save/update Tailscale auth key to CATACLYSM_STUDIOS_INC/.
 	@mkdir -p $(dir $(TAILSCALE_KEY_FILE))
 	@if [ -n "$$TAILSCALE_AUTHKEY" ]; then \
 	  printf "%s" "$$TAILSCALE_AUTHKEY" > "$(TAILSCALE_KEY_FILE)"; \
-	else \
+		else \
 	  stty -echo 2>/dev/null || true; \
 	  printf "Enter Tailscale auth key: "; \
 	  read KEY; \
@@ -566,11 +577,11 @@ agents-integrations-clone: ## Clone your forks into $(INTEGRATIONS_WORKSPACE)
 	if [ ! -d PMOVES-Agent-Zero ]; then \
 	  git clone https://github.com/POWERFULMOVES/PMOVES-Agent-Zero.git PMOVES-Agent-Zero; \
 	  echo "✔ Cloned PMOVES-Agent-Zero"; \
-	else echo "↷ PMOVES-Agent-Zero already exists"; fi; \
+		else echo "↷ PMOVES-Agent-Zero already exists"; fi; \
 	if [ ! -d PMOVES-Archon ]; then \
 	  git clone https://github.com/POWERFULMOVES/PMOVES-Archon.git PMOVES-Archon; \
 	  echo "✔ Cloned PMOVES-Archon"; \
-	else echo "↷ PMOVES-Archon already exists"; fi
+		else echo "↷ PMOVES-Archon already exists"; fi
 
 agents-integrations-pull: ## Pull latest from your forks
 	@cd "$(INTEGRATIONS_WORKSPACE)/PMOVES-Agent-Zero" && git fetch --all && git pull --rebase || true
@@ -751,21 +762,21 @@ SUPA_PROJECT ?= pmoves
 supabase-up:
 	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
 		supabase start --network-id pmoves-net; \
-	else \
+		else \
 		docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) up -d gotrue realtime storage studio; \
 	fi
 
 supabase-stop:
 	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
 		supabase stop; \
-	else \
+		else \
 		docker compose -p $(PROJECT) -f docker-compose.yml -f $(SUPA_FILE) stop gotrue realtime storage studio; \
 	fi
 
 supabase-clean:
 	@if [ "$(SUPABASE_RUNTIME)" = "cli" ]; then \
 		echo "↷ Supabase CLI manages its own volumes; run 'supabase stop' followed by 'supabase start --reset' if you need a clean slate."; \
-	else \
+		else \
 		- docker volume rm $(PROJECT)_supabase-storage 2> NUL || true; \
 	fi
 
@@ -810,24 +821,24 @@ supabase-bootstrap:
 	    if [ -f "$$f" ]; then \
 	      echo "   • Init $$f"; \
 	      cat "$$f" | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
-	    fi; \
+		fi; \
 	  done; \
 	  for f in supabase/migrations/*.sql; do \
 	    if [ -f "$$f" ]; then \
 	      echo "   • Migration $$f"; \
 	      cat "$$f" | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
-	    fi; \
+		fi; \
 	  done; \
 	  if [ -f db/v5_12_grounded_personas.sql ]; then \
 	    echo "   • Schema db/v5_12_grounded_personas.sql"; \
 	    cat db/v5_12_grounded_personas.sql | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
-	  fi; \
+		fi; \
 	  if [ -f db/v5_12_seed.sql ]; then \
 	    echo "   • Seed db/v5_12_seed.sql"; \
 	    cat db/v5_12_seed.sql | docker exec -i $$supabase_db psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null; \
-	  fi; \
+		fi; \
 	  echo "✔ Supabase CLI schema + seeds applied."; \
-	else \
+		else \
 	  if docker ps --format '{{.Names}}' | grep -q '^pmoves-postgres-1$$'; then \
 	    echo "→ Compose Postgres detected; applying schema + seed SQL"; \
 	    set -eu; \
@@ -842,15 +853,15 @@ supabase-bootstrap:
 	    if [ -f db/v5_12_grounded_personas.sql ]; then \
 	      echo "   • Schema db/v5_12_grounded_personas.sql"; \
 	      cat db/v5_12_grounded_personas.sql | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
-	    fi; \
+		fi; \
 	    if [ -f db/v5_12_seed.sql ]; then \
 	      echo "   • Seed db/v5_12_seed.sql"; \
 	      cat db/v5_12_seed.sql | docker exec -i pmoves-postgres-1 psql -U pmoves -d pmoves -v ON_ERROR_STOP=1 >/dev/null; \
-	    fi; \
+		fi; \
 	    echo "✔ Supabase (compose) schema + seeds applied."; \
-	  else \
+		else \
 	    echo "↷ No Supabase backend detected; skipping Supabase bootstrap."; \
-	  fi; \
+		fi; \
 	fi
 
 .PHONY: neo4j-bootstrap
@@ -894,7 +905,7 @@ smoke-personas: ## Assert personas are seeded (v5.12) in Supabase CLI DB; fails 
 	  cnt=$$(docker exec -i $$supabase_db psql -U postgres -d postgres -tAc "select count(*) from pmoves_core.personas" | tr -d '[:space:]'); \
 	  echo "personas: $$cnt"; \
 	  test "$$cnt" -ge 1 || (echo "✖ No personas found; run 'make -C pmoves supabase-bootstrap'" && exit 1); \
-	else \
+		else \
 	  echo "↷ Supabase CLI DB not running; skip persona smoke."; \
 	fi
 
@@ -904,7 +915,7 @@ smoke-webhook-ci:
 	@cd pmoves && \
 	 if [ "$(LIVE)" = "1" ]; then \
 	   python tools/smoke_webhook.py --live; \
-	 else \
+		else \
 	   python tools/smoke_webhook.py; \
 	 fi
 
@@ -1020,7 +1031,7 @@ smoke-qwen-rerank:
 	if printf "%s" "$$MODEL" | grep -qi "qwen"; then \
 	  echo "Rerank model is Qwen ($$MODEL)"; \
 	  curl -sf localhost:$(HIRAG_GPU_PORT)/hirag/query -H 'content-type: application/json' -d '{"query":"qwen rerank test","namespace":"pmoves","k":3, "use_rerank": true}' | jq -e '.used_rerank==true' >/dev/null && echo OK || (echo FAIL && exit 1); \
-	else \
+		else \
 	  echo "Model ($$MODEL) is not Qwen; set RERANK_MODEL=Qwen/Qwen3-Reranker-4B on v2-gpu and retry."; \
 	  exit 0; \
 	fi
@@ -1032,7 +1043,7 @@ retrieval-eval-smoke:
 	if [ -z "$$DATASETS" ]; then \
 	  echo "No retrieval-eval datasets found under services/retrieval-eval/datasets/."; \
 	  exit 1; \
-	fi; \
+		fi; \
 	for ds in $$DATASETS; do \
 	  echo "→ Evaluating $$ds"; \
 	  $(PYTHON) services/retrieval-eval/evaluate.py "$$ds" --no-query-details; \
@@ -1049,9 +1060,9 @@ harvest-consciousness:
 	if command -v supabase >/dev/null 2>&1; then \
 	  echo "[Harvest] Supabase CLI detected. Apply schema manually:"; \
 	  echo "  supabase db push --file $$HARVEST_DIR/processed-for-rag/supabase-import/consciousness-schema.sql"; \
-	else \
+		else \
 	  echo "[Harvest] Supabase CLI not detected; skipping schema instructions."; \
-	fi; \
+		fi; \
 	echo "[Harvest] Artifacts ready under $$HARVEST_DIR"; \
 	echo "[Harvest] Next steps:"; \
 	echo "  pwsh -File $$HARVEST_DIR/scripts/selenium-scraper.ps1    # dynamic content"; \
@@ -1199,7 +1210,7 @@ smoke-firefly:
 	 if [ -z "$$TOKEN" ]; then \
 	   echo "FIREFLY_ACCESS_TOKEN not set in env or env.shared; required for API smoke." >&2; \
 	   exit 1; \
-	 fi; \
+		fi; \
 	 printf "[Firefly] GET %s/api/v1/about\n" "$$ROOT_URL"; \
 	 RESP=$$(curl -fsS -H "Authorization: Bearer $$TOKEN" "$$ROOT_URL/api/v1/about"); \
 	 printf "%s" "$$RESP" | python3 -c "import json, sys; payload=json.load(sys.stdin); data=payload.get(\"data\") or {}; version=data.get(\"version\"); api_version=data.get(\"api_version\"); assert version, \"Firefly about response missing version field\"; print(f\"Firefly smoke passed (version {version}, API {api_version}).\")"'
@@ -1215,7 +1226,7 @@ smoke-archon:
 	if [ "$$status" != "ok" ]; then \
 	  echo "Archon health degraded or unavailable (status=$$status)"; \
 	  exit 1; \
-	fi; \
+		fi; \
 	printf "%s\n" "$$resp"'
 
 .PHONY: chit-contract-check
@@ -1272,7 +1283,7 @@ up-jellyfin-ai:
 flight-check:
 ifeq ($(OS),Windows_NT)
 	@pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/env_check.ps1
-else
+		else
 	@bash scripts/env_check.sh
 endif
 
@@ -1364,7 +1375,7 @@ smoke-hirag-v1:
 setup:
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/codex_bootstrap.ps1 -CondaEnvName $${CONDA_ENV:-PMOVES.AI} ; \
-	else \
+		else \
 		bash scripts/codex_bootstrap.sh $${CONDA_ENV:-pmoves-ai} ; \
 	fi
 
@@ -1390,7 +1401,7 @@ first-run: ensure-env-shared ## One-shot env bootstrap, seed data, start full st
 		else \
 			$(MAKE) supa-start; \
 		fi; \
-	else \
+		else \
 		$(MAKE) supabase-up; \
 	fi
 	@echo "→ Ensuring Supabase boot operator is provisioned..."
@@ -1418,7 +1429,7 @@ supabase-boot-user:
 				if [ -n "$$VAL" ]; then EMAIL="$$VAL"; break; fi; \
 			fi; \
 		done; \
-	fi; \
+		fi; \
 	if [ -z "$$EMAIL" ]; then EMAIL="operator@pmoves.local"; fi; \
 	NAME="$${SUPABASE_BOOT_USER_NAME:-PMOVES Operator}"; \
 	URL="$${SUPABASE_SERVICE_URL:-$${SUPABASE_URL:-$${NEXT_PUBLIC_SUPABASE_URL:-http://127.0.0.1:54321}}}"; \
@@ -1430,12 +1441,12 @@ supabase-boot-user:
 				if [ -n "$$VAL" ]; then SERVICE_KEY="$$VAL"; break; fi; \
 			fi; \
 		done; \
-	fi; \
+		fi; \
 	URL="$${URL%/}"; \
 	if [ -z "$$URL" ]; then \
 		echo "   • Supabase URL not detected; skipping boot user automation."; \
 		exit 0; \
-	fi; \
+		fi; \
 	echo "   • Waiting for Supabase auth endpoint at $$URL..."; \
 	READY=0; \
 	for attempt in $$(seq 1 30); do \
@@ -1449,10 +1460,10 @@ supabase-boot-user:
 	if [ "$$READY" -ne 1 ]; then \
 		echo "   • Supabase auth endpoint not reachable; run 'make supa-start' then 'make supabase-boot-user'."; \
 		exit 0; \
-	fi; \
+		fi; \
 	if python pmoves/tools/create_supabase_boot_user.py "$$EMAIL" --name "$$NAME" --rotate-password --write-env env.shared --write-env .env.local --write-env pmoves/.env.local --json >/dev/null; then \
 		echo "   • Supabase boot user ($$EMAIL) provisioned and env files updated."; \
-	else \
+		else \
 		echo "   • Boot user automation failed; rerun 'make supabase-boot-user' after resolving errors."; \
 		exit 0; \
 	fi
@@ -1471,7 +1482,7 @@ docker-login-ghcr:
 supabase-migrate:
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/apply_migrations_docker.ps1 ; \
-	else \
+		else \
 		bash scripts/apply_migrations_docker.sh ; \
 	fi
 
@@ -1548,18 +1559,18 @@ yt-emit-smoke:
 	 VID=$$(jq -r '.info.id' .tmp_info.json); echo "VIDEO=$$VID"; \
 	 if curl -s "$$REST_BASE/videos?video_id=eq.$$VID&select=id&limit=1" -H "apikey: $$SERVICE_KEY" -H "Authorization: Bearer $$SERVICE_KEY" | jq -e 'length>0' >/dev/null 2>&1; then \
 	   echo "[YT] Ingest (skip, already present)"; \
-	 else \
+		else \
 	   echo "[YT] Ingest" && curl -sS -X POST http://localhost:8077/yt/ingest -H 'content-type: application/json' -d '{"url":"$(URL)","namespace":"pmoves","bucket":"assets"}' | jq -e '.ok==true' >/dev/null && echo OK || { echo FAIL; exit 1; }; \
-	 fi; \
+		fi; \
 	  echo "[YT] Emit (chunks+CGP)" && curl -sS -X POST http://localhost:8077/yt/emit -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"namespace\":\"pmoves\"}" | tee .tmp_emit.json | jq -e '.ok==true and .chunks>=1 and (.upserted|tonumber) >= 1' >/dev/null \
 	     || { \
 	        if jq -e '.detail|ascii_downcase|test("transcript not found")' .tmp_emit.json >/dev/null 2>&1; then \
 	          echo "[YT] Transcript missing; fetching transcript then retrying emit"; \
 	          curl -sS -X POST http://localhost:8077/yt/transcript -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\"}" | jq -e '.ok==true' >/dev/null || { echo FAIL; exit 1; }; \
 	          curl -sS -X POST http://localhost:8077/yt/emit -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"namespace\":\"pmoves\"}" | tee .tmp_emit.json | jq -e '.ok==true and .chunks>=1 and (.upserted|tonumber) >= 1' >/dev/null || { echo FAIL; exit 1; }; \
-	        else \
+		else \
 	          echo FAIL; exit 1; \
-	        fi; \
+		fi; \
 	     }; \
 	  echo "[YT] Profile (if autotune)" && jq -r '.profile // "(none)"' .tmp_emit.json; \
 	  GHPORT=""; \
@@ -1567,7 +1578,7 @@ yt-emit-smoke:
 	 if curl -sf http://localhost:$$HIRAG_GPU/hirag/admin/stats >/dev/null 2>&1; then GHPORT=$$HIRAG_GPU; fi; \
 	 if [ -z "$$GHPORT" ]; then \
 	   if curl -sf localhost:$$HIRAG_CPU/healthz >/dev/null 2>&1 || curl -sf localhost:$$HIRAG_CPU/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then GHPORT=$$HIRAG_CPU; fi; \
-	 fi; \
+		fi; \
 	 if [ -z "$$GHPORT" ]; then echo "FAIL: geometry gateway not reachable on $$HIRAG_GPU or $$HIRAG_CPU"; exit 1; fi; \
 		 echo "[Geometry] Resolve a point id from REST (ref_id=\"$$VID\")"; \
 			 SUPA_URL=$${SUPABASE_REST_URL:-$${SUPA_REST_URL:-http://127.0.0.1:65421/rest/v1}}; \
@@ -1652,8 +1663,8 @@ yt-playlist-smoke:
 	        GEO_OK=0; \
 	        echo "OK (port $$PORT)"; \
 	        break; \
-	      fi; \
-	    fi; \
+		fi; \
+		fi; \
 	  done; \
 	  if [ $$GEO_OK -ne 0 ]; then echo FAIL; exit 1; fi; \
 	  rm -f .tmp_playlist.json .tmp_items.json .tmp_emit.json
@@ -1663,7 +1674,7 @@ web-geometry:
 	@echo "Opening http://localhost:$(HIRAG_GPU_PORT)/geometry/ ..."
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		start "" http://localhost:$(HIRAG_GPU_PORT)/geometry/ ; \
-	else \
+		else \
 		xdg-open http://localhost:$(HIRAG_GPU_PORT)/geometry/ 2>/dev/null || open http://localhost:$(HIRAG_GPU_PORT)/geometry/ ; \
 	fi
 	@$(MAKE) smoke-geometry
@@ -1698,18 +1709,18 @@ jellyfin-smoke:
 	       if [ -f $$candidate ]; then \
 	         LINE=$$(grep -m1 '^JELLYFIN_API_KEY=' $$candidate || true); \
 	         if [ -n "$$LINE" ]; then APIKEY="$$(printf '%s' "$$LINE" | cut -d= -f2-)"; break; fi; \
-	       fi; \
+		fi; \
 	     done; \
-	   fi; \
+		fi; \
 	   if [ -z "$$APIKEY" ]; then echo "  ↳ missing JELLYFIN_API_KEY for fallback"; exit 1; fi; \
    FALLBACK_BASE="$${JELLYFIN_PUBLIC_BASE_URL:-http://localhost:8096}"; \
    FALLBACK_ID=$$(curl -s "$$FALLBACK_BASE/Items?Recursive=true&IncludeItemTypes=Video,Audio&SortBy=DateCreated&SortOrder=Descending&Limit=1&api_key=$$APIKEY" | jq -r '.Items[0].Id // empty'); \
 	   if [ -z "$$FALLBACK_ID" ]; then echo "  ↳ no Jellyfin items found; seed or mount media and rerun. Skipping playback check."; exit 0; fi; \
 	   echo "  ↳ linking $$VID to fallback item $$FALLBACK_ID"; \
 	   curl -sS -X POST http://localhost:8093/jellyfin/link -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"jellyfin_item_id\":\"$$FALLBACK_ID\"}" | jq -e '.ok==true' >/dev/null || { echo "  ↳ fallback link failed (non-fatal)"; exit 0; }; \
-	 else \
+		else \
 	   echo "  ↳ map-by-title OK"; \
-	 fi; \
+		fi; \
 	 echo "[Jellyfin] Playback URL for latest video" && curl -sS -X POST http://localhost:8093/jellyfin/playback-url -H 'content-type: application/json' -d "{\"video_id\":\"$$VID\",\"t\":5}" | jq -e '.ok==true and (.url|length)>0' >/dev/null && echo OK || (echo FAIL && exit 1)
 
 .PHONY: yt-jellyfin-smoke
@@ -1751,7 +1762,7 @@ m2-preflight:
 	if [ -n "$$DISCORD_WEBHOOK_URL" ]; then \
 	  MSG="PMOVES Preflight: $(shell date +%F-%T)" ./pmoves/scripts/discord_ping.sh "PMOVES M2 preflight ping" >/dev/null || true; \
 	  echo "Ping attempted (check Discord)"; \
-	else \
+		else \
 	  echo "DISCORD_WEBHOOK_URL not set; skipping ping"; \
 	fi
 
@@ -1759,7 +1770,7 @@ m2-preflight:
 venv:
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		pwsh -NoProfile -ExecutionPolicy Bypass -File pmoves/scripts/create_venv.ps1 ; \
-	else \
+		else \
 		bash pmoves/scripts/create_venv.sh ; \
 	fi
 
@@ -1767,7 +1778,7 @@ venv:
 venv-min:
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		pwsh -NoProfile -ExecutionPolicy Bypass -File pmoves/scripts/create_venv_min.ps1 ; \
-	else \
+		else \
 		bash pmoves/scripts/create_venv_min.sh ; \
 	fi
 
