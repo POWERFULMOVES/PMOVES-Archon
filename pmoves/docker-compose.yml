@@ -69,6 +69,7 @@ services:
     restart: unless-stopped
     env_file: [.env.generated]
     environment:
+      - NEO4J_AUTH=${NEO4J_AUTH}
       - NEO4J_dbms_security_allow__csv__import__from__file__urls=true
     ports: ["7474:7474","7687:7687"]
     volumes:

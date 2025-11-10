@@ -135,7 +135,7 @@ Choose one:
 - macOS/Linux: `make smoke` (requires `jq`)
 - Windows (no `jq` required): `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1`
 
-Checks (12):
+Checks (14):
 1. Qdrant ready (`6333`)
 2. Meilisearch health (`7700`, warning only)
 3. Neo4j UI reachable (`7474`, warning only)
@@ -144,10 +144,12 @@ Checks (12):
 6. PostgREST reachable (`3000`)
 7. Insert a demo row via Render Webhook
 8. Verify a `studio_board` row exists via PostgREST
-9. Run a Hi-RAG v2 query (`${HIRAG_V2_GPU_HOST_PORT:-8087}`)
+9. Run a Hi-RAG v2 query (`${HIRAG_V2_GPU_HOST_PORT:-8087}`) and assert `/hirag/admin/rerank-status` reports numeric `topn`/`k`
 10. Agent Zero `/healthz` reports JetStream controller running
 11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
 12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`
+13. Convert the sample health summary into CGP via `tools/events_to_cgp.py`
+14. Convert the sample finance summary into CGP via `tools/events_to_cgp.py`
 
 ### 5b) Personas
 
@@ -174,7 +176,7 @@ Prereqs: Supabase CLI stack online (`make supa-start`), env synced via `make env
    - Step 1 lints the Next.js bundle (`npm --prefix ui run lint`).
    - Step 2 loads Supabase env vars from `env.shared`/`.env.local` and hits the REST endpoint for the supplied thread ID.
 2. Review the output; non-zero exit codes signal missing env vars or REST connectivity issues. Capture the console log in PR evidence when validating UI/runtime changes.
-3. Optional manual check: `npm run dev` inside `pmoves/ui` and visit `http://localhost:3000/notebook-workbench` to interactively confirm layout edits, group management, and snapshot persistence.
+3. Optional manual check: `npm run dev` inside `pmoves/ui` and visit `http://localhost:4482/notebook-workbench` to interactively confirm layout edits, group management, and snapshot persistence.
 
 See `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` for extended workflows and troubleshooting tips.
 

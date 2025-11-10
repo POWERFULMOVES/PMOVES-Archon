@@ -1,5 +1,6 @@
-import Link from 'next/link';
 import { getServiceSupabaseClient } from '@/lib/supabaseServer';
+import type { Database } from '@/lib/database.types';
+import DashboardNavigation from '../../../components/DashboardNavigation';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,6 +10,27 @@ type Persona = {
   description: string | null;
   runtime: Record<string, any> | null;
 };
+
+function coercePersona(input: any): Persona {
+  const runtimeValue =
+    input && typeof input.runtime === 'object' && !Array.isArray(input.runtime)
+      ? (input.runtime as Record<string, any>)
+      : null;
+  return {
+    name: typeof input?.name === 'string' ? input.name : String(input?.name ?? ''),
+    version: typeof input?.version === 'number' || typeof input?.version === 'string' ? input.version : null,
+    description: typeof input?.description === 'string' ? input.description : null,
+    runtime: runtimeValue,
+  };
+}
+
+const mapPersonaRow = (row: Database['pmoves_core']['Tables']['personas']['Row']): Persona =>
+  coercePersona({
+    name: row.name,
+    version: row.version,
+    description: row.description,
+    runtime: row.runtime,
+  });
 
 async function fetchFromPostgrest(): Promise<{ data: Persona[]; error?: string }>
 {
@@ -25,7 +47,8 @@ async function fetchFromPostgrest(): Promise<{ data: Persona[]; error?: string }
     });
     if (!res.ok) return { data: [], error: `PostgREST ${res.status}` };
     const rows = await res.json();
-    return { data: rows as Persona[] };
+    const personas = Array.isArray(rows) ? rows.map(coercePersona) : [];
+    return { data: personas };
   } catch (e: any) {
     return { data: [], error: e?.message || 'PostgREST fetch failed' };
   }
@@ -47,7 +70,7 @@ async function loadPersonas(): Promise<{ data: Persona[]; error?: string }>
       const pg = await fetchFromPostgrest();
       return pg.data.length ? pg : { data: [], error: error.message };
     }
-    return { data: data as Persona[] };
+    return { data: (data ?? []).map(mapPersonaRow) };
   } catch (e: any) {
     // Attempt PostgREST fallback
     const pg = await fetchFromPostgrest();
@@ -58,12 +81,14 @@ async function loadPersonas(): Promise<{ data: Persona[]; error?: string }>
 export default async function PersonasPage() {
   const { data, error } = await loadPersonas();
   return (
-    <main className="mx-auto max-w-5xl p-6">
-      <header className="mb-6 flex items-center justify-between">
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-6">
+      <DashboardNavigation active="personas" />
+      <header className="space-y-2">
         <h1 className="text-2xl font-semibold text-slate-900">Grounded Personas</h1>
-        <Link href="/" className="text-sm text-slate-600 hover:text-slate-900">
-          ← Back to console
-        </Link>
+        <p className="text-sm text-slate-600">
+          Review the seeded persona definitions available to the cooperative runtime. Use the Supabase runbooks to seed
+          additional personas before inviting collaborators.
+        </p>
       </header>
       {error && (
         <div className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -98,6 +123,6 @@ export default async function PersonasPage() {
           </div>
         )}
       </section>
-    </main>
+    </div>
   );
 }

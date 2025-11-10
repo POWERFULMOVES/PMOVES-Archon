@@ -24,7 +24,6 @@ except Exception:
     pass
 
 from services.common.events import envelope
-from .orchestrator import ArchonOrchestrator
 
 logger = logging.getLogger("archon.main")
 
@@ -94,6 +93,65 @@ def _ensure_supabase_env() -> None:
 
 
 _ensure_supabase_env()
+
+
+def _tensorzero_openai_base() -> str:
+    base = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
+    if not base:
+        return ""
+    base = base.rstrip("/")
+    if base.endswith("/openai/v1"):
+        return base
+    if base.endswith("/openai"):
+        return f"{base.rstrip('/')}/v1"
+    return f"{base}/openai/v1"
+
+
+def _sync_openai_compat_env() -> None:
+    resolved_base = ""
+    for candidate in (
+        os.environ.get("OPENAI_COMPATIBLE_BASE_URL"),
+        os.environ.get("OPENAI_API_BASE"),
+        _tensorzero_openai_base(),
+    ):
+        value = (candidate or "").strip()
+        if value:
+            resolved_base = value
+            break
+
+    if resolved_base:
+        targets = (
+            "OPENAI_COMPATIBLE_BASE_URL",
+            "OPENAI_API_BASE",
+            "OPENAI_COMPATIBLE_BASE_URL_LLM",
+            "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
+            "OPENAI_COMPATIBLE_BASE_URL_TTS",
+            "OPENAI_COMPATIBLE_BASE_URL_STT",
+        )
+        updated = []
+        for target in targets:
+            current = (os.environ.get(target) or "").strip()
+            if current:
+                continue
+            os.environ[target] = resolved_base
+            os.putenv(target, resolved_base)
+            updated.append(target)
+        if updated:
+            logger.info("OpenAI-compatible base resolved to %s", resolved_base)
+        else:
+            logger.debug("OpenAI-compatible base already set to %s", resolved_base)
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        tz_key = (os.environ.get("TENSORZERO_API_KEY") or "").strip()
+        if tz_key:
+            os.environ["OPENAI_API_KEY"] = tz_key
+            os.putenv("OPENAI_API_KEY", tz_key)
+            logger.info("OpenAI-compatible API key derived from TensorZero settings")
+
+
+_sync_openai_compat_env()
+
+from .orchestrator import ArchonOrchestrator
 
 
 class CrawlJob(BaseModel):
@@ -437,6 +495,61 @@ def _patch_supabase_client() -> None:
 _patch_supabase_client()
 
 
+def _patch_mcp_status_response() -> None:
+    """Normalize MCP status responses when Docker is unavailable."""
+
+    try:
+        from server.api_routes import mcp_api  # type: ignore
+    except ImportError:  # pragma: no cover - vendor guard
+        LOGGER.debug("Skipping MCP status patch; vendor module missing")
+        return
+
+    original_get_container_status = getattr(mcp_api, "get_container_status", None)
+    if original_get_container_status is None:  # pragma: no cover - defensive guard
+        LOGGER.debug("Skipping MCP status patch; get_container_status missing")
+        return
+
+    def patched_get_container_status():  # type: ignore[override]
+        try:
+            status = original_get_container_status()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            message = str(exc)
+            lowered = message.lower()
+            if "filenotfounderror" in lowered or "permission denied" in lowered or "connection aborted" in lowered:
+                return {
+                    "status": "unavailable",
+                    "uptime": None,
+                    "logs": [],
+                    "container_status": "unavailable",
+                    "message": "Docker daemon unreachable. Mount /var/run/docker.sock or disable MCP container checks.",
+                    "details": message,
+                }
+            raise
+
+        if isinstance(status, dict):
+            error_text = status.get("error")
+            if error_text:
+                normalized = str(error_text).lower()
+                if "filenotfounderror" in normalized or "permission denied" in normalized or "connection aborted" in normalized:
+                    patched = dict(status)
+                    patched["status"] = "unavailable"
+                    patched["container_status"] = "unavailable"
+                    patched.setdefault("logs", [])
+                    patched["message"] = (
+                        "Docker daemon unreachable. Mount /var/run/docker.sock or disable MCP container checks."
+                    )
+                    patched["details"] = str(error_text)
+                    patched.pop("error", None)
+                    return patched
+
+        return status
+
+    mcp_api.get_container_status = patched_get_container_status  # type: ignore[assignment]
+
+
+_patch_mcp_status_response()
+
+
 def _ensure_env_defaults() -> dict[str, str]:
     """Populate default environment variables for Archon services."""
 
@@ -484,6 +597,10 @@ def _import_archon_app():
 
 
 app = _import_archon_app()
+
+# Re-sync OpenAI-compatible env after the vendored app loads, since upstream imports
+# may mutate OpenAI-compatible environment variables.
+_sync_openai_compat_env()
 
 
 @app.get("/healthz")
@@ -665,6 +782,7 @@ def _prepare_agents_app() -> str:
                         agents_module.logger.info("Set credential: %s", key)
 
                 agents_module.AGENT_CREDENTIALS = credentials
+                _sync_openai_compat_env()
                 agents_module.logger.info(
                     "Successfully fetched %s credentials from server",
                     len(credentials),

@@ -70,16 +70,20 @@ services:
       - --path.rootfs=/host
     volumes:
       - /:/host:ro,rslave
-    profiles: ["linux"]
+    profiles: ["linux-node"]
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped
+    privileged: true
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+      - /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs:/rootfs/var/lib/docker/image/overlayfs:ro
+    ports:
+      - "${CADVISOR_HOST_PORT:-9180}:8080"
     networks: [pmoves]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/metrics"]

@@ -27,13 +27,90 @@ COLL = os.environ.get("QDRANT_COLLECTION","pmoves_chunks")
 MODEL = os.environ.get("SENTENCE_MODEL","all-MiniLM-L6-v2")
 ALPHA = float(os.environ.get("ALPHA", "0.7"))
 
-RERANK_ENABLE = os.environ.get("RERANK_ENABLE","true").lower()=="true"
-RERANK_MODEL = os.environ.get("RERANK_MODEL","BAAI/bge-reranker-base")
+# Collect rerank validation notes so startup logs and admin routes can expose them.
+_RERANK_CONFIG_ERRORS: List[str] = []
+_RERANK_CONFIG_WARNINGS: List[str] = []
+
+
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    truthy = {"1", "true", "yes", "y", "on"}
+    falsy = {"0", "false", "no", "n", "off"}
+    if val in truthy:
+        return True
+    if val in falsy:
+        return False
+    _RERANK_CONFIG_WARNINGS.append(f"{name} value {raw!r} not recognised; using default {default}")
+    return default
+
+
+def _parse_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        _RERANK_CONFIG_ERRORS.append(f"{name} must be an integer; received {raw!r}")
+        return default
+    if value <= 0:
+        _RERANK_CONFIG_ERRORS.append(f"{name} must be positive; received {value}")
+        return default
+    return value
+
+
+RERANK_ENABLE = _parse_bool("RERANK_ENABLE", True)
+RERANK_MODEL = (os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-base") or "BAAI/bge-reranker-base").strip()
 # Optional label override for reporting (does not force reload)
 _rerank_model_label = os.environ.get("RERANK_MODEL_LABEL")
-RERANK_TOPN = int(os.environ.get("RERANK_TOPN","50"))
-RERANK_K = int(os.environ.get("RERANK_K","10"))
-RERANK_FUSION = os.environ.get("RERANK_FUSION","mul").lower()  # mul|wsum
+RERANK_TOPN = _parse_positive_int("RERANK_TOPN", 50)
+RERANK_K = _parse_positive_int("RERANK_K", 10)
+RERANK_FUSION = (os.environ.get("RERANK_FUSION", "mul") or "mul").strip().lower()  # mul|wsum
+if RERANK_FUSION not in {"mul", "wsum"}:
+    _RERANK_CONFIG_WARNINGS.append(f"RERANK_FUSION {RERANK_FUSION!r} not recognised; using 'mul'")
+    RERANK_FUSION = "mul"
+_provider_raw = (os.environ.get("RERANK_PROVIDER", "flag") or "flag").strip().lower()
+_allowed_providers = {"flag", "tensorzero", "tz", "tzero"}
+if _provider_raw not in _allowed_providers:
+    _RERANK_CONFIG_WARNINGS.append(f"RERANK_PROVIDER {_provider_raw!r} not recognised; using 'flag'")
+    RERANK_PROVIDER = "flag"
+else:
+    RERANK_PROVIDER = _provider_raw
+
+if RERANK_K > RERANK_TOPN:
+    _RERANK_CONFIG_WARNINGS.append(
+        f"RERANK_K {RERANK_K} exceeds RERANK_TOPN {RERANK_TOPN}; truncating to topn"
+    )
+    RERANK_K = RERANK_TOPN
+
+
+# lazy-init reranker to reduce cold start time; declared early for diagnostics
+_reranker = None
+
+
+def get_rerank_status() -> Dict[str, Any]:
+    return {
+        "enabled": RERANK_ENABLE,
+        "model": RERANK_MODEL,
+        "model_label": _rerank_model_label,
+        "provider": RERANK_PROVIDER,
+        "topn": RERANK_TOPN,
+        "k": RERANK_K,
+        "fusion": RERANK_FUSION,
+        "device": "cuda" if DEVICE == "cuda" else "cpu",
+        "cuda_available": _CUDA_AVAILABLE,
+        "loaded": bool(_reranker),
+        "errors": list(_RERANK_CONFIG_ERRORS),
+        "warnings": list(_RERANK_CONFIG_WARNINGS),
+    }
+
+TENSORZERO_BASE_URL = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
+TENSORZERO_RERANK_FUNCTION = (os.environ.get("TENSORZERO_RERANK_FUNCTION", "hi_rag_rerank") or "hi_rag_rerank").strip()
+TENSORZERO_RERANK_TIMEOUT = float(os.environ.get("TENSORZERO_RERANK_TIMEOUT", "20"))
+TENSORZERO_API_KEY = (os.environ.get("TENSORZERO_API_KEY") or "").strip()
 
 USE_MEILI = os.environ.get("USE_MEILI","false").lower()=="true"
 MEILI_URL = os.environ.get("MEILI_URL","http://meilisearch:7700")
@@ -42,6 +119,8 @@ MEILI_API_KEY = os.environ.get("MEILI_API_KEY","master_key")
 _USE_CUDA_ENV = os.environ.get("USE_CUDA", "true").lower() == "true"
 _CUDA_AVAILABLE = torch.cuda.is_available()
 DEVICE = "cuda" if _USE_CUDA_ENV and _CUDA_AVAILABLE else "cpu"
+
+_RERANK_STATUS_CACHE = get_rerank_status()
 
 from libs.providers.embedding import embed_text as _embed_via_providers
 
@@ -91,6 +170,30 @@ NAMESPACE_DEFAULT = os.environ.get("INDEXER_NAMESPACE","pmoves")
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger("hirag.gateway.v2")
+
+if RERANK_ENABLE:
+    logger.info(
+        "Rerank enabled with model=%s provider=%s topn=%s k=%s fusion=%s device=%s",
+        _rerank_model_label or RERANK_MODEL,
+        _RERANK_STATUS_CACHE["provider"],
+        _RERANK_STATUS_CACHE["topn"],
+        _RERANK_STATUS_CACHE["k"],
+        _RERANK_STATUS_CACHE["fusion"],
+        _RERANK_STATUS_CACHE["device"],
+    )
+else:
+    logger.info(
+        "Rerank disabled (model=%s provider=%s device=%s)",
+        _rerank_model_label or RERANK_MODEL,
+        _RERANK_STATUS_CACHE["provider"],
+        _RERANK_STATUS_CACHE["device"],
+    )
+
+for _warn in _RERANK_STATUS_CACHE["warnings"]:
+    logger.warning("Rerank config warning: %s", _warn)
+
+for _err in _RERANK_STATUS_CACHE["errors"]:
+    logger.error("Rerank config error: %s", _err)
 
 if DEVICE == "cuda":
     logger.info("CUDA detected; embeddings and reranker will run on GPU")
@@ -160,21 +263,50 @@ async def _room_broadcast_roster(name: str):
     await _room_broadcast(name, {"type":"roster", "room": name, "peers": peers})
 
 def embed_query(text: str):
-    # Try provider chain first; fall back to local SentenceTransformer
+    # Try provider chain first; fall back to local SentenceTransformer when unavailable
+    vec = None
     try:
         vec = _embed_via_providers(text)
-        # Ensure vector is a 1-D list/tuple
-        if hasattr(vec, 'tolist'):
-            vec = vec.tolist()
-        return vec
     except Exception:
-        logger.info("Provider embedding failed; falling back to %s", MODEL)
+        logger.exception("Provider embedding failed; will attempt fallback")
+        vec = None
+
+    vec = _coerce_vector(vec)
+    if vec:
+        return vec
+
+    logger.info("Embedding providers unavailable; falling back to %s", MODEL)
+    try:
+        emb = _get_embedder().encode([text], normalize_embeddings=True)
+        if hasattr(emb, "tolist"):
+            emb = emb.tolist()
+        candidate = emb[0] if isinstance(emb, list) and emb else None
+        candidate = _coerce_vector(candidate)
+        if not candidate:
+            raise RuntimeError("sentence-transformers returned empty vector")
+        return candidate
+    except Exception as e:
+        logger.exception("Embedding fallback failed")
+        raise HTTPException(500, f"Embedding error: {e}")
+
+
+def _coerce_vector(vec: Any) -> Optional[List[float]]:
+    if vec is None:
+        return None
+    if hasattr(vec, "tolist"):
         try:
-            emb = _get_embedder().encode([text], normalize_embeddings=True)
-            return emb[0].tolist() if hasattr(emb, 'tolist') else emb[0]
-        except Exception as e:
-            logger.exception("Embedding fallback failed")
-            raise HTTPException(500, f"Embedding error: {e}")
+            vec = vec.tolist()
+        except Exception:
+            return None
+    if not isinstance(vec, (list, tuple)):
+        return None
+    out: List[float] = []
+    try:
+        for item in vec:
+            out.append(float(item))
+    except (TypeError, ValueError):
+        return None
+    return out if out else None
 
 def ensure_qdrant_collection(vector_dim: int):
     """Create or resync the Qdrant collection when the embed dimension changes."""
@@ -306,6 +438,21 @@ def meili_lexical(query, namespace, limit):
         logger.exception("meili lexical error")
         return {}
 
+
+def _extract_persona(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    keys = (
+        "persona_id",
+        "persona_slug",
+        "persona_label",
+        "persona_name",
+        "persona_summary",
+        "persona_namespace",
+    )
+    persona = {k: payload.get(k) for k in keys if payload.get(k)}
+    return persona or None
+
 class QueryReq(BaseModel):
     query: str
     namespace: str = Field(default=NAMESPACE_DEFAULT)
@@ -323,11 +470,13 @@ class QueryHit(BaseModel):
     rerank_score: Optional[float] = None
     graph_match: Optional[bool] = None
     payload: Dict[str, Any] = {}
+    persona: Optional[Dict[str, Any]] = None
 
 class QueryResp(BaseModel):
     query: str
     k: int
     used_rerank: bool
+    rerank_provider: Optional[str] = None
     hits: List[QueryHit]
 
 app = FastAPI(title="PMOVES Hi-RAG Gateway v2 (hybrid + rerank)", version="2.1.0")
@@ -983,6 +1132,15 @@ def stats(request: Request):
         "collection": COLL
     }
 
+
+@app.get("/hirag/admin/rerank-status")
+def admin_rerank_status(request: Request):
+    if os.environ.get("SMOKE_ALLOW_ADMIN_STATS", "false").lower() != "true":
+        require_admin_tailscale(request)
+    status = get_rerank_status()
+    status["model_report"] = _rerank_model_label or status["model"]
+    return status
+
 @app.post("/hirag/admin/reranker/model/label")
 def set_rerank_model_label(body: Dict[str, Any], request: Request):
     # Allow local smoke to set a label for reporting without changing the loaded model
@@ -1028,18 +1186,21 @@ def hirag_query(req: QueryReq = Body(...), request: Request = None, _=Depends(re
 
     base = []
     for h in hits:
-        txt = h.payload.get("text", "")
-        cid = h.payload.get("chunk_id") or h.id
+        payload = h.payload or {}
+        txt = payload.get("text", "")
+        cid = payload.get("chunk_id") or h.id
         lex = float(meili_scores.get(cid, 0.0)) if USE_MEILI else (fuzz.token_set_ratio(req.query, txt)/100.0)
         vecs = float(h.score)
         g_hit = any(term in txt.lower() for term in gterms) if gterms else False
         score = hybrid_score(vecs, lex, req.alpha) + (GRAPH_BOOST if g_hit else 0.0)
+        persona = _extract_persona(payload)
         base.append({
             "chunk_id": cid,
             "text": txt,
             "score": score,
             "graph_match": bool(g_hit),
-            "payload": h.payload
+            "payload": payload,
+            "persona": persona,
         })
 
     # optional rerank
@@ -1048,56 +1209,68 @@ def hirag_query(req: QueryReq = Body(...), request: Request = None, _=Depends(re
     outk = req.rerank_k or req.k or RERANK_K
 
     used = False
+    rerank_provider: Optional[str] = None
     if enable and base:
-        try:
-            rr = _get_reranker()
-        except Exception:
-            rr = None
-        if rr is not None:
-            pool = sorted(base, key=lambda x: x["score"], reverse=True)[:topn]
-            pairs = [[req.query, p["text"]] for p in pool]
+        pool = sorted(base, key=lambda x: x["score"], reverse=True)[:topn]
+        scores: Optional[List[float]] = None
+        if pool and RERANK_PROVIDER in {"tensorzero", "tz", "tzero"}:
+            scores = _tensorzero_rerank(req.query, pool)
+            if scores is not None:
+                rerank_provider = "tensorzero"
+        if scores is None and pool:
             try:
-                scores = rr.compute_score(pairs, normalize=True)
-            except Exception as e:
-                # FlagEmbedding rerankers (and some third-party adapters) only
-                # support batch size 1. When that happens we fall back to
-                # running the pairs sequentially so rerank stays available
-                # instead of bubbling an error to the caller.
-                if isinstance(e, ValueError) and "batch" in str(e).lower():
-                    scores = []
-                    for pair in pairs:
-                        try:
-                            res = rr.compute_score([pair], normalize=True)
-                            if isinstance(res, (list, tuple)):
-                                scores.extend(float(r) for r in res)
-                            else:
-                                scores.append(float(res))
-                        except Exception:
-                            logger.exception("Reranker single compute failed")
-                            scores.append(0.0)
-                else:
-                    logger.exception("Reranker compute failed")
-                    scores = [0.0]*len(pool)
+                rr = _get_reranker()
+            except Exception:
+                rr = None
+            if rr is not None:
+                pairs = [[req.query, p["text"]] for p in pool]
+                try:
+                    scores = rr.compute_score(pairs, normalize=True)
+                except Exception as e:
+                    if isinstance(e, ValueError) and "batch" in str(e).lower():
+                        scores = []
+                        for pair in pairs:
+                            try:
+                                res = rr.compute_score([pair], normalize=True)
+                                if isinstance(res, (list, tuple)):
+                                    scores.extend(float(r) for r in res)
+                                else:
+                                    scores.append(float(res))
+                            except Exception:
+                                logger.exception("Reranker single compute failed")
+                                scores.append(0.0)
+                    else:
+                        logger.exception("Reranker compute failed")
+                        scores = [0.0] * len(pool)
+                if scores is not None and rerank_provider is None:
+                    fallback_label = RERANK_PROVIDER
+                    if fallback_label in {"tensorzero", "tz", "tzero"}:
+                        fallback_label = "flag"
+                    rerank_provider = fallback_label
+        if scores is not None:
             if len(scores) != len(pool):
-                # ensure downstream zip stays aligned even if a retry failed
-                scores = (scores + [0.0]*len(pool))[:len(pool)]
+                scores = (scores + [0.0] * len(pool))[:len(pool)]
             fused = []
             for p, s in zip(pool, scores):
                 p = dict(p)
                 p["rerank_score"] = float(s)
                 if RERANK_FUSION == "wsum":
-                    # weighted sum with 0.5 vec/lex hybrid already baked into p['score']
-                    p["score"] = float(0.5*p["score"] + 0.5*s)
+                    p["score"] = float(0.5 * p["score"] + 0.5 * s)
                 else:
-                    # multiplicative fusion keeps ordering stable
-                    p["score"] = float(p["score"] * (0.5 + 0.5*s))
+                    p["score"] = float(p["score"] * (0.5 + 0.5 * s))
                 fused.append(p)
             base = sorted(fused, key=lambda x: x["score"], reverse=True)[:outk]
             used = True
     if not used:
         base = sorted(base, key=lambda x: x["score"], reverse=True)[:req.k]
 
-    return {"query": req.query, "k": len(base), "used_rerank": used, "hits": base}
+    return {
+        "query": req.query,
+        "k": len(base),
+        "used_rerank": used,
+        "rerank_provider": rerank_provider,
+        "hits": base,
+    }
 
 @app.post("/hirag/admin/refresh")
 def hirag_admin_refresh(_=Depends(require_admin_tailscale)):
@@ -1215,8 +1388,37 @@ def mindmap_route(
         "stats": {"per_modality": stats_map},
     }
 
-# lazy-init reranker to reduce cold start time
-_reranker = None
+def _tensorzero_rerank(query: str, pool: List[Dict[str, Any]]) -> Optional[List[float]]:
+    base = TENSORZERO_BASE_URL.rstrip("/")
+    if not base or not pool:
+        return None
+    url = f"{base}/functions/{TENSORZERO_RERANK_FUNCTION}/invoke"
+    payload = {
+        "query": query,
+        "documents": [p.get("text", "") for p in pool],
+    }
+    headers = {"Content-Type": "application/json"}
+    if TENSORZERO_API_KEY:
+        headers["Authorization"] = f"Bearer {TENSORZERO_API_KEY}"
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=TENSORZERO_RERANK_TIMEOUT)
+        if not resp.ok:
+            logger.warning(
+                "tensorzero rerank request failed status=%s body=%s", resp.status_code, resp.text[:200]
+            )
+            return None
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        scores = data.get("scores") or data.get("data")
+        if isinstance(scores, list):
+            try:
+                return [float(s) for s in scores]
+            except (TypeError, ValueError):
+                return None
+    except Exception:
+        logger.exception("tensorzero rerank invocation error")
+    return None
+
+
 def _get_reranker():
     global _reranker
     if _reranker is not None:

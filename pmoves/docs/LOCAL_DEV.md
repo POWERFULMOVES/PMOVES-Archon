@@ -64,6 +64,7 @@ Remote inference quick switch:
 - **Compose overlay (`make supabase-up`)** — reuses the main PMOVES Postgres container while attaching Gotrue, Realtime, Storage, and Studio through `docker-compose.supabase.yml`.
 - Run `make supabase-bootstrap` after either approach to replay `supabase/initdb/*.sql`, `supabase/migrations/*.sql`, and `db/v5_12_grounded_personas.sql` into the CLI Postgres container. This keeps the CLI stack aligned with repo-owned schema changes.
 - Use `make supa-use-local` / `make supa-use-remote` to swap `.env.local` presets so services know whether to hit the CLI stack (`http://postgrest:3000`) or a hosted Supabase project (`SUPABASE_URL`, `SUPABASE_KEY`). Refresh `.env.supa.remote` with `supabase db diff` output whenever production schema drifts.
+- When you upgrade the Supabase CLI, follow the maintenance checklist in `pmoves/docs/services/supabase/README.md#6-upgrade--maintenance` and re-run `make -C pmoves smoke` afterwards to confirm downstream services still pass the 14-step harness.
 
 External bundles (via `make up-external`):
 - wger: 8000 (nginx proxy to Django; override host mapping with `WGER_ROOT_URL` when reverse-proxying)
@@ -75,7 +76,7 @@ External bundles (via `make up-external`):
 | UI | Default URL | Bring-Up Command | Notes |
 | --- | --- | --- | --- |
 | Supabase Studio | http://127.0.0.1:65433 | `make -C pmoves supa-start` *(CLI-managed)* | Requires the Supabase CLI stack; confirm status with `make -C pmoves supa-status`. |
-| Notebook Workbench (Next.js) | http://localhost:3000/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
+| Notebook Workbench (Next.js) | http://localhost:4482/notebook-workbench | `npm run dev` in `pmoves/ui` | Lint + env validation via `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"`. |
 | Agent Zero Admin (FastAPI docs) | http://localhost:8080/docs | `make -C pmoves up` | Useful for manual message dispatch debugging; default UI badge probes `/healthz` (override with `NEXT_PUBLIC_AGENT_ZERO_HEALTH_PATH`). |
 | TensorZero Playground | http://localhost:4000 | `make -C pmoves up-tensorzero` | Brings up ClickHouse, gateway/UI, and `pmoves-ollama`. Gateway API at http://localhost:3030; set `TENSORZERO_BASE_URL` to a remote gateway if Ollama runs elsewhere. |
 | Firefly Finance | http://localhost:8082 | `make -C pmoves up-external-firefly` | Set `FIREFLY_APP_KEY`/`FIREFLY_ACCESS_TOKEN` in `pmoves/env.shared` before first login. |
@@ -180,20 +181,28 @@ If your fork’s internal port differs, adjust `AGENT_ZERO_EXTRA_ARGS` / `ARCHON
 - TensorZero gateway (optional): copy `pmoves/tensorzero/config/tensorzero.toml.example` to `pmoves/tensorzero/config/tensorzero.toml`, then set `TENSORZERO_BASE_URL=http://localhost:3030` (and `TENSORZERO_API_KEY` if required). `make -C pmoves up-tensorzero` now starts ClickHouse, the gateway/UI, and `pmoves-ollama`, so the default `gemma_embed_local` route works without manual pulls. If you deploy on hardware that cannot run Ollama (Jetson, remote inference nodes), skip the sidecar and point `TENSORZERO_BASE_URL` at a remote gateway instead. Setting `LANGEXTRACT_PROVIDER=tensorzero` routes LangExtract through the gateway; populate `LANGEXTRACT_REQUEST_ID` / `LANGEXTRACT_FEEDBACK_*` variables to tag observability traces.
   - Advanced toggles: `TENSORZERO_MODEL` overrides the default chat backend, `TENSORZERO_TIMEOUT_SECONDS` adjusts request timeouts, and `TENSORZERO_STATIC_TAGS` (JSON or `key=value,key2=value2`) forwards deployment metadata as `tensorzero::tags`.
 
+### Model provider registry (Archon)
+- Archon persists model API keys and default provider choices inside Supabase so downstream agents pull credentials at runtime. Populate the registry with `uv run python pmoves/scripts/credentials/set_archon_provider.py --provider <slug> --key <api-key> [--service-type llm|embedding] [--make-default]`. Run with `--dry-run` to inspect the payload without storing secrets.
+- Provider slugs are lowercase and match Archon’s adapters (`openai`, `anthropic`, `google`, `gemini`, `groq`, `mistral`, `deepseek`, `xai`, `together`, `tensorzero`, `ollama`, etc.). Use `--service-type embedding` when registering embedding-only backends (TensorZero, Voyage, sentence-transformers proxies) so the correct default flips.
+- `--make-default` promotes the uploaded credential to the active provider for the chosen service type. Archon, Agent Zero, and Hi‑RAG v2 pull the active `llm` provider for chat/orchestration and the active `embedding` provider for rerank + retrieval tasks within a few seconds thanks to cache invalidation in the new `/api/credentials/provider` endpoint.
+- When you point `TENSORZERO_BASE_URL` at a local or remote gateway, register it once via `--provider tensorzero --service-type embedding --make-default` so Archon and Agent Zero rely on TensorZero for embeddings while keeping OpenAI (or any other slug) as the LLM default. To drive LLM traffic through TensorZero’s OpenAI-compatible route, upload the same key with `--service-type llm --make-default` and ensure `OPENAI_COMPATIBLE_BASE_URL[_LLM]` in `pmoves/env.shared` targets the gateway.
+- Keys live in the `archon_settings` table; rotate them by rerunning the helper or delete the row via `DELETE /api/credentials/<key>` if you prefer manual cleanup. After updates, rerun `make -C pmoves smoke` (or at minimum `make -C pmoves archon-ui-smoke`) to confirm the new defaults propagate through the stack.
+
 ### UI Workspace (Next.js + Supabase Platform Kit)
 
 - Location: `pmoves/ui/` (Next.js App Router + Tailwind). The workspace consumes the same Supabase CLI stack that powers the core services.
 - Prerequisites: run `make supa-start` and `make supa-status` so `pmoves/.env.local` is populated with `SUPABASE_URL`, anon key, service role key, REST URL, and realtime URL.
 - Env loading: every `npm run` script shells through `node scripts/with-env.mjs …`, layering `pmoves/env.shared`, `env.shared.generated`, `.env.generated`, `.env.local`, and `pmoves/ui/.env.local`. Update those root files (not the UI directory) when pointing the console at a different Supabase project.
 - Install dependencies: `cd pmoves/ui && npm install` (or `yarn install`).
-- Dev server: `npm run dev` / `yarn dev` (default http://localhost:3000). Because the launcher preloads the root env files, no additional sourcing is required. Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
+- Dev server: `npm run dev` / `yarn dev` (default http://localhost:4482). Because the launcher preloads the root env files, no additional sourcing is required. Pair with `make supa-start` to back the UI against the local Supabase CLI gateway.
 - Other scripts: `npm run lint`, `npm run build`, `npm run start`.
 - Tests: `npm run test` (unit/component via Jest + Testing Library) and `npm run test:e2e` (Playwright smoke). Run `npx playwright install` once to download the browser engines before exercising the E2E suite.
 - Shared helpers: `pmoves/ui/config/index.ts` exposes API + websocket URLs, while `pmoves/ui/lib/supabaseClient.ts` and `pmoves/ui/lib/supabase.ts` return typed Supabase clients (browser/service-role). These helpers throw descriptive errors if the Supabase env vars are missing.
-- Notebook Workbench: visit `http://localhost:3000/notebook-workbench` to manage `message_views`, view groups, and snapshots for a Supabase thread. Follow the dedicated guide at [`pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`](UI_NOTEBOOK_WORKBENCH.md) for setup steps and troubleshooting.
+- Notebook Workbench: visit `http://localhost:4482/notebook-workbench` to manage `message_views`, view groups, and snapshots for a Supabase thread. Follow the dedicated guide at [`pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`](UI_NOTEBOOK_WORKBENCH.md) for setup steps and troubleshooting.
 - Smoketest: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<thread_uuid>"` after UI changes to lint the bundle and confirm Supabase connectivity.
 - Edge auth proxy: `pmoves/ui/proxy.ts` enforces session checks for all non-public routes using the Supabase auth helper. Update its `PUBLIC_PATHS` set when adding new unauthenticated pages.
 - Security expectations: the ingestion dashboard now requires a Supabase-authenticated session. `upload_events` rows are stamped with `owner_id`, and the UI only presigns objects under `namespace/users/<owner-id>/uploads/<uuid>/`. Anonymous callers can no longer generate presigned GETs or mutate upload metadata.
+- Upload event instrumentation: the console now logs `[metric] uploadEvents...` entries to the browser console for fetches, deletes, and smoke clears. Run `npm run typecheck` before committing UI changes and `npm run smoke:upload-events` to execute the focused Jest suite that validates the Supabase contract and metric hooks.
 
 ### Crush CLI Integration
 

@@ -21,7 +21,7 @@ The Notebook Workbench surfaces Supabase conversation threads inside the PMOVES 
    npm install
    ```
 2. Sync environment configuration: `make env-setup` (repo root) refreshes `.env`, `.env.local`, and `pmoves/env.shared`.
-3. Launch the dev server: `npm run dev` and navigate to `http://localhost:3000/notebook-workbench`.
+3. Launch the dev server: `npm run dev` and navigate to `http://localhost:4482/notebook-workbench` (or open the dashboard shortcut at `http://localhost:4482/dashboard/notebook/runtime`). The console navigation now surfaces both destinations under the Notebook + CHIT group, so you can also reach them via the in-app pill bar once the UI loads.
 4. Paste a thread ID into the **Thread ID** input to hydrate the workbench. The canvas, groups panel, snapshots, and scrubber update in realtime as Supabase changes land.
 
 ## Smoketest Workflow

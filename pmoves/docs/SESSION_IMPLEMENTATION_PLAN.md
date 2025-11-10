@@ -4,8 +4,10 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
 
 ## Completed This Session
 - Agent Zero
-  - UI bound to port 80 in-container; host mapping 8081→80. Verified 200 on http://localhost:8081/.
-  - JetStream resilience: controller falls back to core NATS after repeated ServiceUnavailable; threshold env `AGENTZERO_JS_UNAVAILABLE_THRESHOLD` (compose default 1 for local).
+   - UI bound to port 80 in-container; host mapping 8081→80. Verified 200 on http://localhost:8081/.
+   - JetStream resilience: forced JetStream outage by relocating `/tmp/nats/jetstream`, published `agentzero.memory.update` task, and observed fallback warning at log line 4444; threshold env `AGENTZERO_JS_UNAVAILABLE_THRESHOLD` (compose default 1 for local).
+- Console UI
+   - Notebook Workbench view now shows dashboard navigation by default; dashboard pill bar exposes runtime + workbench entries without additional props.
 - DeepResearch
   - In-network NATS smoke target (`make -C pmoves deepresearch-smoke-in-net`) returns status=success.
   - Echo subscribers stabilized (URL normalization, retries, no empty args).
@@ -18,6 +20,18 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
 
 ## Evidence
 - See `pmoves/PR_EVIDENCE/*` for current smoke/health outputs appended to the PR.
+- JetStream fallback log capture (Nov 7, 2025):
+
+   ```bash
+   docker compose -p pmoves logs agent-zero | sed -n '4440,4455p'
+   ```
+
+   ```
+   WARNING:services.agent_zero.controller:JetStream pull loop error for agentzero.memory.update (agentzero-agentzero-memory-update): nats: ServiceUnavailableError: code=None err_code=None description='None'
+   WARNING:services.agent_zero.controller:Falling back to core NATS subscription for agentzero.memory.update after repeated ServiceUnavailable
+   ```
+
+   Triggered by moving `/tmp/nats/jetstream` out of the NATS container and posting a valid `/events/publish` payload to exercise the fallback path.
 
 ## Next Steps (handoff to @AGENTS)
 1) SupaSerch integration

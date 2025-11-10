@@ -293,6 +293,20 @@ MONITORING_COMPOSE := monitoring/docker-compose.monitoring.yml
 
 up-monitoring: ## Start monitoring stack and print URLs
 	@echo "⛳ Starting monitoring stack (Prometheus, Grafana, Loki, Promtail, blackbox, cAdvisor)..."
+	@profiles=""; \
+	if [ "$$MON_INCLUDE_CADVISOR" = "true" ] || [ "`uname -s`" = "Linux" ]; then \
+	  profiles="$$profiles --profile linux"; \
+	fi; \
+	if [ "$$MON_INCLUDE_NODE_EXPORTER" = "true" ]; then \
+	  profiles="$$profiles --profile linux-node"; \
+	fi; \
+	if [ -n "$$profiles" ]; then \
+	  echo "→ Including compose profiles:$$profiles"; \
+	  docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) $$profiles up -d; \
+	else \
+	  echo "→ Skipping cAdvisor (set MON_INCLUDE_CADVISOR=true to force)"; \
+	  docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) up -d; \
+	fi
 	@if [ "$$MON_INCLUDE_CADVISOR" = "true" ] || [ "$$MON_INCLUDE_NODE_EXPORTER" = "true" ] || [ "`uname -s`" = "Linux" ]; then \
 		echo "→ Including linux profile (cAdvisor/Node Exporter)"; \
 		docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) --profile linux up -d; \
@@ -303,7 +317,7 @@ up-monitoring: ## Start monitoring stack and print URLs
 	@echo "Grafana:      http://localhost:$${GRAFANA_HOST_PORT:-3002} (admin/admin)"
 	@echo "Prometheus:   http://localhost:$${PROMETHEUS_HOST_PORT:-9090}"
 	@echo "Loki:         http://localhost:$${LOKI_HOST_PORT:-3100}"
-	@echo "cAdvisor:     http://localhost:$${CADVISOR_HOST_PORT:-8080}"
+	@echo "cAdvisor:     http://localhost:$${CADVISOR_HOST_PORT:-9180}"
 
 down-monitoring: ## Stop monitoring stack and remove volumes
 	@docker compose -p $(PROJECT) -f $(MONITORING_COMPOSE) down -v
@@ -947,13 +961,15 @@ smoke:
 	@REST_BASE="$$( if curl -sf http://localhost:3010 >/dev/null 2>&1; then echo http://localhost:3010; else echo "$${SUPA_REST_URL:-http://127.0.0.1:65421/rest/v1}"; fi )"; \
 	 APIKEY="$${SUPABASE_ANON_KEY:-sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH}"; \
 	 echo "[8/12] Verify studio_board row..." && curl -sf "$${REST_BASE}/studio_board?order=id.desc&limit=1" -H "apikey: $$APIKEY" | jq -e '.[0].title != null' >/dev/null && echo OK || (echo FAIL && exit 1)
-	@echo "[9/12] Hi-RAG v2 query..." && \
+	@echo "[9/12] Hi-RAG v2 query + rerank status..." && \
 	HPORT=""; for p in $(HIRAG_GPU_PORT) $(HIRAG_CPU_PORT); do \
 	  if curl -sf localhost:$$p/healthz >/dev/null 2>&1 || curl -sf localhost:$$p/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then HPORT=$$p; break; fi; \
 	done; \
 	if [ -z "$$HPORT" ]; then echo "FAIL: hi-rag-gateway-v2 not reachable on $(HIRAG_GPU_PORT) or $(HIRAG_CPU_PORT)"; exit 1; fi; \
 	echo "→ using :$$HPORT"; \
-	curl -sf localhost:$$HPORT/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && echo OK || (echo FAIL && exit 1)
+	curl -sf localhost:$$HPORT/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && \
+	curl -sf localhost:$$HPORT/hirag/admin/rerank-status | jq -e '.enabled != null and (.topn|type) == "number" and (.k|type) == "number"' >/dev/null && \
+	echo OK || (echo FAIL && exit 1)
 	@echo "[10/12] Agent Zero health..." && curl -sf http://localhost:8080/healthz | jq -e '.nats.connected == true' >/dev/null && echo OK || (echo FAIL && exit 1)
 	@CID=$$(uuidgen | tr 'A-Z' 'a-z' | cut -d- -f1); \
 	 POINT_ID="p.smoke.$${CID}"; \

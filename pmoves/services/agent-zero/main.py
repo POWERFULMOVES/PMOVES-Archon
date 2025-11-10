@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging
@@ -19,12 +17,11 @@ try:
     _services_root = Path(__file__).resolve().parents[2]
     if str(_services_root) not in sys.path:
         sys.path.insert(0, str(_services_root))
+    _service_dir = Path(__file__).resolve().parent
+    if str(_service_dir) not in sys.path:
+        sys.path.insert(0, str(_service_dir))
 except Exception:
     pass
-
-from services.agent_zero.controller import AgentZeroController, ControllerSettings
-
-import mcp_server
 
 logger = logging.getLogger("pmoves.agent_zero.service")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -40,6 +37,73 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _tensorzero_openai_base() -> str:
+    base = (os.environ.get("TENSORZERO_BASE_URL") or "").strip()
+    if not base:
+        return ""
+    base = base.rstrip("/")
+    if base.endswith("/openai/v1"):
+        return base
+    if base.endswith("/openai"):
+        return f"{base.rstrip('/')}/v1"
+    return f"{base}/openai/v1"
+
+
+def _sync_openai_compat_env() -> None:
+    resolved_base = ""
+    for candidate in (
+        os.environ.get("OPENAI_COMPATIBLE_BASE_URL"),
+        os.environ.get("OPENAI_API_BASE"),
+        _tensorzero_openai_base(),
+    ):
+        value = (candidate or "").strip()
+        if value:
+            resolved_base = value
+            break
+
+    if resolved_base:
+        targets = (
+            "OPENAI_COMPATIBLE_BASE_URL",
+            "OPENAI_API_BASE",
+            "OPENAI_COMPATIBLE_BASE_URL_LLM",
+            "OPENAI_COMPATIBLE_BASE_URL_EMBEDDING",
+            "OPENAI_COMPATIBLE_BASE_URL_TTS",
+            "OPENAI_COMPATIBLE_BASE_URL_STT",
+        )
+        updated = []
+        for target in targets:
+            current = (os.environ.get(target) or "").strip()
+            if current:
+                continue
+            os.environ[target] = resolved_base
+            os.putenv(target, resolved_base)
+            updated.append(target)
+        if updated:
+            logger.info("OpenAI-compatible base resolved to %s", resolved_base)
+        else:
+            logger.debug("OpenAI-compatible base already set to %s", resolved_base)
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        tz_key = (os.environ.get("TENSORZERO_API_KEY") or "").strip()
+        if tz_key:
+            os.environ["OPENAI_API_KEY"] = tz_key
+            os.putenv("OPENAI_API_KEY", tz_key)
+            logger.info("OpenAI-compatible API key derived from TensorZero settings")
+
+
+_sync_openai_compat_env()
+
+from services.agent_zero.controller import AgentZeroController, ControllerSettings
+from services.common.forms import (
+    DEFAULT_AGENT_FORM,
+    DEFAULT_AGENT_FORMS_DIR,
+    resolve_form_name,
+    resolve_forms_dir,
+)
+
+import mcp_server
 
 
 @dataclass
@@ -174,10 +238,10 @@ class AgentZeroServiceConfig(BaseModel):
         description="Indicates whether an Open Notebook API token is configured",
     )
     agent_form: str = Field(
-        default="POWERFULMOVES", description="Default MCP form name"
+        default=DEFAULT_AGENT_FORM, description="Default MCP form name"
     )
     agent_forms_dir: str = Field(
-        default="configs/agents/forms",
+        default=DEFAULT_AGENT_FORMS_DIR,
         description="Directory containing Agent Zero YAML form definitions",
     )
     knowledge_base_dir: str = Field(
@@ -211,8 +275,8 @@ def load_service_config() -> AgentZeroServiceConfig:
             os.environ.get("OPEN_NOTEBOOK_API_TOKEN")
             or os.environ.get("NOTEBOOK_API_TOKEN")
         ),
-        agent_form=os.environ.get("AGENT_FORM", "POWERFULMOVES"),
-        agent_forms_dir=os.environ.get("AGENT_FORMS_DIR", "configs/agents/forms"),
+        agent_form=resolve_form_name(),
+        agent_forms_dir=resolve_forms_dir(),
         knowledge_base_dir=os.environ.get(
             "AGENT_KNOWLEDGE_BASE_DIR", "runtime/knowledge"
         ),
@@ -537,6 +601,9 @@ class MCPExecuteResponse(BaseModel):
 
 
 service_config = load_service_config()
+# Re-sync OpenAI-compatible endpoints after configuration load, as some helpers may
+# populate default OpenAI-compatible URLs while constructing the config.
+_sync_openai_compat_env()
 runtime_config = AgentZeroRuntimeConfig()
 client = AgentZeroClient(runtime_config)
 process_manager = AgentZeroProcessManager(runtime_config, client)
@@ -593,8 +660,9 @@ async def on_startup() -> None:
             loop.add_signal_handler(
                 sig, lambda s=sig: asyncio.create_task(process_manager.stop())
             )
-        except NotImplementedError:  # pragma: no cover - platform specific
-            logger.warning("Signal handlers not supported on this platform")
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Tests run event loops in worker threads where signal handlers are unsupported.
+            logger.debug("Skipping signal handler registration for %s", sig)
 
 
 @app.on_event("shutdown")

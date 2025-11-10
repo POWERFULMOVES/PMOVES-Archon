@@ -103,7 +103,7 @@ See also: `pmoves/docs/SERVICE_HEALTH_ENDPOINTS.md`.
 - Published images (default):
   - `make -C pmoves up-agents-ui` — starts NATS, Agent Zero API, Archon API, and the Archon UI. Open the UIs:
     - Agent Zero UI: `${NEXT_PUBLIC_AGENT_ZERO_UI_URL:-http://localhost:8081}`
-    - Archon UI: `${NEXT_PUBLIC_ARCHON_UI_URL:-http://localhost:3737}` (defaults to API `${ARCHON_UI_API_URL:-http://archon-server:8091}` inside Docker; set `ARCHON_UI_API_URL` if you want the UI to talk to a host/remote Archon)
+    - Archon UI: `${NEXT_PUBLIC_ARCHON_UI_URL:-http://localhost:3737}` (uses the Vite proxy to reach the Archon API on the Docker alias `archon-server`; keep `ARCHON_UI_API_URL` unset unless you explicitly need to point the UI at a remote/hosted Archon instance)
 
 ### MCP (Agent‑to‑Agent) wiring
 
@@ -165,7 +165,7 @@ Pin images by setting `AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `ARCHON_UI_IMAGE`, and
 
 ### UI Quickstart & Links
 - Supabase Studio → http://127.0.0.1:65433 (`make -C pmoves supa-start`; status via `make -C pmoves supa-status`).
-- Notebook Workbench → http://localhost:3000/notebook-workbench (`npm run dev` in `pmoves/ui`; the launcher now layers `env.shared` + `.env.local` automatically; smoke with `make -C pmoves notebook-workbench-smoke`).
+- Notebook Workbench → http://localhost:4482/notebook-workbench (`npm run dev` in `pmoves/ui`; the launcher now layers `env.shared` + `.env.local` automatically; smoke with `make -C pmoves notebook-workbench-smoke`).
 - TensorZero Playground → http://localhost:4000 (`make -C pmoves up-tensorzero`; this target now launches ClickHouse, the gateway/UI, and `pmoves-ollama` so embeddings resolve on http://localhost:3030). If you’re on Jetson/arm64 or delegating inference, point `TENSORZERO_BASE_URL` at a remote gateway instead.
 - Firefly Finance → http://localhost:8082 (`make -C pmoves up-external-firefly`; configure `FIREFLY_*` secrets).
 - Wger Coach Portal → http://localhost:8000 (`make -C pmoves up-external-wger`; brand defaults apply automatically).
