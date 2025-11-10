@@ -6,6 +6,26 @@ type Feature = {
   accent: string;
 };
 
+type ModuleTile = {
+  title: string;
+  blurb: string;
+  capabilities: string[];
+  href: string;
+};
+
+type PipelineStage = {
+  title: string;
+  summary: string;
+  highlight: string;
+};
+
+type PersonaAvatar = {
+  name: string;
+  role: string;
+  theme: string;
+  description: string;
+};
+
 type LinkDef = { label: string; href: string; health?: string; optional?: boolean };
 
 const features: Feature[] = [
@@ -26,6 +46,95 @@ const features: Feature[] = [
     description:
       'Tokenize commitments, route resources, and surface accountability loops that let communities move with precision and care.',
     accent: 'var(--cataclysm-ember)',
+  },
+];
+
+const modules: ModuleTile[] = [
+  {
+    title: 'Agent Zero · Conversational Core',
+    blurb:
+      'Natural language entry point that orchestrates Supabase data, creative automations, and infrastructure workflows.',
+    capabilities: ['Command console', 'Task delegation', 'Observability traces'],
+    href: '/dashboard/agent-zero',
+  },
+  {
+    title: 'Archon · Knowledge & Personas',
+    blurb: 'Surface project knowledge, persona prompts, and geometry constellations for guided research.',
+    capabilities: ['Persona studio', 'Explainability', 'Geometry exports'],
+    href: '/dashboard/archon',
+  },
+  {
+    title: 'Creator Pipeline · ComfyUI to Publish',
+    blurb:
+      'Ingest renders, audio, and storyboards with the MinIO + Supabase loop documented in the Creator Pipeline runbook.',
+    capabilities: ['ComfyUI uploads', 'Supabase approvals', 'Discord & Jellyfin publish'],
+    href: '/dashboard/ingest',
+  },
+  {
+    title: 'Notebook Workbench · Model Ops',
+    blurb: 'Manage runtime catalogs, seed embeddings, and test inference routes from any device.',
+    capabilities: ['Model registry', 'Runtime diagnostics', 'GPU / CPU failover'],
+    href: '/dashboard/notebook',
+  },
+  {
+    title: 'Finance & Health · Automations',
+    blurb:
+      'Monitor Firefly III and Wger data streams translated into CGPs so squads can act on weekly insights.',
+    capabilities: ['Supabase sync', 'CGP visualizations', 'Cost-aware prompts'],
+    href: '/dashboard/services',
+  },
+  {
+    title: 'Monitoring & Observability',
+    blurb: 'Grafana, Prometheus, and Channel Monitor dashboards ensure distributed services stay aligned.',
+    capabilities: ['Health badges', 'Latency probes', 'Alert routing'],
+    href: '/dashboard/monitor',
+  },
+];
+
+const pipeline: PipelineStage[] = [
+  {
+    title: 'Create & Upload',
+    summary: 'ComfyUI renders assets and pushes them to MinIO with the PMOVES upload nodes.',
+    highlight: 'GPU-assisted render bundles, uv-managed environments, and tagged filenames keep the flow deterministic.',
+  },
+  {
+    title: 'Webhook → Supabase',
+    summary: 'Render Webhook stamps studio_board rows, handing metadata to Supabase for approvals.',
+    highlight: 'Auto-approve toggles and namespace conventions align assets with geometry constellations.',
+  },
+  {
+    title: 'Review & Approve',
+    summary: 'Operators triage submissions in the Studio Board and apply persona-aligned feedback.',
+    highlight: 'Tags funnel into Indexer facets so creator squads can search, remix, and federate outputs.',
+  },
+  {
+    title: 'Publish & Broadcast',
+    summary: 'Publisher emits Discord embeds, refreshes Jellyfin, and mirrors CGPs on the Geometry Bus.',
+    highlight: 'Audit logs and Chit signals prove where every asset travels across the PMOVES mesh.',
+  },
+];
+
+const personas: PersonaAvatar[] = [
+  {
+    name: 'Archon',
+    role: 'Knowledge Strategist',
+    theme: 'Neo-library Cyberpunk',
+    description:
+      'Guides research constellations, narrates geometry jumps, and keeps persona prompts coherent across missions.',
+  },
+  {
+    name: 'Catalyst',
+    role: 'Creator Pipeline Lead',
+    theme: 'Megaman Pixel Synth',
+    description:
+      'Animates ComfyUI drops, syncs VibeVoice narrations, and frames CGP rituals with cymatic flair.',
+  },
+  {
+    name: 'Ledger',
+    role: 'Finance & Ops Steward',
+    theme: 'Retro Futurist Analogue',
+    description:
+      'Balances Firefly insights, Wger check-ins, and Chit commitments so collectives stay accountable.',
   },
 ];
 
@@ -107,6 +216,147 @@ function HeroSection() {
 
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--cataclysm-slate)]">
           Cyan · Ember · Forest · Gold — the Cataclysm palette guiding every move.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function UnifiedModulesSection() {
+  return (
+    <section className="bg-white px-6 py-20 text-slate-900">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-12">
+        <header className="flex flex-col gap-4 text-center">
+          <span className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--cataclysm-slate)]">
+            Unified Portal · Modular Reach
+          </span>
+          <h2 className="text-3xl font-bold sm:text-4xl">
+            Everything in PMOVES is reachable from one surface
+          </h2>
+          <p className="mx-auto max-w-3xl text-base text-slate-600 sm:text-lg">
+            The console blends conversational orchestration, knowledge navigation, creator automations, and operational health in a
+            responsive layout aligned with the unified UI design story. Choose a module to dive deeper or hand off tasks to Agent Zero.
+          </p>
+        </header>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+          {modules.map((module) => (
+            <a
+              key={module.title}
+              href={module.href}
+              className="group flex flex-col gap-4 rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
+            >
+              <div>
+                <h3 className="text-xl font-semibold text-slate-900">{module.title}</h3>
+                <p className="mt-2 text-sm text-slate-600">{module.blurb}</p>
+              </div>
+              <ul className="mt-auto grid grid-cols-1 gap-2 text-sm text-slate-700">
+                {module.capabilities.map((capability) => (
+                  <li
+                    key={`${module.title}-${capability}`}
+                    className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-600 group-hover:border-[var(--cataclysm-cyan)] group-hover:text-[var(--cataclysm-cyan)]"
+                  >
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--cataclysm-cyan)]" aria-hidden />
+                    {capability}
+                  </li>
+                ))}
+              </ul>
+              <span className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--cataclysm-cyan)] group-hover:text-[var(--cataclysm-ember)]">
+                Explore module →
+              </span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CreatorPipelineSection() {
+  return (
+    <section className="bg-slate-950 px-6 py-20 text-slate-100">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-10">
+        <header className="text-center">
+          <span className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--cataclysm-gold)]">
+            Creator Pipeline · ComfyUI → Publish
+          </span>
+          <h2 className="mt-4 text-3xl font-bold text-white sm:text-4xl">Launch the full creative flywheel</h2>
+          <p className="mx-auto mt-4 max-w-3xl text-base text-slate-300 sm:text-lg">
+            The documented Creator Pipeline keeps renders, voices, and geometry aligned. Follow the loop to move assets from ComfyUI rigs to
+            Supabase approvals and onward to Discord, Jellyfin, and geometry constellations without losing context.
+          </p>
+        </header>
+        <ol className="relative grid gap-8 border-l border-white/10 pl-6 sm:pl-10">
+          {pipeline.map((stage, index) => (
+            <li key={stage.title} className="relative flex flex-col gap-3">
+              <div className="absolute -left-[1.95rem] top-1.5 flex h-8 w-8 items-center justify-center rounded-full border border-white/30 bg-[var(--cataclysm-cyan)]/20 text-sm font-semibold text-[var(--cataclysm-gold)] sm:-left-[2.7rem]">
+                {index + 1}
+              </div>
+              <h3 className="text-xl font-semibold text-white">{stage.title}</h3>
+              <p className="text-sm text-slate-200">{stage.summary}</p>
+              <p className="text-xs uppercase tracking-wide text-[var(--cataclysm-cyan)]">{stage.highlight}</p>
+            </li>
+          ))}
+        </ol>
+        <div className="flex flex-col items-center justify-center gap-3 text-center text-sm text-slate-300 sm:flex-row">
+          <a
+            href="https://github.com/POWERFULMOVES/PMOVES.AI/blob/main/docs/Unified%20and%20Modular%20PMOVES%20UI%20Design.md"
+            className="rounded-full border border-white/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.25em] text-[var(--cataclysm-cyan)] hover:border-[var(--cataclysm-gold)] hover:text-[var(--cataclysm-gold)]"
+          >
+            UI design manifesto
+          </a>
+          <span className="hidden h-px w-10 bg-white/20 sm:block" aria-hidden />
+          <a
+            href="https://github.com/POWERFULMOVES/PMOVES.AI/blob/main/pmoves/docs/PMOVES.AI%20PLANS/CREATOR_PIPELINE.md"
+            className="rounded-full border border-white/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.25em] text-[var(--cataclysm-gold)] hover:border-[var(--cataclysm-cyan)] hover:text-[var(--cataclysm-cyan)]"
+          >
+            Creator pipeline runbook
+          </a>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PersonaShowcaseSection() {
+  return (
+    <section className="bg-white px-6 py-20 text-slate-900">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-10">
+        <header className="text-center">
+          <span className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--cataclysm-slate)]">
+            Avatars & Voice Signatures
+          </span>
+          <h2 className="mt-3 text-3xl font-bold sm:text-4xl">Give every agent a face and a vibe</h2>
+          <p className="mx-auto mt-4 max-w-3xl text-base text-slate-600 sm:text-lg">
+            Personas align with the avatar guidance in the unified UI plan. Style presets keep artwork cohesive across CGPs, chat, and
+            voice drops—ready for ComfyUI regeneration or VibeVoice playback at any moment.
+          </p>
+        </header>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+          {personas.map((persona) => (
+            <div
+              key={persona.name}
+              className="relative flex h-full flex-col gap-4 overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-6 shadow-sm"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm font-semibold uppercase tracking-wide text-[var(--cataclysm-ember)]">
+                    {persona.role}
+                  </span>
+                  <h3 className="text-2xl font-bold text-slate-900">{persona.name}</h3>
+                </div>
+                <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[var(--cataclysm-cyan)]/40 bg-[var(--cataclysm-cyan)]/10 text-lg font-semibold text-[var(--cataclysm-cyan)]">
+                  {persona.name.slice(0, 1)}
+                </div>
+              </div>
+              <p className="text-sm text-slate-600">{persona.description}</p>
+              <div className="mt-auto rounded-2xl border border-dashed border-[var(--cataclysm-gold)]/50 bg-[var(--cataclysm-gold)]/10 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-[var(--cataclysm-gold)]">
+                Theme · {persona.theme}
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="text-center text-xs uppercase tracking-[0.25em] text-[var(--cataclysm-slate)]">
+          Swap presets via creator pipelines · Keep voices synced with VibeVoice + RVC bundles
         </p>
       </div>
     </section>
@@ -288,6 +538,9 @@ export default async function HomePage() {
   return (
     <>
       <HeroSection />
+      <UnifiedModulesSection />
+      <CreatorPipelineSection />
+      <PersonaShowcaseSection />
       <OperatorConsole
         primaryHref={primaryHref}
         primaryLabel={primaryLabel}
