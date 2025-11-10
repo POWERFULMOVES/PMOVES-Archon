@@ -10,7 +10,6 @@ export const trackUiMetric = (name: string, payload: MetricPayload = {}): void =
     console.info(`[metric] ${name}`, formatPayload(payload));
   } catch (error) {
     if (process.env.NODE_ENV !== "production") {
-      // eslint-disable-next-line no-console
       console.warn(`[metric] failed to emit ${name}`, error);
     }
   }
@@ -21,7 +20,6 @@ export const trackUiEvent = (name: string, payload: MetricPayload = {}): void =>
     console.debug(`[event] ${name}`, formatPayload(payload));
   } catch (error) {
     if (process.env.NODE_ENV !== "production") {
-      // eslint-disable-next-line no-console
       console.warn(`[event] failed to emit ${name}`, error);
     }
   }
