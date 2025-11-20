@@ -89,6 +89,7 @@ Next Actions
 
 ## Testing & Validation
 - Before running checks, review `pmoves/docs/SMOKETESTS.md` for the current 12-step smoke harness flow and optional follow-on targets.
+- For full-stack agents/Archon runs, use the “All Services Up, Then Tests (Archon + Agents Flow)” checklist in `pmoves/docs/SMOKETESTS.md` together with the Archon notes in `docs/PMOVES.AI-Edition-Hardened.md` and `pmoves/docs/services/archon/README.md`.
 - Notebook Workbench: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"` after UI/runtime changes to lint the bundle and confirm Supabase connectivity (see `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md`).
 - Hi-RAG gateway: run `make -C pmoves smoke-gpu` after reranker or embedding changes. The target now proxies the test query through `docker compose exec` so FlagEmbedding/Qwen rerankers that only accept batch size 1 still return `"used_rerank": true` (first run downloads the 4B checkpoint).
 - Use `pmoves/docs/LOCAL_TOOLING_REFERENCE.md` and `pmoves/docs/LOCAL_DEV.md` to confirm environment scripts, Make targets, and Supabase CLI expectations.

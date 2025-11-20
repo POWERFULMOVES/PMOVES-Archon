@@ -39,6 +39,7 @@
 - If you intentionally skip one of those checks (docs-only change, etc.), record the rationale in the PR Reviewer Notes so reviewers know the risk envelope.
 - UI updates: run `make -C pmoves notebook-workbench-smoke ARGS="--thread=<uuid>"` to lint the Next.js bundle and validate Supabase connectivity. Reference `pmoves/docs/UI_NOTEBOOK_WORKBENCH.md` when collecting smoke evidence.
 - Hi-RAG gateway: after touching reranker or embedding code, run `make -C pmoves smoke-gpu`. The target now pipes the validation query through `docker compose exec` so FlagEmbedding/Qwen rerankers that only accept batch size 1 still report `"used_rerank": true` (first run downloads the 4B checkpoint).
+- Agents/Archon: for full-stack validation, follow the “All Services Up, Then Tests (Archon + Agents Flow)” section in `pmoves/docs/SMOKETESTS.md` and the Archon service guide in `pmoves/docs/services/archon/README.md`; use `make -C pmoves agents-headless-smoke`, `make -C pmoves smoke-gpu`, and (when available) `make -C pmoves verify-all`/`make -C pmoves archon-smoke` to exercise health endpoints and Supabase wiring.
 
 ## Stabilization Snapshot (Nov 6, 2025)
 - Storage unified to Supabase Storage S3 endpoint. Ensure in `pmoves/env.shared`:
