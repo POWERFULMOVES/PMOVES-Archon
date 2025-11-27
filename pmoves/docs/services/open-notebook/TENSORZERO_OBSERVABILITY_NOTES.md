@@ -8,7 +8,7 @@ The 2025.10.7 gateway release moved ClickHouse settings under `gateway.observabi
 - Enable observability by supplying credentials (or relying on the bundled defaults) and flipping `observability.enabled` to `true` in `pmoves/tensorzero/config/tensorzero.toml`.
 
 ## Enabling metrics
-1. Copy the example block below into `pmoves/tensorzero/config/tensorzero.toml` (or uncomment it if already present).
+1. The `[gateway.observability.clickhouse]` block already lives in `pmoves/tensorzero/config/tensorzero.toml` with PMOVES-branded defaults.
 2. Populate the secrets in your environment (the bundled profile pre-populates PMOVES defaults in `env.shared.example`; override as needed for remote ClickHouse):
    - `TENSORZERO_OBS_CLICKHOUSE_URL` (default `http://tensorzero-clickhouse:8123`)
    - `TENSORZERO_OBS_CLICKHOUSE_DB` (default `tensorzero`)
