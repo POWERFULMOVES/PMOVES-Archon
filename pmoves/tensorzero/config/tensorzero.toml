@@ -1,8 +1,16 @@
 # TensorZero gateway config (chat + embeddings). Model keys double as UI aliases.
 
 [gateway]
-observability.enabled = true
-# ClickHouse connection settings now rely on TENSORZERO_CLICKHOUSE_* env vars
+# Observability is disabled until ClickHouse credentials are provided; see
+# pmoves/docs/services/open-notebook/TENSORZERO_OBSERVABILITY_NOTES.md
+# for the schema and required env vars.
+observability.enabled = false
+
+[gateway.observability.clickhouse]
+# url = "env::TENSORZERO_OBS_CLICKHOUSE_URL"
+# database = "env::TENSORZERO_OBS_CLICKHOUSE_DATABASE"
+# username = "env::TENSORZERO_OBS_CLICKHOUSE_USERNAME"
+# password = "env::TENSORZERO_OBS_CLICKHOUSE_PASSWORD"
 
 # --- Chat models: Agent Zero orchestration (local GPU and edge) ------------
 
