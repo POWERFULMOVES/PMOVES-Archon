@@ -1,3 +1,4 @@
 [submodule "PMOVES-ToKenism-Multi"]
 	path = PMOVES-ToKenism-Multi
 	url = https://github.com/POWERFULMOVES/PMOVES-ToKenism-Multi.git
+	ignore = all
