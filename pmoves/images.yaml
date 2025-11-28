@@ -73,7 +73,7 @@ images:
 
   - name: pmoves-tokenism-multi
     repo: PMOVES-ToKenism-Multi
-    ref: heads/feature/firefly-sim-export
+    ref: heads/PMOVES.AI-Edition-Hardened
     context: .
     dockerfile: Dockerfile
     image: ghcr.io/powerfulmoves/pmoves-tokenism-multi
