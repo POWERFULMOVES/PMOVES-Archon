@@ -151,7 +151,7 @@ Checks (15):
 6. PostgREST reachable (`3000`)
 7. Insert a demo row via Render Webhook
 8. Verify a `studio_board` row exists via PostgREST
-9. Run a Hi-RAG v2 query (`${HIRAG_V2_GPU_HOST_PORT:-8087}`) and assert `/hirag/admin/rerank-status` reports numeric `topn`/`k`
+9. Run Hi-RAG v2 stats + query (`${HIRAG_V2_GPU_HOST_PORT:-8087}` preferred, `${HIRAG_V2_CPU_HOST_PORT:-8086}` fallback): detect via `/hirag/admin/stats` (then `/healthz`/`/hirag/query` if needed, `HIRAG_SMOKE_TIMEOUT` seconds), then assert `/hirag/admin/rerank-status` reports numeric `topn`/`k`
 10. Agent Zero `/healthz` reports JetStream controller running
 11. POST a generated `geometry.cgp.v1` packet to `/geometry/event`
 12. Confirm ShapeStore locator + calibration via `/shape/point/{id}/jump` + `/geometry/calibration/report`

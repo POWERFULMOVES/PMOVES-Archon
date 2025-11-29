@@ -50,9 +50,10 @@ Quick Links (local default)
 - Console (Archon UI): http://localhost:3737  • Archon API: http://localhost:8091/healthz
 - Grafana: http://localhost:3002 • Prometheus: http://localhost:9090
 
-## What Should Be Running Now
-- Supabase CLI stack (REST on 65421) — check: `make -C pmoves supa-status`.
-- Hi‑RAG v2 CPU/GPU — `curl http://localhost:8086/hirag/admin/stats` and `:8087` return 200.
+## What Should Be Running Now (single-env, Supabase Storage only)
+- Supabase CLI stack (REST on 65421) — `docker network create pmoves-net || true` then `make -C pmoves supa-start` (CLI) and `make -C pmoves supabase-bootstrap` to load schemas/seeds. Status: `make -C pmoves supa-status`.
+- Core stack on the same network — `SUPABASE_RUNTIME=cli make -C pmoves up` (adds qdrant, neo4j, meilisearch, hi-rag, retrieval-eval). Seeds for Neo4j/Qdrant/Supabase come from `make -C pmoves bootstrap-data` when needed.
+- Hi‑RAG v2 CPU/GPU — `curl http://localhost:8086/hirag/admin/stats` and `curl http://localhost:8087/hirag/admin/stats` return 200.
 - Invidious on 127.0.0.1:3005 — `curl http://127.0.0.1:3005/api/v1/stats` 200.
 - Channel Monitor on :8097 — `GET /healthz`, `GET /api/monitor/status`, `GET /api/monitor/stats` all 200.
 - Archon API/UI — API `GET http://localhost:8091/healthz` 200; UI on http://localhost:3737.
@@ -61,7 +62,7 @@ Quick Links (local default)
 - Optional stacks: n8n http://localhost:5678, Jellyfin http://localhost:8096, Notebook http://localhost:8503.
 
 Quick checks
-- `make -C pmoves smoke` (core), `make -C pmoves smoke-gpu` (rerank when re‑enabled).
+- `make -C pmoves smoke` (core), `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu` for strict rerank.
 - `make -C pmoves monitoring-report` summarises service probes and recent errors.
 
 ## Latest Stabilization Changes (Nov 6, 2025)
@@ -114,24 +115,20 @@ Next Actions
 - Summarize progress after each major action, compacting details to preserve context window space for upcoming tasks.
 - Tie summaries to the active roadmap items or checklists so parallel workstreams stay coherent across longer sessions.
 
-## Core Bring-Up Sequence (Supabase CLI default)
-Prefer the automated path: `make first-run` stitches together the env bootstrap, Supabase CLI bring-up, data seeding, compose profiles, and smoketests described below (see `pmoves/docs/FIRST_RUN.md`).
-Follow this flow before running smokes or automation. Commands run from repo root unless noted.
+## Core Bring-Up Sequence (Supabase CLI, pmoves-net)
+Prefer the automated path: `make first-run` (see `pmoves/docs/FIRST_RUN.md`). Manual flow (repo root):
+1. `docker network create pmoves-net || true`
+2. `cp pmoves/env.shared.example pmoves/env.shared` and fill secrets (Supabase keys, Discord webhook, Firefly/Wger, etc.).
+3. `make -C pmoves env-setup`
+4. `make -C pmoves supa-start` (Supabase CLI on pmoves-net) then `make -C pmoves supabase-bootstrap` (applies schemas/seeds so `pmoves_core`/`pmoves_kb` exist).
+5. `SUPABASE_RUNTIME=cli make -C pmoves up` (core data + workers) and `make -C pmoves up-agents` (NATS, Agent Zero, Archon, mesh-agent, publisher-discord).
+6. `make -C pmoves bootstrap-data` when you need Neo4j/Qdrant/Meili/Supabase demo data.
+7. Optional integrations: `make -C pmoves up-external[-firefly|-wger|-jellyfin|-on]`, `make -C pmoves up-n8n`, `make -C pmoves up-invidious`, `make -C pmoves up-jellyfin-ai`.
+8. Smokes: `make -C pmoves smoke`; GPU rerank validation: `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu`.
 
-1. `cp pmoves/env.shared.example pmoves/env.shared` → populate secrets (Supabase keys, Discord webhook, MinIO, Firefly, etc.). This file now holds the branded defaults the entire stack reads on startup.
-2. `make env-setup` – sync `env.shared`, `.env.generated`, and `.env.local` so Supabase CLI credentials and integration tokens land in both Docker Compose and the UI launcher. All UI `npm run` scripts shell through `pmoves/ui/scripts/with-env.mjs`, so keeping `env.shared` + `.env.local` current automatically hydrates the Next.js workspace.
-3. `make supabase-boot-user` – create (or rotate) the dashboard-safe Supabase account, update `env.shared`, `.env.local`, and `pmoves/.env.local` with the password/JWT, and keep the UI off the anon key. (`make first-run` runs this automatically; rerun the target after intentional rotations.)
-4. `make supa-start` – launches the Supabase CLI stack (REST on 65421). Check status with `make supa-status`. Stop with `make supa-stop`.
-5. `make up` – core PMOVES services (presign, render-webhook, hi-rag, etc.).
-6. `make up-agents` – NATS, Agent Zero, Archon, mesh-agent, publisher-discord.
-7. `make up-external` (or `make up-external-wger`, `...-firefly`, `...-jellyfin`, `...-on`) – third-party integrations.
-8. `make bootstrap-data` – seeds Supabase SQL, Neo4j graph, Qdrant/Meili demo data.
-9. Optional stacks:
-   - `make up-n8n` – workflow engine (UI at http://localhost:5678).
-   - `make notebook-up` / `make notebook-seed-models` – Open Notebook + SurrealDB (set `OPEN_NOTEBOOK_SURREAL_URL`/`OPEN_NOTEBOOK_SURREAL_ADDRESS`, or rely on the legacy `SURREAL_*` aliases, before launching).
-   - `make up-invidious` – launches Invidious + companion (YouTube fallback) on http://127.0.0.1:3000 and http://127.0.0.1:8282.
-   - `make jellyfin-folders` prior to first Jellyfin boot.
-   - `make up-jellyfin-ai` – brings up the LinuxServer Jellyfin overlay (UI on http://localhost:9096, API gateway on http://localhost:8300, dashboard on http://localhost:8400); follow the runbook in [`pmoves/docs/PMOVES.AI PLANS/JELLYFIN_BRIDGE_INTEGRATION.md`](pmoves/docs/PMOVES.AI%20PLANS/JELLYFIN_BRIDGE_INTEGRATION.md).
+### Agents images and custom overlays
+- Default path (no local builds): `SUPABASE_RUNTIME=cli make -C pmoves up-agents-published` uses the published GHCR images configured in `pmoves/env.shared` (`AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `DEEPRESEARCH_IMAGE`, `SUPASERCH_IMAGE`). Only pin a tag if a new release breaks you.
+- Custom code: build a thin overlay FROM the published image, copy only your changes, tag it (e.g., `my/archon:dev`), set the corresponding `*_IMAGE` in `pmoves/env.shared`, then rerun `up-agents-published`. This keeps upstream updates while layering your modifications.
 
 ### UI Quickstart & Links
 - Supabase Studio: http://127.0.0.1:65433 (started via `make -C pmoves supa-start`; confirm with `make -C pmoves supa-status`).
@@ -151,7 +148,7 @@ Follow this flow before running smokes or automation. Commands run from repo roo
 - Health checks: `make health-agent-zero`, `make health-publisher-discord`, `make health-jellyfin-bridge`
 - External integrations: `make smoke-wger`, `make smoke-presign-put`, `make yt-jellyfin-smoke` (pmoves.yt ingest + Jellyfin playback; ensure `make up`, `make up-yt`, `make up-invidious`, and `make up-jellyfin` are running and that `JELLYFIN_API_KEY` covers the overlay) or `make jellyfin-smoke` (playback-only; the target now auto-attempts `/jellyfin/map-by-title` and, on a miss, links the newest library item via the bridge before requesting the playback URL). Keep `SUPA_REST_URL`/`SUPA_REST_INTERNAL_URL` pointed at the active Supabase REST host — `http://host.docker.internal:65421/rest/v1` when the CLI stack is running, and set `HIRAG_URL`/`HIRAG_GPU_URL` to `http://hi-rag-gateway-v2-gpu:8086` so ShapeStore stays warm with `HIRAG_CPU_URL` as the fallback.
 
-REST policy: Supabase REST now exposes `pmoves_core`/`pmoves_kb` (no separate PostgREST required by default). See `pmoves/docs/ENVIRONMENT_POLICY.md`.
+REST policy: Supabase REST (CLI) exposes `pmoves_core`/`pmoves_kb` via `http://host.docker.internal:65421/rest/v1`; set `SUPA_REST_URL`/`SUPA_REST_INTERNAL_URL` to that and keep `MINIO_*` pointed at the Supabase Storage S3 endpoint (same host/port). See `pmoves/docs/ENVIRONMENT_POLICY.md`.
 - Creative CGP demos: `make demo-health-cgp`, `make demo-finance-cgp`, plus manual WAN/Qwen/VibeVoice webhook triggers (see `pmoves/creator/README.md`).
 - Environment sanity: `make preflight` (tooling) and `make flight-check` (runtime)
 

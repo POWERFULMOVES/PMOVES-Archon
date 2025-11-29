@@ -672,8 +672,9 @@ services:
       dockerfile: deepresearch/Dockerfile
     image: ${DEEPRESEARCH_IMAGE:-}
     restart: unless-stopped
-    env_file: [env.shared.generated, env.shared, .env.generated, .env.local]
+    env_file: [env.shared.generated, env.shared, .env.generated, .env.local, ../.env]
     environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - DEEPRESEARCH_MODE=${DEEPRESEARCH_MODE:-openrouter}
       - DEEPRESEARCH_TIMEOUT=${DEEPRESEARCH_TIMEOUT:-600}

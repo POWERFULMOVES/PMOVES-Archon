@@ -45,6 +45,14 @@ Owner: @POWERFULMOVES  • Agents: @AGENTS
    WARNING:services.agent_zero.controller:Falling back to core NATS subscription for agentzero.memory.update after repeated ServiceUnavailable
    ```
 
+## 2025-11-28 Validation
+- Core smoke (`make -C pmoves smoke`) passes with the Hi-RAG step now preferring `/hirag/admin/stats` and a 15s default query timeout.
+- GPU smoke (`make -C pmoves smoke-gpu`) passes — rerank_enabled=true, rerank_model=Qwen/Qwen3-Reranker-4B, rerank_loaded=false (expected), rerank query returned `used_rerank`.
+- Archon REST policy probe (`SMOKE_REST_TABLE=pmoves_core make -C pmoves archon-rest-policy-smoke`) returns HTTP 404, treated as OK per target (table missing/anon policy).
+- Archon smoke now passes after probing a table endpoint (`/rest/v1/it_errors?select=id&limit=1`) instead of the root.
+- DeepResearch in-net smoke (`make -C pmoves deepresearch-smoke-in-net`) not run: no `deepresearch` container; GHCR pull denied and local build from `./services` lacks `/contracts`. Pin `DEEPRESEARCH_IMAGE` to a pullable tag with credentials or rebuild from repo root with contracts in context.
+- Monitoring smoke (`make -C pmoves monitoring-smoke`) initially timed out waiting for blackbox samples; after warm-up, blackbox reports targets and the smoke passes. Monitoring stack now running (Grafana :3002, Prometheus :9090, Loki :3100, cAdvisor :9180); targets show channel-monitor down and node-exporter disabled on this host.
+
    Triggered by moving `/tmp/nats/jetstream` out of the NATS container and posting a valid `/events/publish` payload to exercise the fallback path.
 
 ## Next Steps (handoff to @AGENTS)

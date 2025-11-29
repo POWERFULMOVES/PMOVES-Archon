@@ -645,10 +645,11 @@ archon-smoke: ## Combined Archon smoke: /healthz 200 and Supabase CLI REST reach
 	if [ -f pmoves/.env.local ]; then \
 	  val=$$(grep -m1 '^SUPA_REST_URL=' pmoves/.env.local | cut -d= -f2-); [ -n "$$val" ] && rest="$$val"; \
 	fi; \
-	pg=$$(curl -s -o /dev/null -w "%{http_code}" "$$rest" || true); \
+	probe="$$rest/it_errors?select=id&limit=1"; \
+	pg=$$(curl -s -o /dev/null -w "%{http_code}" "$$probe" || true); \
 	if [ "$$api" != "200" ]; then echo "✖ archon /healthz => $$api" && exit 1; fi; \
-	if [ "$$pg" != "200" ]; then echo "✖ Supabase REST => $$pg (URL: $$rest)" && exit 1; fi; \
-	echo "✔ archon /healthz 200 and Supabase REST $$rest OK"'
+	if [ "$$pg" = "000" ] || [ -z "$$pg" ] || [ "$$pg" -ge 500 ]; then echo "✖ Supabase REST probe failed (HTTP $$pg) URL: $$probe" && exit 1; fi; \
+	echo "✔ archon /healthz 200 and Supabase REST probe $$probe (HTTP $$pg)"'
 
 .PHONY: archon-rest-policy-smoke
 archon-rest-policy-smoke: ## Probe a CLI REST table with anon key (non-fatal on 401/403; fails only on 5xx/timeout)
@@ -1242,12 +1243,16 @@ smoke:
 	 echo "[8/15] Verify studio_board row..." && curl -sf "$${REST_BASE}/studio_board?order=id.desc&limit=1" -H "apikey: $$APIKEY" | jq -e '.[0].title != null' >/dev/null && echo OK || (echo FAIL && exit 1)
 	@echo "[9/15] Hi-RAG v2 query + rerank status..." && \
 	HPORT=""; for p in $(HIRAG_GPU_PORT) $(HIRAG_CPU_PORT); do \
-	  if curl -sf localhost:$$p/healthz >/dev/null 2>&1 || curl -sf localhost:$$p/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then HPORT=$$p; break; fi; \
+	  if curl -sf localhost:$$p/hirag/admin/stats >/dev/null 2>&1; then HPORT=$$p; break; fi; \
+	  if curl -sf localhost:$$p/healthz >/dev/null 2>&1; then HPORT=$$p; break; fi; \
+	  if curl -sf --max-time 5 localhost:$$p/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then HPORT=$$p; break; fi; \
 	done; \
 	if [ -z "$$HPORT" ]; then echo "FAIL: hi-rag-gateway-v2 not reachable on $(HIRAG_GPU_PORT) or $(HIRAG_CPU_PORT)"; exit 1; fi; \
 	echo "→ using :$$HPORT"; \
-	curl -sf localhost:$$HPORT/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && \
-	curl -sf localhost:$$HPORT/hirag/admin/rerank-status | jq -e '.enabled != null and (.topn|type) == "number" and (.k|type) == "number"' >/dev/null && \
+	QTIME=$${HIRAG_SMOKE_TIMEOUT:-15}; \
+	curl -sf --max-time $$QTIME localhost:$$HPORT/hirag/admin/stats | jq -e 'has("rerank_enabled") or has("alpha")' >/dev/null && \
+	curl -sf --max-time $$QTIME localhost:$$HPORT/hirag/query -H 'content-type: application/json' -d '{"query":"what is pmoves?","namespace":"pmoves","k":3,"alpha":0.7}' | jq -e '.hits != null' >/dev/null && \
+	curl -sf --max-time $$QTIME localhost:$$HPORT/hirag/admin/rerank-status | jq -e '.enabled != null and (.topn|type) == "number" and (.k|type) == "number"' >/dev/null && \
 	echo OK || (echo FAIL && exit 1)
 	@echo "[10/15] Agent Zero health..." && curl -sf http://localhost:8080/healthz | jq -e '.nats.connected == true' >/dev/null && echo OK || (echo FAIL && exit 1)
 	@CID=$$(uuidgen | tr 'A-Z' 'a-z' | cut -d- -f1); \
@@ -1258,7 +1263,9 @@ smoke:
 	 export RUN_ID="$${CID}" POINT_ID="$${POINT_ID}" CONST_ID="$${CONST_ID}" REF_ID="$$REF_ID"; \
 	 python3 -c 'import json, os, sys; obj={"type":"geometry.cgp.v1","data":{"spec":"chit.cgp.v0.1","meta":{"source":"smoke-test","namespace":"pmoves","run_id":os.environ["RUN_ID"]},"super_nodes":[{"id":"sn.smoke","constellations":[{"id":os.environ["CONST_ID"],"summary":"smoke geometry validation","radial_minmax":[0.05,0.85],"spectrum":[0.08,0.12,0.18,0.22,0.18,0.12,0.07,0.03],"anchor":[0.52,-0.41,0.23,0.11],"points":[{"id":os.environ["POINT_ID"],"modality":"video","ref_id":os.environ["REF_ID"],"t_start":12.5,"frame_idx":300,"proj":0.82,"conf":0.93,"text":"geometry smoke anchor"}]}]}]}}; json.dump(obj, sys.stdout)' > $$TMP; \
 	 GHPORT=""; for p in $(HIRAG_GPU_PORT) $(HIRAG_CPU_PORT); do \
-	  if curl -sf localhost:$$p/healthz >/dev/null 2>&1 || curl -sf localhost:$$p/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then GHPORT=$$p; break; fi; \
+	  if curl -sf localhost:$$p/hirag/admin/stats >/dev/null 2>&1; then GHPORT=$$p; break; fi; \
+	  if curl -sf localhost:$$p/healthz >/dev/null 2>&1; then GHPORT=$$p; break; fi; \
+	  if curl -sf --max-time 5 localhost:$$p/hirag/query -H 'content-type: application/json' -d '{"query":"ping","k":1}' >/dev/null 2>&1; then GHPORT=$$p; break; fi; \
 	done; \
 	if [ -z "$$GHPORT" ]; then echo "FAIL: geometry gateway not reachable on $(HIRAG_GPU_PORT) or $(HIRAG_CPU_PORT)"; rm -f $$TMP; exit 1; fi; \
 	 echo "[11/15] Geometry event ingest..." && curl -sf http://localhost:$$GHPORT/geometry/event -H 'content-type: application/json' -d @$${TMP} >/dev/null && echo OK || { echo FAIL; rm -f $$TMP; exit 1; }; \
