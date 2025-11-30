@@ -10,7 +10,7 @@
 - Root: `docker-compose.yml`, `Makefile`, `env.shared.example`.
 
 ## Planning & Documentation Expectations
-- **Mandatory context before changes:** read `docs/ROADMAP.md` and `docs/NEXT_STEPS.md` to align with the current sprint focus (M2 — Creator & Publishing). These documents spell out the active priorities, including Jellyfin refresh polish, Discord embeds, and Supabase→Discord automation; confirm your work reinforces or explicitly updates those targets before you start coding.
+- **Mandatory context before changes:** read `pmoves/docs/PMOVES.AI PLANS/ROADMAP.md` and `pmoves/docs/NEXT_STEPS.md` to align with the current sprint focus (M2 — Creator & Publishing). These documents spell out the active priorities, including Jellyfin refresh polish, Discord embeds, and Supabase→Discord automation; confirm your work reinforces or explicitly updates those targets before you start coding.
 - **Maintainer cadence:** when significant features ship, priorities move between columns, or we start a new sprint, refresh both `docs/ROADMAP.md` and `docs/NEXT_STEPS.md` (and adjust their `_Last updated` timestamps) so contributors always land on the latest plan.
 - **Supporting references:**
   - `docs/MAKE_TARGETS.md` — authoritative Make targets, smoke checks, and automation entry points.
@@ -19,7 +19,7 @@
   - Additional operational primers live alongside services (e.g., `services/**/README.md`) and should be consulted when touching those areas.
 
 ## Build, Test, and Development Commands
-- `make up`: Starts core data services and workers (qdrant, neo4j, minio, meilisearch, hi-rag-gateway, retrieval-eval) via Docker Compose profiles.
+- `make up`: Starts core data services and workers (qdrant, neo4j, meilisearch, hi-rag-gateway, retrieval-eval) via Docker Compose profiles, assuming Supabase CLI is already running on the `pmoves-net` network.
 - `make down`: Stops all containers.
 - `make clean`: Stops and removes volumes (destructive for local data).
 - Run a service locally (example): `python services/agent-zero/main.py` (installs deps first: `pip install -r services/agent-zero/requirements.txt`).
@@ -41,26 +41,26 @@
 - Hi-RAG gateway: after touching reranker or embedding code, run `make -C pmoves smoke-gpu`. The target now pipes the validation query through `docker compose exec` so FlagEmbedding/Qwen rerankers that only accept batch size 1 still report `"used_rerank": true` (first run downloads the 4B checkpoint).
 - Agents/Archon: for full-stack validation, follow the “All Services Up, Then Tests (Archon + Agents Flow)” section in `pmoves/docs/SMOKETESTS.md` and the Archon service guide in `pmoves/docs/services/archon/README.md`; use `make -C pmoves agents-headless-smoke`, `make -C pmoves smoke-gpu`, and (when available) `make -C pmoves verify-all`/`make -C pmoves archon-smoke` to exercise health endpoints and Supabase wiring.
 
-## Stabilization Snapshot (Nov 6, 2025)
 - Storage unified to Supabase Storage S3 endpoint. Ensure in `pmoves/env.shared`:
   - `MINIO_ENDPOINT=http://host.docker.internal:65421/storage/v1/s3`
   - `MINIO_REGION=local`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` from `make -C pmoves supa-status`.
 - Invidious bound to `127.0.0.1:3005` (stats 200). Companion/HMAC keys stamped in `pmoves/.env`.
 - Hi‑RAG v2: GPU on `:8087`, CPU on `:8086`. Health path is `/hirag/admin/stats`.
-- Core smoke: PASS. GPU smoke: rerank temporarily disabled (`RERANK_ENABLE=false`) while model/runtime is validated.
+- Core smoke: PASS. GPU rerank re‑enabled; run strict check with `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu`.
 - Jellyfin: server 8096 OK; bridge 8093 OK.
 - Monitoring: Prometheus/Grafana OK; Loki config upgrade pending.
 
-## What Should Be Running Now
-- Supabase REST (CLI stack) on 65421 — `make -C pmoves supa-status` should show healthy services.
-- Hi‑RAG v2 CPU/GPU — `curl http://localhost:8086/hirag/admin/stats` and `:8087/…` return JSON.
+## What Should Be Running Now (single-env, Supabase Storage only)
+- Supabase REST (CLI stack) on 65421 — `docker network create pmoves-net || true`; `make -C pmoves supa-start` then `make -C pmoves supabase-bootstrap` so `pmoves_core`/`pmoves_kb` exist. Status: `make -C pmoves supa-status`.
+- Core stack — `SUPABASE_RUNTIME=cli make -C pmoves up` (data + workers). Seeds: `make -C pmoves bootstrap-data` (Supabase/Neo4j/Qdrant/Meili).
+- Hi‑RAG v2 CPU/GPU — `curl http://localhost:8086/hirag/admin/stats` and `curl http://localhost:8087/hirag/admin/stats` return JSON.
 - Channel Monitor — `GET /healthz`, `GET /api/monitor/status`, `GET /api/monitor/stats` → 200.
 - Archon API/UI — `GET http://localhost:8091/healthz` 200; UI at http://localhost:3737.
 - Monitoring — Prometheus :9090, Grafana :3002, Blackbox :9115 (cAdvisor when `MON_INCLUDE_CADVISOR=true`).
 - Invidious :3005 (127.0.0.1 bind), Jellyfin :8096, Notebook :8503.
 
 ### Quick verification commands
-- `make -C pmoves smoke` and `make -C pmoves smoke-gpu` (rerank toggled via env).
+- `make -C pmoves smoke` (core) and `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu` (strict rerank).
 - `make -C pmoves up-monitoring && make -C pmoves monitoring-report`.
 - `curl -s http://localhost:8097/api/monitor/status ; echo`.
 
@@ -157,9 +157,22 @@ The GHCR workflow (`.github/workflows/integrations-ghcr.yml`) builds/publishes m
 
 Pin images by setting `AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `ARCHON_UI_IMAGE`, and `PMOVES_YT_IMAGE` in `pmoves/env.shared`.
 
-## Bring-Up Sequence
-- Prefer `make first-run` to bootstrap secrets, start the Supabase CLI stack, launch core/agent/external services, seed Supabase + Neo4j + Qdrant, and run the smoketests in one shot (see `docs/FIRST_RUN.md`).
-- Manual flow: `make bootstrap` → `make supabase-boot-user` → `make supa-start` → `make up` → `make bootstrap-data` → `make up-agents` → `make up-external` → `make smoke`.
+## Bring-Up Sequence (CLI on pmoves-net)
+- Prefer `make first-run` (see `docs/FIRST_RUN.md`) to bootstrap secrets, start Supabase CLI, seed data, and run smokes.
+- Manual flow:
+  1) `docker network create pmoves-net || true`
+  2) `cp pmoves/env.shared.example pmoves/env.shared` → fill secrets
+  3) `make -C pmoves env-setup`
+  4) `make -C pmoves supa-start` then `make -C pmoves supabase-bootstrap`
+ 5) `SUPABASE_RUNTIME=cli make -C pmoves up`
+ 6) Agents (published images, no local builds): `SUPABASE_RUNTIME=cli make -C pmoves up-agents-published`
+  7) `make -C pmoves bootstrap-data` (Neo4j/Qdrant/Meili/Supabase demo data)
+ 8) Optional: `make -C pmoves up-external[-firefly|-wger|-jellyfin|-on]`, `make -C pmoves up-n8n`, `make -C pmoves up-invidious`, `make -C pmoves up-jellyfin-ai`
+ 9) Smokes: `make -C pmoves smoke`; `GPU_SMOKE_STRICT=true make -C pmoves smoke-gpu`
+
+### Agents images and custom overlays
+- Default: published images set in `pmoves/env.shared` (`AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `DEEPRESEARCH_IMAGE`, `SUPASERCH_IMAGE`). Use `up-agents-published` to pull and run them.
+- Custom code: build a thin overlay FROM the published image, copy only your changes, tag it (e.g., `my/archon:dev`), set the corresponding `*_IMAGE` in `pmoves/env.shared`, then rerun `up-agents-published`. Pin tags only when a new upstream release breaks you.
 
 ## Smoketests & Diagnostics
 - Full harness: `make smoke`
@@ -185,6 +198,7 @@ Pin images by setting `AGENT_ZERO_IMAGE`, `ARCHON_IMAGE`, `ARCHON_UI_IMAGE`, and
 ## Commit & Pull Request Guidelines
 - Prefer Conventional Commits (e.g., `feat(hi-rag): hybrid search option`).
 - PRs should include: clear description, linked issues, affected services, run/rollback notes, and screenshots for UI/flows (e.g., retrieval-eval dashboard).
+- When opening a PR, start from `STARTER_PR_BODY.md` (repo root) and adjust sections as needed.
 - Keep changes atomic; update docs/schemas when interfaces change.
 
 ## Security & Configuration Tips

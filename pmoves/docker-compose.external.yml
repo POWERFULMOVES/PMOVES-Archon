@@ -34,7 +34,7 @@ services:
         aliases:
           - cataclysm-wger-nginx
     ports:
-      - "8000:80"
+      - "${WGER_HOST_PORT:-8000}:80"
     volumes:
       - wger-static:/wger/static:ro
       - wger-media:/wger/media:ro
