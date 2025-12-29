@@ -19,6 +19,9 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
+# Prometheus metrics
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 from .api_routes.agent_chat_api import router as agent_chat_router
 from .api_routes.agent_work_orders_proxy import router as agent_work_orders_router
 from .api_routes.bug_report_api import router as bug_report_router
@@ -60,6 +63,27 @@ logger = logging.getLogger(__name__)
 # Override uvicorn's access log format to be less verbose
 uvicorn_logger = logging.getLogger("uvicorn.access")
 uvicorn_logger.setLevel(logging.WARNING)  # Only log warnings and errors, not every request
+
+# Prometheus metrics
+http_requests_total = Counter(
+    'archon_http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+http_request_duration = Histogram(
+    'archon_http_request_duration_seconds',
+    'HTTP request duration'
+)
+knowledge_operations_total = Counter(
+    'archon_knowledge_operations_total',
+    'Knowledge operations',
+    ['operation']
+)
+mcp_commands_total = Counter(
+    'archon_mcp_commands_total',
+    'MCP commands executed',
+    ['command', 'status']
+)
 
 # CrawlingContext has been replaced by CrawlerManager in services/crawler_manager.py
 
@@ -188,11 +212,11 @@ app.add_middleware(
 )
 
 
-# Add middleware to skip logging for health checks
+# Add middleware to skip logging for health checks and metrics
 @app.middleware("http")
 async def skip_health_check_logs(request, call_next):
-    # Skip logging for health check endpoints
-    if request.url.path in ["/health", "/api/health"]:
+    # Skip logging for health check endpoints and metrics
+    if request.url.path in ["/health", "/api/health", "/metrics"]:
         # Temporarily suppress the log
         import logging
 
@@ -286,9 +310,10 @@ async def api_health_check(response: Response):
     return await health_check(response)
 
 
+# Prometheus metrics endpoint (no auth required)
 @app.get("/metrics")
 async def metrics():
-    """Prometheus metrics endpoint."""
+    """Prometheus metrics endpoint for observability."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
