@@ -58,6 +58,8 @@ server = [
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
+    # Metrics
+    "prometheus-client==0.20.0",
     # OPTIONAL: Docker SDK only needed for legacy Docker socket monitoring mode
     # Uncomment if ENABLE_DOCKER_SOCKET_MONITORING=true (not recommended - security risk)
     # "docker>=6.1.0",
