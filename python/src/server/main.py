@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from .api_routes.agent_chat_api import router as agent_chat_router
 from .api_routes.agent_work_orders_proxy import router as agent_work_orders_router
@@ -63,6 +64,29 @@ uvicorn_logger.setLevel(logging.WARNING)  # Only log warnings and errors, not ev
 
 # Global flag to track if initialization is complete
 _initialization_complete = False
+
+# Prometheus Metrics
+ARCHON_REQUESTS = Counter(
+    "archon_requests_total",
+    "Total Archon API requests",
+    labelnames=("endpoint", "method", "status"),
+)
+ARCHON_REQUEST_LATENCY = Histogram(
+    "archon_request_latency_seconds",
+    "Archon request latency",
+    labelnames=("endpoint", "method"),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+ARCHON_KNOWLEDGE_OPS = Counter(
+    "archon_knowledge_ops_total",
+    "Knowledge base operations",
+    labelnames=("operation", "status"),
+)
+ARCHON_MCP_TOOL_CALLS = Counter(
+    "archon_mcp_tool_calls_total",
+    "MCP tool invocations",
+    labelnames=("tool",),
+)
 
 
 @asynccontextmanager
@@ -258,6 +282,12 @@ async def health_check(response: Response):
 async def api_health_check(response: Response):
     """API health check endpoint - alias for /health."""
     return await health_check(response)
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # Cache schema check result to avoid repeated database queries

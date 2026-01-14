@@ -900,13 +900,14 @@ async def upload_document(
 ):
     """Upload and process a document with progress tracking."""
     
-    # Validate API key before starting expensive upload operation  
+    # Validate API key before starting expensive upload operation
+    # Fail-fast: Don't proceed if credentials are invalid
     logger.info("🔍 About to validate API key for upload...")
     provider_config = await credential_service.get_active_provider("embedding")
     provider = provider_config.get("provider", "openai")
     await _validate_provider_api_key(provider)
     logger.info("✅ API key validation completed successfully for upload")
-    
+
     try:
         # DETAILED LOGGING: Track knowledge_type parameter flow
         safe_logfire_info(

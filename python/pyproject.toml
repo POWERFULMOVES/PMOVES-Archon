@@ -64,6 +64,8 @@ server = [
     "tldextract>=5.0.0",
     # Logging
     "logfire>=0.30.0",
+    # Metrics
+    "prometheus-client>=0.20.0",
     # Testing (needed for UI-triggered tests)
     "pytest>=8.0.0",
     "pytest-asyncio>=0.21.0",
