@@ -113,7 +113,6 @@ FILES_CHANGED=$(git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat | tail -1)
 # Detailed changes by component
 CHANGES_FRONTEND=$(git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat -- archon-ui-main/ | head -20)
 CHANGES_BACKEND=$(git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat -- python/ | head -20)
-CHANGES_DOCS=$(git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat -- '*.md' PRPs/ | head -10)
 
 FILE_CHANGES="### File Changes by Component
 
@@ -121,10 +120,7 @@ FILE_CHANGES="### File Changes by Component
 $CHANGES_FRONTEND
 
 **Backend:**
-$CHANGES_BACKEND
-
-**Documentation:**
-$CHANGES_DOCS"
+$CHANGES_BACKEND"
 
 echo -e "${GREEN}Files summary: $FILES_CHANGED${NC}"
 
@@ -225,10 +221,6 @@ Generate comprehensive release notes following this structure:
 
 Thanks to everyone who contributed to this release:
 [List unique contributors with @ mentions]
-
-## 📚 Documentation
-
-[If documentation changes, list them]
 
 ## ⚠️ Breaking Changes
 

@@ -85,8 +85,6 @@ jobs:
           echo "**Backend:**" >> changes.txt
           git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat -- python/ | head -20 >> changes.txt
           echo "" >> changes.txt
-          echo "**Documentation:**" >> changes.txt
-          git diff ${PREVIOUS_TAG}..${CURRENT_TAG} --stat -- '*.md' PRPs/ | head -10 >> changes.txt
 
       - name: Get closed PRs
         id: prs
@@ -190,10 +188,6 @@ jobs:
           Thanks to everyone who contributed to this release:
           [List unique contributors with @ mentions]
 
-          ## 📚 Documentation
-
-          [If documentation changes, list them]
-
           ## ⚠️ Breaking Changes
 
           [List any breaking changes - this is beta software, so breaking changes are expected]
@@ -201,7 +195,6 @@ jobs:
           ## 🔗 Links
 
           - **Full Changelog:** https://github.com/${{ github.repository }}/compare/${{ steps.prev_tag.outputs.previous_tag }}...${{ steps.get_tag.outputs.tag }}
-          - **Installation Guide:** [Link to docs]
 
           ---
 
