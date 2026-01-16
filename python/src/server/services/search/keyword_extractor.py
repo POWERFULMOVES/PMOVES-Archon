@@ -3,9 +3,19 @@ Keyword Extraction Utility
 
 Simple and effective keyword extraction for improved search capabilities.
 Uses lightweight Python string operations without heavy NLP dependencies.
+
+Enhanced with optional Hi-RAG v2 semantic expansion for knowledge-aware search.
 """
 
+import asyncio
+import logging
+import os
+from typing import Optional
+
+import httpx
 import re
+
+logger = logging.getLogger(__name__)
 
 # Common stop words to filter out
 STOP_WORDS = {
@@ -240,11 +250,23 @@ PRESERVE_KEYWORDS = {
 
 
 class KeywordExtractor:
-    """Simple keyword extraction for search queries"""
+    """Simple keyword extraction for search queries.
 
-    def __init__(self):
+    Enhanced with optional Hi-RAG v2 semantic expansion for knowledge-aware
+    keyword discovery. When hirag_url is configured, the extractor can query
+    the PMOVES knowledge graph to find semantically related terms.
+    """
+
+    def __init__(self, hirag_url: Optional[str] = None):
+        """Initialize the keyword extractor.
+
+        Args:
+            hirag_url: Optional URL for Hi-RAG v2 service (e.g., "http://localhost:8086")
+                When provided, enables semantic keyword expansion via knowledge graph.
+        """
         self.stop_words = STOP_WORDS | TECHNICAL_STOP_WORDS
         self.preserve_keywords = PRESERVE_KEYWORDS
+        self.hirag_url = hirag_url
 
     def extract_keywords(
         self, query: str, min_length: int = 2, max_keywords: int = 10
@@ -416,9 +438,135 @@ class KeywordExtractor:
 
         return unique_terms
 
+    async def extract_keywords_with_semantic_expansion(
+        self,
+        query: str,
+        min_length: int = 2,
+        max_keywords: int = 10,
+        hirag_top_k: int = 3,
+        hirag_timeout: float = 3.0,
+    ) -> list[str]:
+        """Extract keywords with optional semantic expansion via Hi-RAG v2.
+
+        This method combines heuristic keyword extraction with semantic expansion
+        from the PMOVES knowledge graph. When Hi-RAG v2 is available, it queries
+        the knowledge graph for semantically related entities and terms.
+
+        Args:
+            query: The search query string
+            min_length: Minimum keyword length (default: 2)
+            max_keywords: Maximum number of keywords to return (default: 10)
+            hirag_top_k: Number of semantic results to request from Hi-RAG (default: 3)
+            hirag_timeout: Timeout in seconds for Hi-RAG request (default: 3.0)
+
+        Returns:
+            List of extracted keywords with semantic expansion, ordered by importance
+        """
+        # Start with heuristic extraction
+        keywords = self.extract_keywords(query, min_length, max_keywords)
+
+        # Skip semantic expansion if Hi-RAG is not configured
+        if not self.hirag_url:
+            return keywords
+
+        try:
+            # Query Hi-RAG v2 for semantically related content
+            async with httpx.AsyncClient(timeout=hirag_timeout) as client:
+                response = await client.post(
+                    f"{self.hirag_url}/hirag/query",
+                    json={
+                        "query": query,
+                        "top_k": hirag_top_k,
+                        "rerank": True,
+                    },
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    # Extract entities/keywords from Hi-RAG response
+                    # Hi-RAG returns results with 'content' and optional 'entities'
+                    semantic_keywords = self._extract_semantic_keywords(data)
+
+                    # Merge semantic keywords with heuristic ones
+                    # Prioritize keywords that appear in both sets
+                    for sem_kw in semantic_keywords:
+                        if sem_kw.lower() not in [k.lower() for k in keywords]:
+                            keywords.append(sem_kw)
+
+                    # Re-prioritize combined set
+                    keywords = self._prioritize_keywords(keywords, query)
+
+                    logger.debug(
+                        f"Semantic expansion: {len(keywords)} keywords "
+                        f"(added {len(semantic_keywords)} semantic)"
+                    )
+                else:
+                    logger.warning(
+                        f"Hi-RAG request failed: {response.status_code}, "
+                        f"using heuristic keywords only"
+                    )
+
+        except asyncio.TimeoutError:
+            logger.warning("Hi-RAG request timed out, using heuristic keywords only")
+        except Exception as e:
+            logger.warning(f"Hi-RAG semantic expansion failed: {e}, using heuristic keywords")
+
+        return keywords[:max_keywords]
+
+    def _extract_semantic_keywords(self, hirag_response: dict) -> list[str]:
+        """Extract semantic keywords from Hi-RAG v2 response.
+
+        Args:
+            hirag_response: JSON response from Hi-RAG v2 /hirag/query endpoint
+
+        Returns:
+            List of semantically related keywords/entities
+        """
+        keywords = []
+
+        # Handle different response formats from Hi-RAG
+        results = hirag_response.get("results", [])
+        if not results and "data" in hirag_response:
+            results = hirag_response["data"]
+
+        for result in results:
+            # Extract from content field
+            content = result.get("content", "")
+            if content:
+                # Extract named entities if available (Hi-RAG may include entities)
+                entities = result.get("entities", [])
+                if entities:
+                    for entity in entities:
+                        if isinstance(entity, dict):
+                            entity_text = entity.get("text", entity.get("name", ""))
+                            if entity_text and len(entity_text) >= 2:
+                                keywords.append(entity_text)
+                        elif isinstance(entity, str) and len(entity) >= 2:
+                            keywords.append(entity)
+
+                # Extract key terms from content using heuristics
+                # Look for capitalized terms (potential named entities)
+                content_keywords = re.findall(r"\b[A-Z][a-z0-9_]{2,}\b", content)
+                keywords.extend(content_keywords[:2])  # Limit to avoid noise
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_keywords = []
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if kw_lower not in seen and kw_lower not in self.stop_words:
+                seen.add(kw_lower)
+                unique_keywords.append(kw)
+
+        return unique_keywords[:5]  # Limit semantic keywords to avoid overwhelming
+
 
 # Global instance for easy access
-keyword_extractor = KeywordExtractor()
+# Note: To enable semantic expansion, set HIRAG_URL environment variable
+# before importing this module, or create a new instance with hirag_url parameter
+_hirag_url = os.environ.get("HIRAG_URL", "http://localhost:8086")
+keyword_extractor = KeywordExtractor(hirag_url=_hirag_url)
 
 
 def extract_keywords(query: str, min_length: int = 2, max_keywords: int = 10) -> list[str]:
@@ -434,6 +582,34 @@ def extract_keywords(query: str, min_length: int = 2, max_keywords: int = 10) ->
         List of extracted keywords
     """
     return keyword_extractor.extract_keywords(query, min_length, max_keywords)
+
+
+async def extract_keywords_semantic(
+    query: str,
+    min_length: int = 2,
+    max_keywords: int = 10,
+    hirag_top_k: int = 3,
+    hirag_timeout: float = 3.0,
+) -> list[str]:
+    """
+    Convenience function to extract keywords with Hi-RAG v2 semantic expansion.
+
+    This async function combines heuristic keyword extraction with semantic
+    expansion from the PMOVES knowledge graph when Hi-RAG v2 is available.
+
+    Args:
+        query: The search query string
+        min_length: Minimum keyword length
+        max_keywords: Maximum number of keywords to return
+        hirag_top_k: Number of semantic results from Hi-RAG
+        hirag_timeout: Timeout in seconds for Hi-RAG request
+
+    Returns:
+        List of extracted keywords with semantic expansion
+    """
+    return await keyword_extractor.extract_keywords_with_semantic_expansion(
+        query, min_length, max_keywords, hirag_top_k, hirag_timeout
+    )
 
 
 def build_search_terms(keywords: list[str]) -> list[str]:
