@@ -16,6 +16,13 @@ from fastapi import Body, Depends, FastAPI, HTTPException
 from nats.aio.client import Client as NATS
 from pydantic import BaseModel, Field, HttpUrl
 
+# NATS service announcement integration
+try:
+    from services.common.nats_service_listener import announce_service, ServiceTier
+    NATS_ANNOUNCE_AVAILABLE = True
+except ImportError:
+    NATS_ANNOUNCE_AVAILABLE = False
+
 try:
     _services_root = Path(__file__).resolve().parents[2]
     if str(_services_root) not in sys.path:
@@ -1095,6 +1102,32 @@ SUPERVISOR = ArchonServiceSupervisor()
 
 @asynccontextmanager
 async def _supervisor_lifespan(app: FastAPI):
+    # Get service configuration for announcement
+    port = int(ENV_PORTS["server_port"])
+    hostname = os.getenv("HOSTNAME", socket.gethostname())
+    slug = os.getenv("SERVICE_SLUG", "archon")
+    name = os.getenv("SERVICE_NAME", "PMOVES Archon")
+    url = os.getenv("SERVICE_URL") or f"http://{hostname}:{port}"
+    health_check = f"{url}/healthz"
+
+    # Announce service on NATS
+    if NATS_ANNOUNCE_AVAILABLE:
+        try:
+            await announce_service(
+                nats_url=os.getenv("NATS_URL", "nats://nats:4222"),
+                slug=slug,
+                name=name,
+                url=url,
+                health_check=health_check,
+                tier=ServiceTier.AGENT,
+                port=port,
+                metadata={"version": "5.0.0"},
+                retry=True,
+            )
+            LOGGER.info("NATS service announcement published: %s at %s", slug, url)
+        except Exception as e:
+            LOGGER.warning("Failed to publish NATS service announcement: %s", e)
+
     await SUPERVISOR.start()
     try:
         yield
