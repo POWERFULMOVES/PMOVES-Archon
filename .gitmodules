@@ -97,6 +97,9 @@
 [submodule "PMOVES-Danger-infra"]
 	path = PMOVES-Danger-infra
 	url = https://github.com/POWERFULMOVES/PMOVES-Danger-infra.git
+[submodule "PMOVES-E2B-Danger-Room"]
+	path = PMOVES-E2B-Danger-Room
+	url = https://github.com/POWERFULMOVES/PMOVES-E2B-Danger-Room.git
 [submodule "PMOVES-E2B-Danger-Room-Desktop"]
 	path = PMOVES-E2B-Danger-Room-Desktop
 	url = https://github.com/POWERFULMOVES/PMOVES-E2B-Danger-Room-Desktop.git
@@ -107,8 +110,11 @@
 [submodule "PMOVES-E2b-Spells"]
 	path = PMOVES-E2b-Spells
 	url = https://github.com/POWERFULMOVES/PMOVES-E2b-Spells.git
-[submodule "pmoves-surf"]
-	path = pmoves-surf
+[submodule "PMOVES-AgentGym"]
+	path = PMOVES-AgentGym
+	url = https://github.com/POWERFULMOVES/PMOVES-AgentGym.git
+[submodule "PMOVES-surf"]
+	path = PMOVES-surf
 	url = https://github.com/POWERFULMOVES/pmoves-surf.git
 [submodule "PMOVES-transcribe-and-fetch"]
 	path = PMOVES-transcribe-and-fetch
