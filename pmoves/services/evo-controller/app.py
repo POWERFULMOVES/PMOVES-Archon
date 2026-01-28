@@ -278,6 +278,12 @@ class EvoSwarmController:
             logger.warning("failed to publish geometry.swarm.meta.v1 (agent-zero not reachable?)")
 
 
+@app.get("/healthz")
+async def healthz() -> Dict[str, Any]:
+    """Health check endpoint for Kubernetes probes."""
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     """Liveness check."""

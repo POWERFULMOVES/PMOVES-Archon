@@ -1208,6 +1208,12 @@ def _enrich_mindmap_item(constellation_id: str, point: Dict[str, Any], media: Di
         "notebook": notebook_payload,
     }
 
+@app.get("/healthz")
+def healthz():
+    """Health check endpoint for Kubernetes probes."""
+    return {"status": "ok"}
+
+
 @app.get("/hirag/admin/stats")
 def stats(request: Request):
     if os.environ.get("SMOKE_ALLOW_ADMIN_STATS", "false").lower() != "true":
