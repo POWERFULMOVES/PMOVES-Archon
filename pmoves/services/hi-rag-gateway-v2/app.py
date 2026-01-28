@@ -2,7 +2,8 @@ import os, time, math, json, logging, re, sys, contextlib, ipaddress, copy, thre
 import importlib.util
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, Body, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Body, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
@@ -1212,6 +1213,12 @@ def _enrich_mindmap_item(constellation_id: str, point: Dict[str, Any], media: Di
 def healthz():
     """Health check endpoint for Kubernetes probes."""
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics endpoint for observability."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/hirag/admin/stats")
