@@ -14,6 +14,7 @@ Service follows Archon's established patterns:
 
 from typing import Any
 
+import asyncio
 import httpx
 from pydantic import BaseModel, Field
 
@@ -126,11 +127,14 @@ class PersonaService:
         try:
             logger.info(f"Fetching persona: {persona_id}")
 
-            response = (
-                self.supabase_client.table("archon_personas")
-                .select("*")
-                .eq("id", persona_id)
-                .execute()
+            # Run blocking Supabase call in thread pool to avoid blocking event loop
+            response = await asyncio.to_thread(
+                lambda: (
+                    self.supabase_client.table("archon_personas")
+                    .select("*")
+                    .eq("id", persona_id)
+                    .execute()
+                )
             )
 
             if not response.data:

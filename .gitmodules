@@ -29,6 +29,7 @@
 [submodule "pmoves_multi_agent_pro_pack/docling"]
 	path = pmoves_multi_agent_pro_pack/docling
 	url = https://github.com/POWERFULMOVES/docling.git
+	branch = PMOVES.AI-Edition-Hardened
 
 # Multi-Agent Pro Pack - MCP Gateway
 [submodule "pmoves_multi_agent_pro_pack/PMOVES-BotZ-gateway"]
