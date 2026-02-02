@@ -1,0 +1,285 @@
+name: Docker Hardening Validation
+
+on:
+  push:
+    branches: [main, PMOVES.AI-Edition-Hardened]
+    paths:
+      - 'pmoves/docker-compose*.yml'
+      - 'pmoves/services/**/Dockerfile*'
+      - '.github/workflows/hardening-validation.yml'
+  pull_request:
+    branches: [main, PMOVES.AI-Edition-Hardened]
+    paths:
+      - 'pmoves/docker-compose*.yml'
+      - 'pmoves/services/**/Dockerfile*'
+      - '.github/workflows/hardening-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  # ============================================================================
+  # Validate Hardening Patterns
+  # ============================================================================
+  validate-hardening:
+    name: Validate Hardening Patterns
+    runs-on: [self-hosted, vps]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run hardening validation
+        id: hardening-check
+        run: |
+          echo "Running Docker hardening validation..."
+          ./pmoves/scripts/validate-hardening.sh
+        continue-on-error: true
+
+      - name: Generate hardening report
+        if: always()
+        run: |
+          echo "# Hardening Validation Report" > hardening-report.md
+          echo "" >> hardening-report.md
+          echo "## Validated: $(date)" >> hardening-report.md
+          echo "" >> hardening-report.md
+          echo "## Services Checked" >> hardening-report.md
+          echo "" >> hardening-report.md
+          ./pmoves/scripts/validate-hardening.sh 2>&1 | tee -a hardening-report.md || true
+
+      - name: Upload hardening report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardening-report
+          path: hardening-report.md
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('hardening-report.md', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Docker Hardening Validation\n\n${report}`
+            });
+
+  # ============================================================================
+  # Validate Dockerfile Security
+  # ============================================================================
+  validate-dockerfiles:
+    name: Validate Dockerfiles
+    runs-on: [self-hosted, vps]
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - pmoves/services/archon/Dockerfile
+          - pmoves/services/agent-zero/Dockerfile
+          - pmoves/services/flute-gateway/Dockerfile
+          - pmoves/services/hirag-gateway/Dockerfile
+          - pmoves/services/extract-worker/Dockerfile
+          - pmoves/services/tokenism-simulator/Dockerfile
+          - pmoves/services/botz-gateway/Dockerfile
+          - pmoves/services/gateway-agent/Dockerfile
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check USER directive
+        run: |
+          echo "Checking ${{ matrix.dockerfile }} for USER directive..."
+          if grep -q "^USER " "${{ matrix.dockerfile }}"; then
+            user=$(grep "^USER " "${{ matrix.dockerfile }}" | head -1)
+            echo "✓ Found: $user"
+            # Check if user is not root
+            uid=$(echo "$user" | awk '{print $2}')
+            if [[ "$uid" != "0" && "$uid" != "root" ]]; then
+            echo "✓ Non-root user configured"
+            else
+            echo "✗ WARNING: Running as root"
+            exit 1
+            fi
+          else
+            echo "✗ ERROR: No USER directive found"
+            exit 1
+          fi
+
+      - name: Check for multi-stage build
+        run: |
+          echo "Checking ${{ matrix.dockerfile }} for multi-stage build..."
+          from_count=$(grep -c "^FROM " "${{ matrix.dockerfile }}" || true)
+          if [[ "$from_count" -gt 1 ]]; then
+            echo "✓ Multi-stage build detected ($from_count stages)"
+          else
+            echo "⚠ Single-stage build (consider multi-stage for smaller images)"
+          fi
+
+      - name: Check for security best practices
+        run: |
+          echo "Checking ${{ matrix.dockerfile }} security practices..."
+
+          # Check for --no-cache-dir in pip installs
+          if grep -q "pip install.*--no-cache-dir" "${{ matrix.dockerfile }}"; then
+            echo "✓ Uses --no-cache-dir for pip"
+          fi
+
+          # Check for distroless or alpine base images
+          if grep -qE "FROM.*(alpine|distroless)" "${{ matrix.dockerfile }}"; then
+            echo "✓ Uses minimal base image"
+          fi
+
+          # Check for COPY vs ADD
+          if grep -q "^ADD " "${{ matrix.dockerfile }}"; then
+            echo "⚠ Uses ADD (consider COPY for better security)"
+          fi
+
+  # ============================================================================
+  # Docker Bench Security Scan
+  # ============================================================================
+  docker-bench:
+    name: Docker Bench Security
+    runs-on: [self-hosted, vps]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run Docker Bench
+        run: |
+          # Install docker-bench-security if not available
+          if ! command -v docker-bench-security &> /dev/null; then
+            docker run --rm -v /usr/local/bin:/target docker-bench-security:latest \
+              cp /docker-bench-security /target/ 2>/dev/null || \
+              curl -fsSL https://github.com/docker/docker-bench-security/releases/latest/download/docker-bench-security.sh -o /tmp/dbs.sh && \
+              chmod +x /tmp/dbs.sh && /tmp/dbs.sh
+          fi
+
+          # Run checks on sample service
+          echo "Running Docker Bench security checks..."
+          docker run --rm --net host --pid host --cap-add audit_control \
+            -v /var/lib/docker:/var/lib/docker:ro \
+            -v /usr/lib/systemd:/usr/lib/systemd:ro \
+            docker-bench-security:latest \
+            check --check "CIS Docker Community Edition Benchmark v2.0.0 - level 1" || true
+
+  # ============================================================================
+  # Compose File Validation
+  # ============================================================================
+  validate-compose:
+    name: Validate Compose Files
+    runs-on: [self-hosted, vps]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate compose syntax
+        run: |
+          echo "Validating docker-compose files..."
+
+          # Validate main compose file
+          docker compose -f pmoves/docker-compose.yml config --quiet
+          echo "✓ pmoves/docker-compose.yml is valid"
+
+          # Validate hardened compose file
+          docker compose -f pmoves/docker-compose.hardened.yml config --quiet
+          echo "✓ pmoves/docker-compose.hardened.yml is valid"
+
+          # Validate monitoring compose file
+          if [ -f "pmoves/monitoring/docker-compose.monitoring.yml" ]; then
+            docker compose -f pmoves/monitoring/docker-compose.monitoring.yml config --quiet
+            echo "✓ pmoves/monitoring/docker-compose.monitoring.yml is valid"
+          fi
+
+      - name: Check for network segmentation
+        run: |
+          echo "Checking network segmentation..."
+
+          # Check for defined networks
+          networks=$(grep -E "^  [a-z_]+:" pmoves/docker-compose.yml | grep -E "network|driver" || echo "0")
+          if [[ "$networks" -gt 0 ]]; then
+            echo "✓ Custom networks defined"
+            # List networks
+            grep -A 5 "^networks:" pmoves/docker-compose.yml | grep "  [a-z_]*:" || true
+          fi
+
+      - name: Check for secrets management
+        run: |
+          echo "Checking secrets management..."
+
+          if grep -q "^secrets:" pmoves/docker-compose.hardened.yml; then
+            echo "✓ Secrets defined in hardened compose"
+            grep -A 10 "^secrets:" pmoves/docker-compose.hardened.yml || true
+          else
+            echo "⚠ No secrets found in hardened compose"
+          fi
+
+  # ============================================================================
+  # Summary Job
+  # ============================================================================
+  summary:
+    name: Validation Summary
+    runs-on: [self-hosted, vps]
+    needs: [validate-hardening, validate-dockerfiles, validate-compose]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Docker Hardening Validation Summary" > summary.md
+          echo "" >> summary.md
+          echo "## Job Results" >> summary.md
+          echo "" >> summary.md
+          echo "- Hardening Patterns: ${{ needs.validate-hardening.result }}" >> summary.md
+          echo "- Dockerfiles: ${{ needs.validate-dockerfiles.result }}" >> summary.md
+          echo "- Compose Files: ${{ needs.validate-compose.result }}" >> summary.md
+          echo "" >> summary.md
+          echo "## Next Steps" >> summary.md
+          echo "" >> summary.md
+          if [[ "${{ needs.validate-hardening.result }}" == "success" ]] && \
+             [[ "${{ needs.validate-dockerfiles.result }}" == "success" ]] && \
+             [[ "${{ needs.validate-compose.result }}" == "success" ]]; then
+            echo "✓ All validations passed!" >> summary.md
+          else
+            echo "⚠ Some validations failed. Please review the logs above." >> summary.md
+          fi
+
+          cat summary.md
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-summary
+          path: summary.md
+          retention-days: 90
