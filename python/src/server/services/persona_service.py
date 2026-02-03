@@ -174,12 +174,15 @@ class PersonaService:
         try:
             logger.info(f"Listing personas (active_only={active_only})")
 
-            query = self.supabase_client.table("archon_personas").select("*")
+            # Build query function to run in thread pool
+            def build_and_execute_query():
+                query = self.supabase_client.table("archon_personas").select("*")
+                if active_only:
+                    query = query.eq("is_active", True)
+                return query.order("name").execute()
 
-            if active_only:
-                query = query.eq("is_active", True)
-
-            response = query.order("name").execute()
+            # Run blocking Supabase call in thread pool to avoid blocking event loop
+            response = await asyncio.to_thread(build_and_execute_query)
 
             personas = [Persona(**p) for p in response.data]
 
@@ -242,7 +245,7 @@ class PersonaService:
             persona: Persona = persona_result["persona"]
 
             # Step 2: Build enhanced system prompt
-            system_prompt = self.build_system_prompt(persona, form_name)
+            system_prompt = await self.build_system_prompt(persona, form_name)
 
             # Step 3: Apply behavior weight overrides
             behavior_weights = persona.behavior_weights.copy() if persona.behavior_weights else {}
@@ -298,7 +301,7 @@ class PersonaService:
             logger.error(f"Error creating agent with persona: {e}", exc_info=True)
             return False, {"error": f"Failed to create agent: {str(e)}"}
 
-    def build_system_prompt(self, persona: Persona, form_name: str | None = None) -> str:
+    async def build_system_prompt(self, persona: Persona, form_name: str | None = None) -> str:
         """
         Build an enhanced system prompt from persona and optional Archon form.
 
@@ -315,7 +318,7 @@ class PersonaService:
             Enhanced system prompt string
 
         Example:
-            prompt = persona_service.build_system_prompt(dev_persona, "code_review")
+            prompt = await persona_service.build_system_prompt(dev_persona, "code_review")
             # Returns: "You are an expert developer... [base prompt]
             #          ### Archon Code Review Mode
             #          Focus on security, performance... [enhancements]"
@@ -326,7 +329,7 @@ class PersonaService:
 
             # Add Archon-specific enhancements if form provided
             if form_name:
-                archon_additions = self.get_archon_prompt_enhancements(form_name)
+                archon_additions = await self.get_archon_prompt_enhancements(form_name)
                 if archon_additions:
                     prompt_parts.append(f"\n### Archon Enhancements ({form_name})")
                     prompt_parts.append(archon_additions)
@@ -350,7 +353,7 @@ class PersonaService:
             # Fallback to base prompt if enhancement fails
             return persona.system_prompt
 
-    def get_archon_prompt_enhancements(self, form_name: str) -> str | None:
+    async def get_archon_prompt_enhancements(self, form_name: str) -> str | None:
         """
         Retrieve Archon-specific prompt enhancements for a given form.
 
@@ -364,7 +367,7 @@ class PersonaService:
             String of prompt enhancements or None if not found
 
         Example:
-            enhancements = persona_service.get_archon_prompt_enhancements("code_review")
+            enhancements = await persona_service.get_archon_prompt_enhancements("code_review")
             # Returns: "Focus on: security vulnerabilities, performance issues,
             #          code maintainability, and adherence to project standards."
         """
@@ -373,11 +376,14 @@ class PersonaService:
                 return None
 
             # Query archon_prompts table for form enhancements
-            response = (
-                self.supabase_client.table("archon_prompts")
-                .select("prompt")
-                .eq("prompt_name", f"form_{form_name}_enhancements")
-                .execute()
+            # Run blocking Supabase call in thread pool to avoid blocking event loop
+            response = await asyncio.to_thread(
+                lambda: (
+                    self.supabase_client.table("archon_prompts")
+                    .select("prompt")
+                    .eq("prompt_name", f"form_{form_name}_enhancements")
+                    .execute()
+                )
             )
 
             if response.data:
