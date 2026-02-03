@@ -139,6 +139,8 @@ all = [
     # "docker>=6.1.0",
     "tldextract>=5.0.0",
     "logfire>=0.30.0",
+    # Metrics
+    "prometheus-client>=0.20.0",
     # MCP specific (mcp version)
     "mcp==1.12.2",
     # Agents specific
