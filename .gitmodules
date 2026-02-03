@@ -21,6 +21,14 @@
 [submodule "pmoves/integrations/archon"]
 	path = pmoves/integrations/archon
 	url = https://github.com/POWERFULMOVES/PMOVES-Archon.git
+[submodule "PMOVES-Archon"]
+	path = PMOVES-Archon
+	url = https://github.com/POWERFULMOVES/PMOVES-Archon.git
+	branch = PMOVES.AI-Edition-Hardened
+[submodule "PMOVES-ToKenism-Multi"]
+	path = PMOVES-ToKenism-Multi
+	url = https://github.com/POWERFULMOVES/PMOVES-ToKenism-Multi.git
+	branch = PMOVES.AI-Edition-Hardened
 [submodule "PMOVES-n8n"]
 	path = PMOVES-n8n
 	url = https://github.com/POWERFULMOVES/PMOVES-n8n.git
