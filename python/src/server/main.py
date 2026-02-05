@@ -32,6 +32,7 @@ from .api_routes.migration_api import router as migration_router
 from .api_routes.ollama_api import router as ollama_router
 from .api_routes.openrouter_api import router as openrouter_router
 from .api_routes.pages_api import router as pages_router
+from .api_routes.persona_api import router as persona_router
 from .api_routes.progress_api import router as progress_router
 from .api_routes.projects_api import router as projects_router
 from .api_routes.providers_api import router as providers_router
@@ -237,6 +238,7 @@ app.include_router(knowledge_router)
 app.include_router(pages_router)
 app.include_router(ollama_router)
 app.include_router(openrouter_router)
+app.include_router(persona_router)
 app.include_router(projects_router)
 app.include_router(progress_router)
 app.include_router(agent_chat_router)
