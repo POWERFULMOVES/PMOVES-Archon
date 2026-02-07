@@ -7,5 +7,5 @@ reviews:
     - "fix/*"
   excluded_branches:
     - "origin/main"
-language: "en-US"
+  language: "en-US"
   doc_target_coverage: 80

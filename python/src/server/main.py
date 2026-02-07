@@ -234,11 +234,8 @@ app.include_router(mcp_router)
 app.include_router(knowledge_router)
 app.include_router(pages_router)
 app.include_router(ollama_router)
-<<<<<<< HEAD
 app.include_router(openrouter_router)
-=======
 app.include_router(persona_router)
->>>>>>> main
 app.include_router(projects_router)
 app.include_router(progress_router)
 app.include_router(agent_chat_router)
@@ -312,16 +309,10 @@ async def api_health_check(response: Response):
     return await health_check(response)
 
 
-<<<<<<< HEAD
-# Prometheus metrics endpoint (no auth required)
+# Prometheus metrics endpoint for observability
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint for observability."""
-=======
-@app.get("/metrics")
-async def metrics():
-    """Prometheus metrics endpoint."""
->>>>>>> main
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

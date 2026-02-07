@@ -20,8 +20,6 @@ from ..config.logfire_config import get_logger
 from ..services.persona_service import (
     AgentCreateResponse,
     Persona,
-    PersonaCreateRequest,
-    PersonaService,
     get_persona_service,
 )
 
@@ -136,6 +134,88 @@ async def list_personas(
         raise HTTPException(
             status_code=500,
             detail=f"An unexpected error occurred while listing personas: {str(e)}"
+        )
+
+
+@router.get("/thread-types", response_model=ThreadTypeResponse)
+async def get_thread_types():
+    """
+    Get reference data for available thread types.
+
+    Thread types define the execution context and capabilities for agents.
+    This endpoint provides metadata about supported thread types for
+    agent creation and configuration.
+
+    Returns:
+        ThreadTypeResponse containing:
+        - thread_types: List of thread type definitions
+        - description: Human-readable description of thread types
+
+    Example:
+        GET /api/personas/thread-types
+
+        Response:
+        {
+            "thread_types": [
+                {
+                    "id": "standard",
+                    "name": "Standard Thread",
+                    "description": "Default agent execution context",
+                    "capabilities": ["chat", "tools", "memory"]
+                },
+                {
+                    "id": "research",
+                    "name": "Research Thread",
+                    "description": "Enhanced context for research tasks",
+                    "capabilities": ["chat", "tools", "memory", "web_search", "knowledge_base"]
+                }
+            ],
+            "description": "Available thread types for agent creation"
+        }
+    """
+    try:
+        logger.info("Fetching thread types reference data")
+
+        # TODO: Integrate with Agent Zero's thread type API when available
+        # For now, return static reference data
+        thread_types = [
+            {
+                "id": "standard",
+                "name": "Standard Thread",
+                "description": "Default agent execution context with core capabilities",
+                "capabilities": ["chat", "tools", "memory"],
+                "max_context_tokens": 8192,
+                "supported_models": ["gpt-4", "claude-3", "llama-3"]
+            },
+            {
+                "id": "research",
+                "name": "Research Thread",
+                "description": "Enhanced context for research and knowledge-intensive tasks",
+                "capabilities": ["chat", "tools", "memory", "web_search", "knowledge_base", "citation"],
+                "max_context_tokens": 16384,
+                "supported_models": ["gpt-4", "claude-3"]
+            },
+            {
+                "id": "creative",
+                "name": "Creative Thread",
+                "description": "Optimized for creative writing and content generation",
+                "capabilities": ["chat", "tools", "memory", "creative_mode"],
+                "max_context_tokens": 4096,
+                "supported_models": ["gpt-4", "claude-3", "llama-3"]
+            }
+        ]
+
+        logger.info(f"Returning {len(thread_types)} thread types")
+        return ThreadTypeResponse(
+            thread_types=thread_types,
+            description="Available thread types for agent creation in Agent Zero"
+        )
+
+    except Exception as e:
+        logger.error(f"Unexpected error fetching thread types: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred while fetching thread types: {str(e)}"
         )
 
 
@@ -284,86 +364,4 @@ async def create_agent_from_persona(request: AgentCreateRequest):
         raise HTTPException(
             status_code=500,
             detail=f"An unexpected error occurred while creating agent: {str(e)}"
-        )
-
-
-@router.get("/thread-types", response_model=ThreadTypeResponse)
-async def get_thread_types():
-    """
-    Get reference data for available thread types.
-
-    Thread types define the execution context and capabilities for agents.
-    This endpoint provides metadata about supported thread types for
-    agent creation and configuration.
-
-    Returns:
-        ThreadTypeResponse containing:
-        - thread_types: List of thread type definitions
-        - description: Human-readable description of thread types
-
-    Example:
-        GET /api/personas/thread-types
-
-        Response:
-        {
-            "thread_types": [
-                {
-                    "id": "standard",
-                    "name": "Standard Thread",
-                    "description": "Default agent execution context",
-                    "capabilities": ["chat", "tools", "memory"]
-                },
-                {
-                    "id": "research",
-                    "name": "Research Thread",
-                    "description": "Enhanced context for research tasks",
-                    "capabilities": ["chat", "tools", "memory", "web_search", "knowledge_base"]
-                }
-            ],
-            "description": "Available thread types for agent creation"
-        }
-    """
-    try:
-        logger.info("Fetching thread types reference data")
-
-        # TODO: Integrate with Agent Zero's thread type API when available
-        # For now, return static reference data
-        thread_types = [
-            {
-                "id": "standard",
-                "name": "Standard Thread",
-                "description": "Default agent execution context with core capabilities",
-                "capabilities": ["chat", "tools", "memory"],
-                "max_context_tokens": 8192,
-                "supported_models": ["gpt-4", "claude-3", "llama-3"]
-            },
-            {
-                "id": "research",
-                "name": "Research Thread",
-                "description": "Enhanced context for research and knowledge-intensive tasks",
-                "capabilities": ["chat", "tools", "memory", "web_search", "knowledge_base", "citation"],
-                "max_context_tokens": 16384,
-                "supported_models": ["gpt-4", "claude-3"]
-            },
-            {
-                "id": "creative",
-                "name": "Creative Thread",
-                "description": "Optimized for creative writing and content generation",
-                "capabilities": ["chat", "tools", "memory", "creative_mode"],
-                "max_context_tokens": 4096,
-                "supported_models": ["gpt-4", "claude-3", "llama-3"]
-            }
-        ]
-
-        logger.info(f"Returning {len(thread_types)} thread types")
-        return ThreadTypeResponse(
-            thread_types=thread_types,
-            description="Available thread types for agent creation in Agent Zero"
-        )
-
-    except Exception as e:
-        logger.error(f"Unexpected error fetching thread types: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected error occurred while fetching thread types: {str(e)}"
         )

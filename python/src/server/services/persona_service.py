@@ -16,7 +16,7 @@ from typing import Any
 
 import asyncio
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, ValidationError
 
 from ..config.logfire_config import get_logger
 from ..config.service_discovery import get_agents_url
@@ -55,14 +55,14 @@ class Persona(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
 
-
-class PersonaCreateRequest(BaseModel):
-    """Request model for creating a new agent with persona."""
-
-    persona_id: str = Field(..., description="ID of persona to use")
-    form_name: str | None = Field(None, description="Optional Archon form for behavior overrides")
-    overrides: dict[str, Any] | None = Field(None, description="Custom behavior weight overrides")
-    agent_name: str | None = Field(None, description="Custom name for the agent (defaults to persona name)")
+    @field_validator("behavior_weights")
+    @classmethod
+    def validate_behavior_weights(cls, v: dict[str, float]) -> dict[str, float]:
+        """Validate that behavior weights are within valid range [0.0, 1.0]."""
+        for key, weight in v.items():
+            if not 0.0 <= weight <= 1.0:
+                raise ValueError(f"Behavior weight '{key}' must be between 0.0 and 1.0, got {weight}")
+        return v
 
 
 class AgentCreateResponse(BaseModel):
@@ -73,6 +73,21 @@ class AgentCreateResponse(BaseModel):
     message: str
     persona_id: str | None = None
     system_prompt: str | None = None
+
+
+class AgentZeroCreateResponse(BaseModel):
+    """
+    Response model from Agent Zero API for agent creation.
+
+    This represents the actual response from the Agent Zero /api/persona/agent/create endpoint.
+    Used to validate the upstream response before processing.
+    """
+
+    agent_id: str | None = Field(None, description="ID of the created agent")
+    status: str = Field(..., description="Status of the agent creation")
+    message: str = Field(..., description="Status message")
+    # Allow extra fields for forward compatibility
+    model_config = {"extra": "ignore"}
 
 
 # ============================================================================
@@ -142,11 +157,25 @@ class PersonaService:
                 return False, {"error": f"Persona with ID '{persona_id}' not found"}
 
             persona_data = response.data[0]
-            persona = Persona(**persona_data)
+            try:
+                persona = Persona(**persona_data)
+            except ValidationError as ve:
+                # Data corruption - persona data doesn't match schema
+                logger.error(
+                    f"Persona data validation failed for {persona_id}: {ve}",
+                    exc_info=True
+                )
+                raise  # Re-raise to indicate data corruption issue
+            except Exception as e:
+                logger.error(f"Unexpected error constructing Persona for {persona_id}: {e}", exc_info=True)
+                return False, {"error": f"Failed to construct persona: {str(e)}"}
 
             logger.info(f"Successfully retrieved persona: {persona.name}")
             return True, {"persona": persona}
 
+        except ValidationError:
+            # Re-raise validation errors to indicate data corruption
+            raise
         except Exception as e:
             logger.error(f"Error fetching persona {persona_id}: {e}", exc_info=True)
             return False, {"error": f"Failed to retrieve persona: {str(e)}"}
@@ -184,7 +213,20 @@ class PersonaService:
             # Run blocking Supabase call in thread pool to avoid blocking event loop
             response = await asyncio.to_thread(build_and_execute_query)
 
-            personas = [Persona(**p) for p in response.data]
+            # Deserialize personas with individual error handling to avoid one bad record masking others
+            personas = []
+            for p_data in response.data:
+                try:
+                    personas.append(Persona(**p_data))
+                except ValidationError as ve:
+                    # Log data corruption but continue processing other records
+                    persona_id = p_data.get("id", "unknown")
+                    logger.error(
+                        f"Failed to deserialize persona {persona_id}: {ve}",
+                        exc_info=True
+                    )
+                    # Skip this record - don't let one bad record break the entire list
+                    continue
 
             logger.info(f"Retrieved {len(personas)} personas")
             return True, {
@@ -276,26 +318,46 @@ class PersonaService:
                     headers={"Content-Type": "application/json"}
                 )
                 response.raise_for_status()
-                agent_response = response.json()
 
-            logger.info(f"Agent created successfully: {agent_response.get('agent_id')}")
+                # Validate and parse Agent Zero response
+                try:
+                    agent_response = AgentZeroCreateResponse.model_validate(response.json())
+                except (ValidationError, ValueError) as ve:
+                    logger.error(f"Invalid Agent Zero response format: {ve}")
+                    return False, {
+                        "error": "Invalid response format from Agent Zero",
+                        "details": "Agent Zero response does not match expected schema"
+                    }
+
+                # Check that agent_id was returned
+                if agent_response.agent_id is None:
+                    logger.error("Agent Zero returned success but no agent_id")
+                    return False, {
+                        "error": "Agent Zero did not return an agent_id",
+                        "details": f"Status: {agent_response.status}, Message: {agent_response.message}"
+                    }
+
+            logger.info(f"Agent created successfully: {agent_response.agent_id}")
 
             return True, {
-                "agent_id": agent_response.get("agent_id"),
-                "status": agent_response.get("status", "created"),
-                "message": agent_response.get("message", "Agent created successfully"),
+                "agent_id": agent_response.agent_id,
+                "status": agent_response.status,
+                "message": agent_response.message,
                 "persona_id": persona_id,
                 "system_prompt": system_prompt
             }
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error creating agent: {e.response.status_code} - {e.response.text}")
+            # Log only status code, not sensitive response.text
+            logger.error(
+                f"HTTP error creating agent: {e.response.status_code}",
+                exc_info=True
+            )
             return False, {
-                "error": f"Agent Zero returned error: {e.response.status_code}",
-                "details": e.response.text
+                "error": f"Agent Zero returned error: {e.response.status_code}"
             }
         except httpx.TimeoutException:
-            logger.error("Timeout creating agent in Agent Zero")
+            logger.error("Timeout creating agent in Agent Zero", exc_info=True)
             return False, {"error": "Request to Agent Zero timed out"}
         except Exception as e:
             logger.error(f"Error creating agent with persona: {e}", exc_info=True)
