@@ -348,6 +348,12 @@ async def create_agent_from_persona(request: AgentCreateRequest):
 
         if not success:
             error_msg = result.get("error", "Failed to create agent")
+
+            # Detect persona-not-found errors and return 404 instead of 500
+            if "not found" in error_msg.lower() or "Persona with ID" in error_msg:
+                logger.warning(f"Persona not found: {request.persona_id} - {error_msg}")
+                raise HTTPException(status_code=404, detail=error_msg)
+
             logger.error(f"Failed to create agent from persona {request.persona_id}: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
