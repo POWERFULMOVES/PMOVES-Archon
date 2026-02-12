@@ -138,7 +138,9 @@ def validate_supabase_url(url: str) -> bool:
 
         # Check for exact localhost and Docker internal hosts (security: prevent subdomain bypass)
         local_hosts = ["localhost", "127.0.0.1", "host.docker.internal"]
-        if hostname in local_hosts or hostname.endswith(".localhost"):
+        # Also allow Docker service names for internal Supabase connections (self-hosted)
+        docker_services = ["rest", "supabase-postgrest", "supabase-kong", "supabase-db"]
+        if hostname in local_hosts or hostname.endswith(".localhost") or hostname in docker_services:
             return True
 
         # Check if hostname is a private IP address

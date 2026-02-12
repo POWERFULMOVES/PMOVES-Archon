@@ -32,6 +32,7 @@ services:
       - ARCHON_HOST=${HOST:-localhost}
     networks:
       - app-network
+      - pmoves_api
     volumes:
       # SECURITY: Docker socket mounting removed (CVE-2025-9074 - CVSS 9.3)
       # MCP status now monitored via HTTP health checks (secure, portable)
@@ -96,6 +97,7 @@ services:
       - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
     networks:
       - app-network
+      - pmoves_api
     depends_on:
       archon-server:
         condition: service_healthy
@@ -139,6 +141,7 @@ services:
       - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
     networks:
       - app-network
+      - pmoves_api
     healthcheck:
       test:
         [
@@ -186,6 +189,7 @@ services:
       - GH_TOKEN=${GITHUB_PAT_TOKEN}
     networks:
       - app-network
+      - pmoves_api
     volumes:
       - ./python/src/agent_work_orders:/app/src/agent_work_orders # Hot reload for agent work orders
       - /tmp/agent-work-orders:/tmp/agent-work-orders # Temp files
@@ -222,6 +226,7 @@ services:
       - DOCKER_ENV=true
     networks:
       - app-network
+      - pmoves_api
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3737"]
       interval: 30s
@@ -237,3 +242,6 @@ services:
 networks:
   app-network:
     driver: bridge
+  pmoves_api:
+    name: pmoves_api
+    external: true

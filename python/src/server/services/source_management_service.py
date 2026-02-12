@@ -7,10 +7,8 @@ Consolidates both utility functions and class-based service.
 
 from typing import Any
 
-from supabase import Client
-
 from ..config.logfire_config import get_logger, search_logger
-from .client_manager import get_supabase_client
+from ..client_manager import get_supabase_client
 from .llm_provider_service import extract_message_text, get_llm_client
 
 logger = get_logger(__name__)
