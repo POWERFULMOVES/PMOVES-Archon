@@ -37,7 +37,7 @@ Execute the following steps:
 
 3. **Comprehensive bring-up with UI:**
    ```bash
-   cd pmoves && make bringup-with-ui
+   cd pmoves && make up-all
    ```
 
    Full stack including:
@@ -45,6 +45,8 @@ Execute the following steps:
    - Monitoring (Prometheus, Grafana, Loki)
    - UI development mode
    - Auto-captures evidence after bring-up
+
+   **Note**: Using `make up-all` instead of non-existent `bringup-with-ui` script.
 
 4. **Verify services started successfully:**
    ```bash

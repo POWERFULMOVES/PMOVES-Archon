@@ -21,6 +21,20 @@ declare -a BLOCKED_PATTERNS=(
     "format c:"
 )
 
+# Environment file patterns to block (but allow .example files)
+ENV_BLOCKED_PATTERNS=(
+    "env\.shared"
+    "env\.tier-"
+    "\.env\."
+    "\.env\.local"
+)
+
+ENV_ALLOWED_PATTERNS=(
+    "\.env\.example"
+    "env\.shared\.example"
+    "env\.tier-.*\.example"
+)
+
 # Check for blocked patterns
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
     if echo "$TOOL_PARAMS" | grep -qi "$pattern"; then
@@ -56,12 +70,46 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     fi
 fi
 
-# Block Edit/Write to sensitive files
+# Block Edit/Write to environment files (strict blocking)
 if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
-    # Check for sensitive files
-    if echo "$TOOL_PARAMS" | grep -E "(/etc/|/.ssh/|/.env|password|secret)" >/dev/null; then
+    FILE_TO_EDIT="$TOOL_PARAMS"
+
+    # Check if it's an allowed example file
+    IS_ALLOWED=0
+    for allowed_pattern in "${ENV_ALLOWED_PATTERNS[@]}"; do
+        if echo "$FILE_TO_EDIT" | grep -qi "$allowed_pattern"; then
+            IS_ALLOWED=1
+            break
+        fi
+    done
+
+    # Check if it's a blocked env file
+    for blocked_pattern in "${ENV_BLOCKED_PATTERNS[@]}"; do
+        if echo "$FILE_TO_EDIT" | grep -qi "$blocked_pattern"; then
+            # But skip if it's an allowed example file
+            if [ "$IS_ALLOWED" -eq 0 ]; then
+                echo "❌ BLOCKED: Direct environment file modification" >&2
+                echo "   File: $FILE_TO_EDIT" >&2
+                echo "   Pattern: $blocked_pattern" >&2
+                echo "   Use /pmoves:env command or edit .example files instead" >&2
+                exit 1
+            fi
+        fi
+    done
+
+    # Validate docker-compose files (if yamllint is available)
+    if echo "$FILE_TO_EDIT" | grep -q "docker-compose.*\.yml"; then
+        if command -v yamllint &>/dev/null; then
+            # Schedule validation for after edit completes
+            # (We create a temp marker for post-tool hook to check)
+            export PMOVES_VALIDATE_YAML="$FILE_TO_EDIT"
+        fi
+    fi
+
+    # Original sensitive file check (still warn for other cases)
+    if echo "$TOOL_PARAMS" | grep -E "(/etc/|/.ssh/|password|secret)" >/dev/null; then
         echo "⚠️  WARNING: Modifying potentially sensitive file" >&2
-        echo "   File path contains: /etc/, /.ssh/, .env, or credential keywords" >&2
+        echo "   File path contains credential keywords" >&2
         # Don't block, just warn
     fi
 fi

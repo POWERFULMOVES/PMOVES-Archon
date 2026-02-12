@@ -6,6 +6,26 @@
     "frontend-design@claude-plugins-official": true,
     "feature-dev@claude-plugins-official": true,
     "pr-review-toolkit@claude-plugins-official": true,
-    "context7@claude-plugins-official": true
+    "context7@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "claude-code-setup@claude-plugins-official": true
+  },
+  "hooks": {
+    "preToolExecution": ".claude/hooks/pre-tool.sh",
+    "postToolExecution": [
+      {
+        "pattern": "Edit:(pmoves/services/[^/]+/.*\\.py$)",
+        "command": "cd pmoves && python -m py_compile {file} 2>&1 || true",
+        "runInBackground": true,
+        "description": "Python syntax check for PMOVES services"
+      },
+      {
+        "pattern": "Edit:(pmoves/services/([^/]+)/.*\\.py$)",
+        "command": "cd pmoves && [ -f pmoves/tests/test_$1.py ] && docker exec pmoves-test-runner pytest tests/test_$1 -v --tb=short 2>&1 || echo 'No tests found for $1'",
+        "runInBackground": true,
+        "timeoutSeconds": 30,
+        "description": "Auto-run related tests for PMOVES services"
+      }
+    ]
   }
 }
