@@ -3,188 +3,74 @@ Credential management service for Archon backend
 
 Handles loading, storing, and accessing credentials with encryption for sensitive values.
 Credentials include API keys, service credentials, and application configuration.
+
+Uses the sync credential service which directly accesses PostgREST v12 without
+the /rest/v1/ path prefix that supabase-py library adds.
 """
 
-import base64
 import os
-import re
 import time
 from dataclasses import dataclass
-
-# Removed direct logging import - using unified config
 from typing import Any
 
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from supabase import Client, create_client
+# Import the sync credential service that bypasses /rest/v1/ prefix
+from .credential_service_sync import (
+    sync_credential_service,
+    get_credential as sync_get_credential,
+    set_credential as sync_set_credential,
+    delete_credential as sync_delete_credential,
+    list_all_credentials as sync_list_all_credentials,
+    get_credentials_by_category as sync_get_credentials_by_category,
+    CredentialItem,
+)
 
 from ..config.logfire_config import get_logger
 
 logger = get_logger(__name__)
 
 
-@dataclass
-class CredentialItem:
-    """Represents a credential/setting item."""
-
-    key: str
-    value: str | None = None
-    encrypted_value: str | None = None
-    is_encrypted: bool = False
-    category: str | None = None
-    description: str | None = None
-
-
+# Re-export CredentialItem from sync service for backwards compatibility
+__all__ = [
+    "CredentialService",
+    "credential_service",
+    "get_credential",
+    "set_credential",
+    "initialize_credentials",
+]
 
 
 class CredentialService:
-    """Service for managing application credentials and configuration."""
+    """
+    Service for managing application credentials and configuration.
+
+    This is a compatibility wrapper around the sync credential service
+    which uses httpx directly to avoid the /rest/v1/ prefix issue
+    with self-hosted PostgREST v12.
+    """
 
     def __init__(self):
-        self._supabase: Client | None = None
         self._cache: dict[str, Any] = {}
         self._cache_initialized = False
         self._rag_settings_cache: dict[str, Any] | None = None
         self._rag_cache_timestamp: float | None = None
         self._rag_cache_ttl = 300  # 5 minutes TTL for RAG settings cache
 
-    def _get_supabase_client(self) -> Client:
-        """
-        Get or create a properly configured Supabase client using environment variables.
-        Uses the standard Supabase client initialization.
-        """
-        if self._supabase is None:
-            url = os.getenv("SUPABASE_URL")
-            key = os.getenv("SUPABASE_SERVICE_KEY")
-
-            if not url or not key:
-                raise ValueError(
-                    "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables"
-                )
-
-            try:
-                # Initialize with standard Supabase client - no need for custom headers
-                self._supabase = create_client(url, key)
-
-                # Extract project ID from URL for logging purposes only
-                match = re.match(r"https://([^.]+)\.supabase\.co", url)
-                if match:
-                    project_id = match.group(1)
-                    logger.debug(f"Supabase client initialized for project: {project_id}")
-                else:
-                    logger.debug("Supabase client initialized successfully")
-
-            except Exception as e:
-                logger.error(f"Error initializing Supabase client: {e}")
-                raise
-
-        return self._supabase
-
-    def _get_encryption_key(self) -> bytes:
-        """Generate encryption key from environment variables."""
-        # Use Supabase service key as the basis for encryption key
-        service_key = os.getenv("SUPABASE_SERVICE_KEY", "default-key-for-development")
-
-        # Generate a proper encryption key using PBKDF2
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=b"static_salt_for_credentials",  # In production, consider using a configurable salt
-            iterations=100000,
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(service_key.encode()))
-        return key
-
-    def _encrypt_value(self, value: str) -> str:
-        """Encrypt a sensitive value using Fernet encryption."""
-        if not value:
-            return ""
-
-        try:
-            fernet = Fernet(self._get_encryption_key())
-            encrypted_bytes = fernet.encrypt(value.encode("utf-8"))
-            return base64.urlsafe_b64encode(encrypted_bytes).decode("utf-8")
-        except Exception as e:
-            logger.error(f"Error encrypting value: {e}")
-            raise
-
-    def _decrypt_value(self, encrypted_value: str) -> str:
-        """Decrypt a sensitive value using Fernet encryption."""
-        if not encrypted_value:
-            return ""
-
-        try:
-            fernet = Fernet(self._get_encryption_key())
-            encrypted_bytes = base64.urlsafe_b64decode(encrypted_value.encode("utf-8"))
-            decrypted_bytes = fernet.decrypt(encrypted_bytes)
-            return decrypted_bytes.decode("utf-8")
-        except Exception as e:
-            logger.error(f"Error decrypting value: {e}")
-            raise
-
     async def load_all_credentials(self) -> dict[str, Any]:
         """Load all credentials from database and cache them."""
-        try:
-            supabase = self._get_supabase_client()
-
-            # Fetch all credentials
-            result = supabase.table("archon_settings").select("*").execute()
-
-            credentials = {}
-            for item in result.data:
-                key = item["key"]
-                if item["is_encrypted"] and item["encrypted_value"]:
-                    # For encrypted values, we store the encrypted version
-                    # Decryption happens when the value is actually needed
-                    credentials[key] = {
-                        "encrypted_value": item["encrypted_value"],
-                        "is_encrypted": True,
-                        "category": item["category"],
-                        "description": item["description"],
-                    }
-                else:
-                    # Plain text values
-                    credentials[key] = item["value"]
-
-            self._cache = credentials
-            self._cache_initialized = True
-            logger.info(f"Loaded {len(credentials)} credentials from database")
-
-            return credentials
-
-        except Exception as e:
-            logger.error(f"Error loading credentials: {e}")
-            raise
+        return await sync_credential_service.load_all_credentials()
 
     async def get_credential(self, key: str, default: Any = None, decrypt: bool = True) -> Any:
         """Get a credential value by key."""
-        if not self._cache_initialized:
-            await self.load_all_credentials()
-
-        value = self._cache.get(key, default)
-
-        # If it's an encrypted value and we want to decrypt it
-        if isinstance(value, dict) and value.get("is_encrypted") and decrypt:
-            encrypted_value = value.get("encrypted_value")
-            if encrypted_value:
-                try:
-                    return self._decrypt_value(encrypted_value)
-                except Exception as e:
-                    logger.error(f"Failed to decrypt credential {key}: {e}")
-                    return default
-
-        return value
+        return await sync_get_credential(key, default)
 
     async def get_encrypted_credential_raw(self, key: str) -> str | None:
-        """Get the raw encrypted value for a credential (without decryption)."""
+        """Get raw encrypted value for a credential (without decryption)."""
+        # For encrypted raw, we need to get from cache without decryption
         if not self._cache_initialized:
             await self.load_all_credentials()
-
         value = self._cache.get(key)
         if isinstance(value, dict) and value.get("is_encrypted"):
             return value.get("encrypted_value")
-
         return None
 
     async def set_credential(
@@ -196,102 +82,49 @@ class CredentialService:
         description: str = None,
     ) -> bool:
         """Set a credential value."""
-        try:
-            supabase = self._get_supabase_client()
+        result = await sync_set_credential(key, value, is_encrypted, category, description)
 
-            if is_encrypted:
-                encrypted_value = self._encrypt_value(value)
-                data = {
-                    "key": key,
-                    "encrypted_value": encrypted_value,
-                    "value": None,
-                    "is_encrypted": True,
-                    "category": category,
-                    "description": description,
-                }
-                # Update cache with encrypted info
-                self._cache[key] = {
-                    "encrypted_value": encrypted_value,
-                    "is_encrypted": True,
-                    "category": category,
-                    "description": description,
-                }
-            else:
-                data = {
-                    "key": key,
-                    "value": value,
-                    "encrypted_value": None,
-                    "is_encrypted": False,
-                    "category": category,
-                    "description": description,
-                }
-                # Update cache with plain value
-                self._cache[key] = value
+        # Handle cache invalidation for RAG settings
+        if result and category == "rag_strategy":
+            self._rag_settings_cache = None
+            self._rag_cache_timestamp = None
+            logger.debug(f"Invalidated RAG settings cache due to update of {key}")
 
-            # Upsert to database with proper conflict handling
-            # Since we validate service key at startup, permission errors here indicate actual database issues
-            supabase.table("archon_settings").upsert(
-                data,
-                on_conflict="key",  # Specify the unique column for conflict resolution
-            ).execute()
+            # Invalidate provider service cache
+            try:
+                from .llm_provider_service import clear_provider_cache
+                clear_provider_cache()
+                logger.debug("Also cleared LLM provider service cache")
+            except Exception as e:
+                logger.warning(f"Failed to clear provider service cache: {e}")
 
-            # Invalidate RAG settings cache if this is a rag_strategy setting
-            if category == "rag_strategy":
-                self._rag_settings_cache = None
-                self._rag_cache_timestamp = None
-                logger.debug(f"Invalidated RAG settings cache due to update of {key}")
+            # Invalidate LLM provider service cache for provider config
+            try:
+                from . import llm_provider_service
+                cache_keys_to_clear = ["provider_config_llm", "provider_config_embedding", "rag_strategy_settings"]
+                for cache_key in cache_keys_to_clear:
+                    if cache_key in llm_provider_service._settings_cache:
+                        del llm_provider_service._settings_cache[cache_key]
+                        logger.debug(f"Invalidated LLM provider service cache key: {cache_key}")
+            except ImportError:
+                logger.warning("Could not import llm_provider_service to invalidate cache")
+            except Exception as e:
+                logger.error(f"Error invalidating LLM provider service cache: {e}")
 
-                # Also invalidate provider service cache to ensure immediate effect
-                try:
-                    from .llm_provider_service import clear_provider_cache
-                    clear_provider_cache()
-                    logger.debug("Also cleared LLM provider service cache")
-                except Exception as e:
-                    logger.warning(f"Failed to clear provider service cache: {e}")
-
-                # Also invalidate LLM provider service cache for provider config
-                try:
-                    from . import llm_provider_service
-                    # Clear the provider config caches that depend on RAG settings
-                    cache_keys_to_clear = ["provider_config_llm", "provider_config_embedding", "rag_strategy_settings"]
-                    for cache_key in cache_keys_to_clear:
-                        if cache_key in llm_provider_service._settings_cache:
-                            del llm_provider_service._settings_cache[cache_key]
-                            logger.debug(f"Invalidated LLM provider service cache key: {cache_key}")
-                except ImportError:
-                    logger.warning("Could not import llm_provider_service to invalidate cache")
-                except Exception as e:
-                    logger.error(f"Error invalidating LLM provider service cache: {e}")
-
-            logger.info(
-                f"Successfully {'encrypted and ' if is_encrypted else ''}stored credential: {key}"
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"Error setting credential {key}: {e}")
-            return False
+        return result
 
     async def delete_credential(self, key: str) -> bool:
         """Delete a credential."""
-        try:
-            supabase = self._get_supabase_client()
+        result = await sync_delete_credential(key)
 
-            # Since we validate service key at startup, we can directly execute
-            supabase.table("archon_settings").delete().eq("key", key).execute()
-
-            # Remove from cache
-            if key in self._cache:
-                del self._cache[key]
-
-            # Invalidate RAG settings cache if this was a rag_strategy setting
-            # We check the cache to see if the deleted key was in rag_strategy category
+        # Handle cache invalidation for RAG settings
+        if result:
             if self._rag_settings_cache is not None and key in self._rag_settings_cache:
                 self._rag_settings_cache = None
                 self._rag_cache_timestamp = None
                 logger.debug(f"Invalidated RAG settings cache due to deletion of {key}")
 
-                # Also invalidate provider service cache to ensure immediate effect
+                # Invalidate provider service cache
                 try:
                     from .llm_provider_service import clear_provider_cache
                     clear_provider_cache()
@@ -299,10 +132,9 @@ class CredentialService:
                 except Exception as e:
                     logger.warning(f"Failed to clear provider service cache: {e}")
 
-                # Also invalidate LLM provider service cache for provider config
+                # Invalidate LLM provider service cache
                 try:
                     from . import llm_provider_service
-                    # Clear the provider config caches that depend on RAG settings
                     cache_keys_to_clear = ["provider_config_llm", "provider_config_embedding", "rag_strategy_settings"]
                     for cache_key in cache_keys_to_clear:
                         if cache_key in llm_provider_service._settings_cache:
@@ -313,23 +145,14 @@ class CredentialService:
                 except Exception as e:
                     logger.error(f"Error invalidating LLM provider service cache: {e}")
 
-            logger.info(f"Successfully deleted credential: {key}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error deleting credential {key}: {e}")
-            return False
+        return result
 
     async def get_credentials_by_category(self, category: str) -> dict[str, Any]:
         """Get all credentials for a specific category."""
-        if not self._cache_initialized:
-            await self.load_all_credentials()
-
-        # Special caching for rag_strategy category to reduce database calls
+        # Special caching for rag_strategy category
         if category == "rag_strategy":
             current_time = time.time()
 
-            # Check if we have valid cached data
             if (
                 self._rag_settings_cache is not None
                 and self._rag_cache_timestamp is not None
@@ -338,94 +161,25 @@ class CredentialService:
                 logger.debug("Using cached RAG settings")
                 return self._rag_settings_cache
 
-        try:
-            supabase = self._get_supabase_client()
-            result = (
-                supabase.table("archon_settings").select("*").eq("category", category).execute()
-            )
+        result = await sync_get_credentials_by_category(category)
 
-            credentials = {}
-            for item in result.data:
-                key = item["key"]
-                if item["is_encrypted"]:
-                    credentials[key] = {
-                        "value": "[ENCRYPTED]",
-                        "is_encrypted": True,
-                        "description": item["description"],
-                    }
-                else:
-                    credentials[key] = item["value"]
+        # Cache rag_strategy results
+        if category == "rag_strategy":
+            self._rag_settings_cache = result
+            self._rag_cache_timestamp = time.time()
+            logger.debug(f"Cached RAG settings with {len(result)} items")
 
-            # Cache rag_strategy results
-            if category == "rag_strategy":
-                self._rag_settings_cache = credentials
-                self._rag_cache_timestamp = time.time()
-                logger.debug(f"Cached RAG settings with {len(credentials)} items")
-
-            return credentials
-
-        except Exception as e:
-            logger.error(f"Error getting credentials for category {category}: {e}")
-            return {}
+        return result
 
     async def list_all_credentials(self) -> list[CredentialItem]:
-        """Get all credentials as a list of CredentialItem objects (for Settings UI)."""
-        try:
-            supabase = self._get_supabase_client()
-            result = supabase.table("archon_settings").select("*").execute()
-
-            credentials = []
-            for item in result.data:
-                if item["is_encrypted"] and item["encrypted_value"]:
-                    cred = CredentialItem(
-                        key=item["key"],
-                        value="[ENCRYPTED]",
-                        encrypted_value=None,
-                        is_encrypted=item["is_encrypted"],
-                        category=item["category"],
-                        description=item["description"],
-                    )
-                else:
-                    cred = CredentialItem(
-                        key=item["key"],
-                        value=item["value"],
-                        encrypted_value=None,
-                        is_encrypted=item["is_encrypted"],
-                        category=item["category"],
-                        description=item["description"],
-                    )
-                credentials.append(cred)
-
-            return credentials
-
-        except Exception as e:
-            logger.error(f"Error listing credentials: {e}")
-            return []
-
-    def get_config_as_env_dict(self) -> dict[str, str]:
-        """
-        Get configuration as environment variable style dict.
-        Note: This returns plain text values only, encrypted values need special handling.
-        """
-        if not self._cache_initialized:
-            # Synchronous fallback - load from cache if available
-            logger.warning("Credentials not loaded, returning empty config")
-            return {}
-
-        env_dict = {}
-        for key, value in self._cache.items():
-            if isinstance(value, dict) and value.get("is_encrypted"):
-                # Skip encrypted values in env dict - they need to be handled separately
-                continue
-            else:
-                env_dict[key] = str(value) if value is not None else ""
-
-        return env_dict
+        """Get all credentials as a list of CredentialItem objects."""
+        return await sync_list_all_credentials()
 
     # Provider Management Methods
+
     async def get_active_provider(self, service_type: str = "llm") -> dict[str, Any]:
         """
-        Get the currently active provider configuration.
+        Get currently active provider configuration.
 
         Args:
             service_type: Either 'llm' or 'embedding'
@@ -437,7 +191,7 @@ class CredentialService:
             # Get RAG strategy settings (where UI saves provider selection)
             rag_settings = await self.get_credentials_by_category("rag_strategy")
 
-            # Get the selected provider based on service type
+            # Get selected provider based on service type
             if service_type == "embedding":
                 # First check for explicit EMBEDDING_PROVIDER setting (new split provider approach)
                 explicit_embedding_provider = rag_settings.get("EMBEDDING_PROVIDER")
@@ -448,7 +202,7 @@ class CredentialService:
                 if (explicit_embedding_provider and
                     explicit_embedding_provider != "" and
                     explicit_embedding_provider in embedding_capable_providers):
-                    # Use the explicitly set embedding provider
+                    # Use explicitly set embedding provider
                     provider = explicit_embedding_provider
                     logger.debug(f"Using explicit embedding provider: '{provider}'")
                 else:
@@ -531,9 +285,9 @@ class CredentialService:
         return None  # Use default for OpenAI
 
     async def set_active_provider(self, provider: str, service_type: str = "llm") -> bool:
-        """Set the active provider for a service type."""
+        """Set active provider for a service type."""
         try:
-            # For now, we'll update the RAG strategy settings
+            # For now, we'll update RAG strategy settings
             return await self.set_credential(
                 "LLM_PROVIDER",
                 provider,
@@ -562,11 +316,11 @@ async def set_credential(
 
 
 async def initialize_credentials() -> None:
-    """Initialize the credential service by loading all credentials and setting environment variables."""
+    """Initialize credential service by loading all credentials and setting environment variables."""
     await credential_service.load_all_credentials()
 
     # Only set infrastructure/startup credentials as environment variables
-    # RAG settings will be looked up on-demand from the credential service
+    # RAG settings will be looked up on-demand from credential service
     infrastructure_credentials = [
         "OPENAI_API_KEY",  # Required for API client initialization
         "HOST",  # Server binding configuration
@@ -629,4 +383,4 @@ async def initialize_credentials() -> None:
             # This is expected for optional credentials
             logger.debug(f"Optional credential not set: {key}")
 
-    logger.info("✅ Credentials loaded and environment variables set")
+    logger.info("Credentials loaded and environment variables set")

@@ -19,9 +19,6 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-# Prometheus metrics
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-
 from .api_routes.agent_chat_api import router as agent_chat_router
 from .api_routes.agent_work_orders_proxy import router as agent_work_orders_router
 from .api_routes.bug_report_api import router as bug_report_router
@@ -32,6 +29,7 @@ from .api_routes.migration_api import router as migration_router
 from .api_routes.ollama_api import router as ollama_router
 from .api_routes.openrouter_api import router as openrouter_router
 from .api_routes.pages_api import router as pages_router
+from .api_routes.persona_api import router as persona_router
 from .api_routes.progress_api import router as progress_router
 from .api_routes.projects_api import router as projects_router
 from .api_routes.providers_api import router as providers_router
@@ -237,6 +235,7 @@ app.include_router(knowledge_router)
 app.include_router(pages_router)
 app.include_router(ollama_router)
 app.include_router(openrouter_router)
+app.include_router(persona_router)
 app.include_router(projects_router)
 app.include_router(progress_router)
 app.include_router(agent_chat_router)
@@ -310,7 +309,7 @@ async def api_health_check(response: Response):
     return await health_check(response)
 
 
-# Prometheus metrics endpoint (no auth required)
+# Prometheus metrics endpoint for observability
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint for observability."""
@@ -335,18 +334,21 @@ async def _check_database_schema():
         return _schema_check_cache["result"]
 
     try:
-        from .services.client_manager import get_supabase_client
+        from .services.credential_service_sync import sync_credential_service
 
-        client = get_supabase_client()
+        # Use sync credential service which bypasses /rest/v1/ prefix
+        # Query to check for required columns
+        response = await sync_credential_service._make_request(
+            "GET", "archon_sources", select="source_url,source_display_name", limit="1"
+        )
 
-        # Try to query the new columns directly - if they exist, schema is up to date
-        client.table('archon_sources').select('source_url, source_display_name').limit(1).execute()
-
-        # Cache successful result permanently
-        _schema_check_cache["valid"] = True
-        _schema_check_cache["checked_at"] = current_time
-
-        return {"valid": True, "message": "Schema is up to date"}
+        if response.status_code == 200:
+            # Cache successful result permanently
+            _schema_check_cache["valid"] = True
+            _schema_check_cache["checked_at"] = current_time
+            return {"valid": True, "message": "Schema is up to date"}
+        else:
+            raise Exception(f"HTTP {response.status_code}: {response.text}")
 
     except Exception as e:
         error_msg = str(e).lower()

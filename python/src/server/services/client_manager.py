@@ -2,42 +2,50 @@
 Client Manager Service
 
 Manages database and API client connections.
+
+IMPORTANT: Now returns sync_credential_service to bypass the /rest/v1/
+path prefix issue with self-hosted PostgREST v12.
 """
 
 import os
 import re
-
-from supabase import Client, create_client
+import warnings
 
 from ..config.logfire_config import search_logger
+from .credential_service_sync import sync_credential_service
 
 
-def get_supabase_client() -> Client:
+def get_supabase_client():
     """
-    Get a Supabase client instance.
+    DEPRECATED: This function previously returned the old supabase client
+    which has /rest/v1/ prefix issues.
 
-    Returns:
-        Supabase client instance
+    For database operations, use sync_credential_service instead.
     """
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
+    warnings.warn(
+        "get_supabase_client() is deprecated. Use sync_credential_service for database operations.",
+        DeprecationWarning,
+        stacklevel=2
+    )
 
-    if not url or not key:
-        raise ValueError(
-            "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables"
+    # Return sync credential service which properly handles PostgREST v12
+    return sync_credential_service
+
+
+# Legacy: Keep old function name for backward compatibility but it now returns sync service
+def create_supabase_client():
+    """
+    Legacy function - kept for backward compatibility.
+
+    Returns sync_credential_service which uses httpx directly.
+    """
+    # Log deprecation notice once per session
+    if not hasattr(create_supabase_client, "_warned"):
+        warnings.warn(
+            "create_supabase_client() is deprecated. Direct HTTP operations should use sync_credential_service methods.",
+            DeprecationWarning,
+            stacklevel=2
         )
+        create_supabase_client._warned = True
 
-    try:
-        # Let Supabase handle connection pooling internally
-        client = create_client(url, key)
-
-        # Extract project ID from URL for logging purposes only
-        match = re.match(r"https://([^.]+)\.supabase\.co", url)
-        if match:
-            project_id = match.group(1)
-            search_logger.debug(f"Supabase client initialized - project_id={project_id}")
-
-        return client
-    except Exception as e:
-        search_logger.error(f"Failed to create Supabase client: {e}")
-        raise
+    return sync_credential_service

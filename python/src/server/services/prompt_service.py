@@ -10,7 +10,7 @@ fast access during agent operations.
 from datetime import datetime
 
 from ..config.logfire_config import get_logger
-from ..utils import get_supabase_client
+from .credential_service_sync import sync_credential_service
 
 logger = get_logger(__name__)
 
@@ -35,18 +35,23 @@ class PromptService:
         """
         try:
             logger.info("Loading prompts from database...")
-            supabase = get_supabase_client()
 
-            response = supabase.table("archon_prompts").select("*").execute()
+            # Use sync credential service which bypasses /rest/v1/ prefix
+            response = await sync_credential_service._make_request("GET", "archon_prompts")
 
-            if response.data:
-                self._prompts = {
-                    prompt["prompt_name"]: prompt["prompt"] for prompt in response.data
-                }
-                self._last_loaded = datetime.now()
-                logger.info(f"Loaded {len(self._prompts)} prompts into memory")
+            if response.status_code == 200:
+                prompts_data = response.json()
+
+                if prompts_data:
+                    self._prompts = {
+                        prompt["prompt_name"]: prompt["prompt"] for prompt in prompts_data
+                    }
+                    self._last_loaded = datetime.now()
+                    logger.info(f"Loaded {len(self._prompts)} prompts into memory")
+                else:
+                    logger.warning("No prompts found in database")
             else:
-                logger.warning("No prompts found in database")
+                logger.warning(f"Failed to load prompts: HTTP {response.status_code}")
 
         except Exception as e:
             logger.error(f"Failed to load prompts: {e}")
