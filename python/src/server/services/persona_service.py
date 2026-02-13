@@ -65,6 +65,15 @@ class Persona(BaseModel):
         return v
 
 
+class PersonaCreateRequest(BaseModel):
+    """Request model for creating a new agent with persona."""
+
+    persona_id: str = Field(..., description="ID of persona to use")
+    form_name: str | None = Field(None, description="Optional Archon form for behavior overrides")
+    overrides: dict[str, Any] | None = Field(None, description="Custom behavior weight overrides")
+    agent_name: str | None = Field(None, description="Custom name for the agent (defaults to persona name)")
+
+
 class AgentCreateResponse(BaseModel):
     """Response model from Agent Zero agent creation."""
 
@@ -88,6 +97,7 @@ class AgentZeroCreateResponse(BaseModel):
     message: str = Field(..., description="Status message")
     # Allow extra fields for forward compatibility
     model_config = {"extra": "ignore"}
+
 
 
 # ============================================================================

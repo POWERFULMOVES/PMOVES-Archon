@@ -219,6 +219,7 @@ async def get_thread_types():
         )
 
 
+
 @router.get("/{persona_id}", response_model=PersonaDetailResponse)
 async def get_persona(persona_id: str):
     """
