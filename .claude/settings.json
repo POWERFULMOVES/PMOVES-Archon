@@ -21,7 +21,7 @@
       },
       {
         "pattern": "Edit:(pmoves/services/([^/]+)/.*\\.py$)",
-        "command": "cd pmoves && [ -f pmoves/tests/test_$1.py ] && docker exec pmoves-test-runner pytest tests/test_$1 -v --tb=short 2>&1 || echo 'No tests found for $1'",
+        "command": "cd pmoves && [ -f tests/test_$1.py ] && docker exec pmoves-test-runner pytest tests/test_$1 -v --tb=short 2>&1 || echo 'No tests found for $1'",
         "runInBackground": true,
         "timeoutSeconds": 30,
         "description": "Auto-run related tests for PMOVES services"

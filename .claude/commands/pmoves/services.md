@@ -37,17 +37,13 @@ Display comprehensive PMOVES.AI service information.
 
 ```bash
 cd pmoves && docker compose ps --format json | jq -r '
-  [
-    foreach .[] as $service (
-      {
-        "name": $service.Name,
-        "state": $service.State,
-        "ports": ($service.Ports // "" | split(",") | map(trim)),
-        "networks": ($service.Networks // "" | split(",") | map(trim)),
-        "profile": ($service.Labels // {} | if .["com.docker.compose.project.working_dir"] then split("/") | .[-1] else "default" end)
-      }
-    )
-  ] | {services: .}
+  [.[] | {
+    "name": .Name,
+    "state": .State,
+    "ports": (.Ports // "" | split(",") | map(gsub("^\\s+|\\s+$"; ""))),
+    "networks": (.Networks // "" | split(",") | map(gsub("^\\s+|\\s+$"; ""))),
+    "profile": (.Labels // {} | if .["com.docker.compose.project.working_dir"] then (.["com.docker.compose.project.working_dir"] | split("/") | .[-1]) else "default" end)
+  }] | {services: .}
 '
 ```
 

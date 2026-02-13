@@ -1,10 +1,18 @@
 #!/bin/bash
+set -e
 # Claude Code CLI Pre-Tool Hook
 # Validates tool execution before running (security gate)
 
 # Hook parameters
 TOOL_NAME="${1:-unknown}"
 TOOL_PARAMS="${2:-}"
+
+# Extract file_path from JSON params for Edit/Write tools
+if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
+    FILE_PATH=$(echo "$TOOL_PARAMS" | grep -oP '"file_path"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"file_path"\s*:\s*"\([^"]*\)".*/\1/' 2>/dev/null || echo "$TOOL_PARAMS")
+else
+    FILE_PATH="$TOOL_PARAMS"
+fi
 
 # Dangerous patterns to block
 declare -a BLOCKED_PATTERNS=(
@@ -72,7 +80,7 @@ fi
 
 # Block Edit/Write to environment files (strict blocking)
 if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
-    FILE_TO_EDIT="$TOOL_PARAMS"
+    FILE_TO_EDIT="$FILE_PATH"
 
     # Check if it's an allowed example file
     IS_ALLOWED=0
@@ -97,17 +105,8 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
         fi
     done
 
-    # Validate docker-compose files (if yamllint is available)
-    if echo "$FILE_TO_EDIT" | grep -q "docker-compose.*\.yml"; then
-        if command -v yamllint &>/dev/null; then
-            # Schedule validation for after edit completes
-            # (We create a temp marker for post-tool hook to check)
-            export PMOVES_VALIDATE_YAML="$FILE_TO_EDIT"
-        fi
-    fi
-
     # Original sensitive file check (still warn for other cases)
-    if echo "$TOOL_PARAMS" | grep -E "(/etc/|/.ssh/|password|secret)" >/dev/null; then
+    if echo "$FILE_TO_EDIT" | grep -E "(/etc/|/.ssh/|password|secret)" >/dev/null; then
         echo "⚠️  WARNING: Modifying potentially sensitive file" >&2
         echo "   File path contains credential keywords" >&2
         # Don't block, just warn
