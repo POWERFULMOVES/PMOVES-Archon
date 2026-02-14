@@ -1,0 +1,11 @@
+services:
+  archon-overlay:
+    image: alpine:3.20
+    command: ["/bin/sh", "-lc", "echo archon overlay placeholder"]
+    profiles: ["pmoves-integration-placeholder"]
+    networks:
+      - pmoves_app
+
+networks:
+  pmoves_app:
+    external: true
