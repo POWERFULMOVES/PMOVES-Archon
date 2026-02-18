@@ -91,7 +91,7 @@ class CredentialService:
             algorithm=hashes.SHA256(),
             length=32,
             salt=b"static_salt_for_credentials",  # In production, consider using a configurable salt
-            iterations=100000,
+            iterations=600000,
         )
         key = base64.urlsafe_b64encode(kdf.derive(service_key.encode()))
         return key
