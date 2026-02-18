@@ -332,3 +332,12 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 - Docker Compose handles service orchestration
 - TanStack Query for all data fetching - NO PROP DRILLING
 - Vertical slice architecture in `/features` - features own their sub-features
+
+<!-- PMOVES.AI-CONTEXT-TAGS -->
+## PMOVES.AI Skill Hints
+
+**Primary Skills:** `/agents:status`, `/agents:mcp-query`, `/deploy:up`, `/deploy:services`, `/health:quick`, `/botz:profile`
+**Context Files:** `mcp-api.md`, `nats-subjects.md`, `services-catalog.md`
+**Domain Tags:** `orchestration`, `agents`, `mcp`
+**Context Tier:** 2 (On-Demand (Major Subsystem))
+<!-- /PMOVES.AI-CONTEXT-TAGS -->
