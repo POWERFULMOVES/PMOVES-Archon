@@ -166,9 +166,9 @@ async def reconcile_state(
                     is_not_root = True
                 
                 if is_inside_base and is_not_base and is_not_root:
-                shutil.rmtree(orphan_path)
-                actions.append(f"Deleted orphaned worktree: {orphan_path}")
-                logger.info("orphaned_worktree_deleted", path=orphan_path)
+                    shutil.rmtree(orphan_path)
+                    actions.append(f"Deleted orphaned worktree: {orphan_path}")
+                    logger.info("orphaned_worktree_deleted", path=orphan_path)
                 else:
                     # Safety check failed - do not delete
                     actions.append(f"Skipped deletion of {orphan_path} (safety check failed: outside worktree base or invalid path)")
