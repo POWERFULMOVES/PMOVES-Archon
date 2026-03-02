@@ -22,7 +22,7 @@ export SERVICE_SLUG=${SERVICE_SLUG:-your-service-slug}
 # Service Discovery (NATS)
 # ============================================================================
 
-export NATS_URL=${NATS_URL:-nats://nats:4222}
+export NATS_URL=${NATS_URL:-nats://nats:pmoves@nats:4222}
 export NATS_JETSTREAM=${NATS_JETSTREAM:-true}
 export NATS_SUBJECT_PREFIX=${NATS_SUBJECT_PREFIX:-pmoves}
 

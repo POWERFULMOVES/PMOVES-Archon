@@ -333,11 +333,25 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 - TanStack Query for all data fetching - NO PROP DRILLING
 - Vertical slice architecture in `/features` - features own their sub-features
 
+## CHIT & Geometry Bus Integration
+
+Archon is a **CHIT-aware form consumer** — it receives CGP packets via Agent Zero's MCP interface and can embed geometry context into prompt/form schemas.
+
+**Integration pattern:**
+- Archon does not connect to NATS geometry subjects directly
+- CGP data flows through Agent Zero MCP → Archon `external_tools` interface
+- Form schemas can reference CGP attribution for contributor-aware prompts
+- `persona_service.py` may consume CGP context for persona calibration
+
+**CGP Schema:** Uses canonical `chit.cgp.v1.0` format. See `pmoves/docs/audit/CHIT_INTEGRATION_STATUS.md`.
+
+**Extend:** Add `agent.graphiti.signed.v1` emission to Archon (currently only BoTZ gateway emits this).
+
 <!-- PMOVES.AI-CONTEXT-TAGS -->
 ## PMOVES.AI Skill Hints
 
 **Primary Skills:** `/agents:status`, `/agents:mcp-query`, `/deploy:up`, `/deploy:services`, `/health:quick`, `/botz:profile`
-**Context Files:** `mcp-api.md`, `nats-subjects.md`, `services-catalog.md`
-**Domain Tags:** `orchestration`, `agents`, `mcp`
+**Context Files:** `mcp-api.md`, `nats-subjects.md`, `services-catalog.md`, `geometry-nats-subjects.md`
+**Domain Tags:** `orchestration`, `agents`, `mcp`, `chit`
 **Context Tier:** 2 (On-Demand (Major Subsystem))
 <!-- /PMOVES.AI-CONTEXT-TAGS -->
