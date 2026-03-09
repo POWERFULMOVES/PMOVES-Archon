@@ -18,6 +18,12 @@ RUN mkdir -p /app/coverage && chmod 777 /app/coverage
 # Copy source code
 COPY . .
 
+# Security: Run as non-root user
+RUN addgroup -g 65532 -S pmoves && \
+    adduser -u 65532 -S -G pmoves -h /app pmoves && \
+    chown -R pmoves:pmoves /app
+USER pmoves
+
 # Expose the port configured in package.json (3737)
 EXPOSE 3737
 
