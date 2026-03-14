@@ -1,11 +1,20 @@
 """GitHub Client
 
-Handles GitHub operations via gh CLI.
+Handles GitHub operations via GitHub App tokens (preferred) or gh CLI (fallback).
+
+The client automatically manages token caching and will use GitHub App tokens
+when available, falling back to gh CLI subprocess calls when credentials
+are not configured.
+
+Example:
+    client = GitHubClient()
+    prs = await client.list_pull_requests("POWERFULMOVES/PMOVES.AI")
 """
 
 import asyncio
 import json
 import re
+from typing import Literal
 
 from ..config import config
 from ..models import GitHubOperationError, GitHubPullRequest, GitHubRepository
@@ -15,11 +24,179 @@ logger = get_logger(__name__)
 
 
 class GitHubClient:
-    """GitHub operations using gh CLI"""
+    """GitHub operations using GitHub App tokens (preferred) or gh CLI (fallback)"""
 
-    def __init__(self, gh_cli_path: str | None = None):
+    def __init__(self, gh_cli_path: str | None = None, use_app_token: bool = True):
         self.gh_cli_path = gh_cli_path or config.GH_CLI_PATH
+        self._use_app_token = use_app_token
         self._logger = logger
+        self._token: str | None = None
+
+    async def _get_token(self) -> str:
+        """Get GitHub App installation token.
+
+        Returns:
+            str: Installation token
+
+        Raises:
+            GitHubOperationError: If token minting fails
+        """
+        if self._token:
+            return self._token
+
+        try:
+            # Try to import the token minter
+            from .mint_github_token import get_installation_token
+
+            self._token = await get_installation_token()
+            return self._token
+        except (KeyError, ValueError, Exception) as e:
+            self._logger.warning(
+                "github_app_token_unavailable",
+                reason=str(e),
+                falling_back="gh_cli"
+            )
+            raise GitHubOperationError(
+                f"GitHub App token unavailable: {e}. "
+                "Configure GH_APP_ID, GH_APP_INSTALLATION_ID, and GH_APP_SEC."
+            ) from e
+
+    async def _should_use_app_token(self) -> bool:
+        """Determine whether to use App token or gh CLI."""
+        if not self._use_app_token:
+            return False
+
+        try:
+            # Try to get token - if it works, use App token API
+            await self._get_token()
+            return True
+        except GitHubOperationError:
+            # Fall back to gh CLI
+            return False
+
+    async def _make_github_request(
+        self,
+        method: Literal["GET", "POST", "PUT", "DELETE"],
+        url: str,
+        headers: dict | None = None,
+        body: dict | None = None,
+    ) -> dict:
+        """Make a GitHub API request using the App token.
+
+        Args:
+            method: HTTP method
+            url: API endpoint URL
+            headers: Additional headers
+            body: Request body for POST/PUT
+
+        Returns:
+            JSON response
+
+        Raises:
+            GitHubOperationError: If request fails
+        """
+        try:
+            import requests
+
+            token = await self._get_token()
+            request_headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                **(headers or {}),
+            }
+
+            if body and method in ["POST", "PUT"]:
+                request_headers["Content-Type"] = "application/json"
+
+            self._logger.debug("github_api_request", method=method, url=url)
+
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=request_headers,
+                json=body,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as e:
+            self._logger.error("github_api_request_failed", url=url, error=str(e))
+            raise GitHubOperationError(f"GitHub API request failed: {e}") from e
+
+    async def list_pull_requests(
+        self,
+        repository: str,
+        state: Literal["open", "closed", "all"] = "open",
+        limit: int = 100,
+    ) -> list[dict]:
+        """List pull requests for a repository using GitHub API.
+
+        Args:
+            repository: Repository in "owner/repo" format or just "repo" name
+            state: PR state filter (open, closed, all)
+            limit: Maximum number of PRs to return
+
+        Returns:
+            List of PR dictionaries
+
+        Raises:
+            GitHubOperationError: If API call fails
+        """
+        self._logger.info("github_list_prs_started", repository=repository, state=state)
+
+        # Normalize repository path
+        owner, repo = self._parse_repository_url(repository)
+
+        # Try GitHub API first
+        try:
+            if await self._should_use_app_token():
+                url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state={state}&per_page={limit}&sort=updated&direction=desc"
+                response = await self._make_github_request("GET", url)
+
+                self._logger.info("github_list_prs_completed", repository=repository, count=len(response))
+                return response
+        except GitHubOperationError:
+            self._logger.info("github_api_fallback", using="gh_cli", operation="list_pull_requests")
+            # Fall through to gh CLI below
+
+        # Fallback to gh CLI subprocess
+        try:
+            repo_path = f"{owner}/{repo}"
+            process = await asyncio.create_subprocess_exec(
+                self.gh_cli_path,
+                "pr",
+                "list",
+                "--repo",
+                repo_path,
+                "--state",
+                state,
+                "--json",
+                "--limit",
+                str(limit),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+
+            if process.returncode != 0:
+                error = stderr.decode() if stderr else "Unknown error"
+                self._logger.error(
+                    "github_gh_cli_failed",
+                    operation="list_pull_requests",
+                    error=error,
+                )
+                raise GitHubOperationError(f"gh CLI failed: {error}")
+
+            result = json.loads(stdout.decode())
+            self._logger.info("github_list_prs_completed", repository=repository, count=len(result))
+            return result
+
+        except Exception as e:
+            self._logger.error("github_list_prs_failed", repository=repository, error=str(e))
+            raise GitHubOperationError(f"Failed to list PRs: {e}") from e
 
     async def verify_repository_access(self, repository_url: str) -> bool:
         """Check if repository is accessible via gh CLI
