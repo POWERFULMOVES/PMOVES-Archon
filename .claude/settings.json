@@ -58,6 +58,14 @@
           }
         ]
       }
+    ],
+    "postToolExecution": [
+      {
+        "pattern": "Edit:(pmoves/services/[^/]+/.*\\.py$)",
+        "command": "cd pmoves && python -m py_compile {file} 2>&1 || true",
+        "runInBackground": true,
+        "description": "Python syntax check for PMOVES services"
+      }
     ]
   }
 }
