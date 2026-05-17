@@ -2,9 +2,9 @@ name: Test Suite
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, PMOVES.AI-Edition-Hardened]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, PMOVES.AI-Edition-Hardened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
