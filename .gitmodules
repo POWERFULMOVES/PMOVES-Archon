@@ -1,0 +1,25 @@
+# PMOVES.AI Submodules — re-pointed after upstream sync
+[submodule "external/PMOVES-Agent-Zero"]
+path = external/PMOVES-Agent-Zero
+url = https://github.com/POWERFULMOVES/PMOVES-Agent-Zero.git
+branch = PMOVES.AI-Edition-Hardened
+[submodule "external/PMOVES-BoTZ"]
+path = external/PMOVES-BoTZ
+url = https://github.com/POWERFULMOVES/PMOVES-BoTZ.git
+branch = PMOVES.AI-Edition-Hardened
+[submodule "external/PMOVES-Deep-Serch"]
+path = external/PMOVES-Deep-Serch
+url = https://github.com/POWERFULMOVES/PMOVES-Deep-Serch.git
+branch = PMOVES.AI-Edition-Hardened
+[submodule "external/PMOVES-HiRAG"]
+path = external/PMOVES-HiRAG
+url = https://github.com/POWERFULMOVES/PMOVES-HiRAG.git
+branch = PMOVES.AI-Edition-Hardened
+[submodule "pmoves_multi_agent_pro_pack/PMOVES-BotZ-gateway"]
+path = pmoves_multi_agent_pro_pack/PMOVES-BotZ-gateway
+url = https://github.com/POWERFULMOVES/PMOVES-BotZ-gateway.git
+branch = PMOVES.AI-Edition-Hardened
+[submodule "pmoves_multi_agent_pro_pack/PMOVES-tensorzero"]
+path = pmoves_multi_agent_pro_pack/PMOVES-tensorzero
+url = https://github.com/POWERFULMOVES/PMOVES-tensorzero.git
+branch = PMOVES.AI-Edition-Hardened
