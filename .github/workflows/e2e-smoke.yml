@@ -2,7 +2,7 @@ name: E2E Smoke Tests
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, PMOVES.AI-Edition-Hardened]
   # The AI-credentialed smoke tiers (e2e-claude / e2e-codex / e2e-mixed) are
   # OPT-IN. CI has no funded API keys, so they fail on every dev push with
   # "credit balance too low" (Anthropic) / "quota exceeded" (OpenAI) — a
