@@ -58,7 +58,7 @@
   },
   "overrides": {
     "test-exclude": "^7.0.1",
-    "axios": "^1.15.0",
+    "axios": "^1.17.0",
     "follow-redirects": "^1.16.0",
     "path-to-regexp": "^8.4.2",
     "qs": "^6.15.1",
