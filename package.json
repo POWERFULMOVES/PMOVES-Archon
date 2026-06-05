@@ -50,7 +50,7 @@
   },
   "overrides": {
     "test-exclude": "^7.0.1",
-    "axios": "^1.15.0",
+    "axios": "^1.17.0",
     "follow-redirects": "^1.16.0",
     "path-to-regexp": "^8.4.2",
     "qs": "^6.15.1",
@@ -59,6 +59,9 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.121",
-    "@opencode-ai/sdk": "^1.14.20"
+    "@opencode-ai/sdk": "^1.14.20",
+    "axios": "^1.17.0",
+    "react-router": "^7.17.0",
+    "react-router-dom": "^7.17.0"
   }
 }
