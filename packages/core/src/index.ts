@@ -26,6 +26,7 @@ export {
   type MessageMetadata,
   type User,
   type UserIdentity,
+  type UserRole,
   type IdentityPlatform,
 } from './types';
 
@@ -37,10 +38,11 @@ export {
   getDatabase,
   getDialect,
   getDatabaseType,
+  getDbNotificationListener,
   closeDatabase,
   resetDatabase,
 } from './db/connection';
-export type { IDatabase, SqlDialect } from './db/adapters/types';
+export type { IDatabase, SqlDialect, DbNotificationListener } from './db/adapters/types';
 
 // Namespaced db modules for explicit access
 export * as conversationDb from './db/conversations';
@@ -161,7 +163,34 @@ export {
   type GitHubAppConfig,
   type IGitHubAppAuthProvider,
   type GitHubAuth,
+  // Per-user device flow (PR-C)
+  isPerUserGitHubEnabled,
+  loadDeviceFlowConfig,
+  assertEncryptionKeyAtBoot,
+  connectGithubForUser,
+  persistGithubConnection,
+  startDeviceFlow,
+  pollDeviceFlowOnce,
+  DeviceFlowError,
+  type DeviceCodeResponse,
+  type DeviceAccessToken,
+  type PollOnceResult,
+  type ConnectGithubResult,
 } from './github-auth';
+
+// Per-user GitHub token store (PR-C)
+export {
+  saveUserGithubToken,
+  getUserGithubTokenRecord,
+  getDecryptedAccessToken,
+  deleteUserGithubToken,
+  getUserGithubNoreplyEmail,
+} from './db/user-github-token-store';
+export {
+  updateUserGithubProfile,
+  linkGithubIdentity,
+  GithubIdentityConflictError,
+} from './db/users';
 
 // Path validation
 export { isPathWithinWorkspace, validateAndResolvePath } from './utils/path-validation';

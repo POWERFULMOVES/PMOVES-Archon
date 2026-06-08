@@ -53,7 +53,7 @@ Archon is a **platform-agnostic AI coding assistant orchestrator** that connects
       └───────────────┼───────────────────┘
                       ▼
 ┌─────────────────────────────────────────────┐
-│    SQLite (default) / PostgreSQL (10 Tables) │
+│    SQLite (default) / PostgreSQL (16 Tables) │
 │  • Codebases  • Conversations  • Sessions   │
 │  • Isolation Envs • Workflow Runs            │
 │  • Workflow Events • Messages                │
@@ -500,7 +500,14 @@ for await (const msg of query({ prompt, options })) {
 **Codex SDK** (`packages/providers/src/codex/provider.ts`):
 
 ```typescript
+// A new thread's id is assigned during the run via the thread.started event,
+// not synchronously on startThread() — capture it for a resumable sessionId.
+let resolvedThreadId = thread.id;
 for await (const event of result.events) {
+  if (event.type === 'thread.started') {
+    resolvedThreadId = event.thread_id; // resumable id; persist_session depends on it
+    continue;
+  }
   if (event.type === 'item.completed') {
     switch (event.item.type) {
       case 'agent_message':
@@ -514,7 +521,7 @@ for await (const event of result.events) {
         break;
     }
   } else if (event.type === 'turn.completed') {
-    yield { type: 'result', sessionId: thread.id };
+    yield { type: 'result', sessionId: resolvedThreadId };
     break; // CRITICAL: Exit loop on turn completion
   }
 }
@@ -1043,7 +1050,7 @@ remote_agent_codebases
 
 remote_agent_conversations
 ├── id (UUID)
-├── platform_type (VARCHAR) -- 'web' | 'telegram' | 'github' | 'slack' | 'discord' | 'cli'
+├── platform_type (VARCHAR) -- 'web' | 'telegram' | 'github' | 'slack' | 'discord' | 'gitea' | 'gitlab' | 'cli'
 ├── platform_conversation_id (VARCHAR) -- Platform-specific ID
 ├── codebase_id (UUID -> remote_agent_codebases.id)
 ├── cwd (VARCHAR) -- Current working directory
@@ -1120,7 +1127,7 @@ remote_agent_users
 remote_agent_user_identities
 ├── id (UUID)
 ├── user_id (UUID -> remote_agent_users.id, ON DELETE CASCADE)
-├── platform (VARCHAR) -- 'slack' | 'telegram' | 'discord' | 'github' | 'web' | 'cli'
+├── platform (VARCHAR) -- 'slack' | 'telegram' | 'discord' | 'github' | 'gitea' | 'gitlab' | 'web' | 'cli'
 ├── platform_user_id (VARCHAR) -- Slack U-id, Telegram chat id, Discord snowflake, GitHub login, ...
 ├── platform_display_name (VARCHAR) -- Cached per-platform display name
 └── UNIQUE(platform, platform_user_id)

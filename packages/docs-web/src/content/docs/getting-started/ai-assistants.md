@@ -11,6 +11,17 @@ sidebar:
 
 You must configure **at least one** AI assistant. All four can be configured and mixed within workflows.
 
+## Structured output guarantees
+
+When a workflow node sets `output_format`, the guarantee level depends on the provider's tier (exposed as `capabilities.structuredOutput` on `GET /api/providers`):
+
+| Provider | Tier | How it works | On a validation miss |
+|----------|------|--------------|----------------------|
+| Claude, Codex, OpenCode | **enforced** | The SDK/backend grammar-constrains decoding (`output_config.format` / `outputSchema` / `format:{json_schema}`). | The node **fails** — a refusal or `max_tokens` truncation can still bypass grammar enforcement, so the parsed output is validated post-parse for these too. No reask (a failure here is a genuine edge). |
+| Pi, Copilot | **best-effort** | The schema is appended to the prompt; JSON is extracted from the response and structurally repaired (trailing commas, single quotes, truncated tails). | The executor re-asks (prompt + the schema errors) up to **3×**; if still invalid, the node **fails loudly**. |
+
+In all cases the parsed output is **validated against your `output_format` schema** before downstream nodes see it, and a node that declares `output_format` but produces no schema-valid output **fails** rather than silently degrading. See [Authoring Workflows → `output_format`](/guides/authoring-workflows/#output_format-for-structured-json) for field-access (`$node.output.field`) semantics.
+
 ## Claude Code
 
 **Recommended for Claude Pro/Max subscribers.**
@@ -232,6 +243,12 @@ If you want Codex to be the default AI assistant for new conversations without c
 DEFAULT_AI_ASSISTANT=codex
 ```
 
+### Skills
+
+Codex supports skills via filesystem auto-discovery from `.agents/skills/`. Run `archon skill install` (or `archon setup`) to install the bundled `archon` and `manage-run` skills for both Claude Code and Codex.
+
+See [Per-Node Skills](/guides/skills/#codex-compatibility) for behavior details and limitations.
+
 ## OpenCode (Community Provider)
 
 **SDK-backed community provider.** Archon's OpenCode adapter uses `@opencode-ai/sdk`, which provides a multi-provider AI coding agent with support for Anthropic, OpenAI, Google, and more through a unified interface.
@@ -318,7 +335,7 @@ nodes:
 
 ## Pi (Community Provider)
 
-**One adapter, ~20 LLM backends.** Pi (`@mariozechner/pi-coding-agent`) is a community-maintained coding-agent harness that Archon integrates as the first community provider. It unlocks Anthropic, OpenAI, Google (Gemini + Vertex), Groq, Mistral, Cerebras, xAI, OpenRouter, Hugging Face, and local inference (LM Studio, ollama, llamacpp, custom OpenAI-compatible endpoints registered in `~/.pi/agent/models.json`) under a single `provider: pi` entry.
+**One adapter, ~20 LLM backends.** Pi (`@earendil-works/pi-coding-agent`) is a community-maintained coding-agent harness that Archon integrates as the first community provider. It unlocks Anthropic, OpenAI, Google (Gemini + Vertex), Groq, Mistral, Cerebras, xAI, OpenRouter, Hugging Face, and local inference (LM Studio, ollama, llamacpp, custom OpenAI-compatible endpoints registered in `~/.pi/agent/models.json`) under a single `provider: pi` entry.
 
 Pi is registered as `builtIn: false` — it validates the community-provider seam rather than being a core-team-maintained option. If it proves stable and valuable it may be promoted to `builtIn: true` later.
 
@@ -480,8 +497,9 @@ nodes:
 | System prompt override | ✅ | `systemPrompt:` |
 | Codebase env vars (`envInjection`) | ✅ | `.archon/config.yaml` `env:` section |
 | MCP servers | ❌ | Pi rejects MCP by design |
+| In-process native tools | ✅ | none — Archon's `manage_run` tool is auto-injected in project-scoped chat via Pi `customTools` (distinct from MCP, which Pi rejects). Gated on the `nativeTools` provider capability. |
 | Claude-SDK hooks | ❌ | Claude-specific format |
-| Structured output | ✅ (best-effort) | `output_format:` — schema is appended to the prompt and JSON is parsed out of the assistant text. Handles bare JSON, ```json```-fenced, and reasoning-model prose preambles like `Let me evaluate... {...}` (Minimax M2.x pattern). Trailing-text-interleaved cases still degrade cleanly to the missing-structured-output warning. Not SDK-enforced like Claude/Codex. |
+| Structured output | ✅ (best-effort) | `output_format:` — schema is appended to the prompt and JSON is parsed out of the assistant text. Handles bare JSON, ```json```-fenced, reasoning-model prose preambles like `Let me evaluate... {...}` (Minimax M2.x pattern), and structurally-corrupt JSON (trailing commas, single quotes, truncated tails) via repair. The parsed output is then **validated against the schema**; on a miss the executor re-asks (prompt + the schema errors) up to **3×**, and only then **fails** the node (it no longer degrades silently to a warning). Not SDK-enforced like Claude/Codex. |
 | Cost limits (`maxBudgetUsd`) | ❌ | tracked in result chunk, not enforced |
 | Fallback model | ❌ | not native in Pi |
 | Sandbox | ❌ | not native in Pi |
@@ -491,7 +509,8 @@ Unsupported YAML fields trigger a visible warning from the dag-executor when the
 ### See also
 
 - [Adding a Community Provider](../contributing/adding-a-community-provider/) — the contributor-facing guide for extending Archon with your own provider.
-- [Pi on GitHub](https://github.com/badlogic/pi-mono) — upstream project.
+- [Pi documentation](https://pi.dev) — official Pi docs (extensions, model registry, settings).
+- [Pi on GitHub](https://github.com/earendil-works/pi) — upstream project.
 
 ## GitHub Copilot (Community Provider)
 
@@ -563,7 +582,7 @@ Copilot accepts OpenAI models (`gpt-5`, `gpt-5-mini`), Anthropic via BYOK (`clau
 | Tool restrictions | ✅ | `allowed_tools` → `availableTools`, `denied_tools` → `excludedTools` |
 | MCP servers | ✅ | `mcp: path/to/servers.json` → `SessionConfig.mcpServers` (env vars `$FOO` expanded; missing vars warned) |
 | Skills | ✅ | `skills: [name]` resolved from `.agents/skills/` or `.claude/skills/` (project or home) → `SessionConfig.skillDirectories` |
-| Structured output | ✅ | best-effort via prompt augmentation; unparseable output degrades to dag-executor's missing-output warning |
+| Structured output | ✅ | best-effort via prompt augmentation + repair; the parsed output is validated against the schema, the executor re-asks up to 3× on a miss, then **fails** the node (no longer a silent warning) |
 | Sub-agents (`agents:`) | ✅ | `name`/`description`/`prompt`/`tools` → `SessionConfig.customAgents`; Claude-specific fields (`model`, `disallowedTools`, `skills`, `maxTurns`) warn per agent and are ignored |
 | Fork-session retry | ⚠️ | Copilot SDK has no fork API — when Archon requests a fork (on retry), we create a fresh session and emit a system-chunk warning |
 | Hooks | ❌ | Archon hooks ≠ Copilot's `SessionHooks` event vocabulary |

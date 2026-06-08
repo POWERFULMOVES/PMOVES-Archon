@@ -10,10 +10,19 @@ import { shortRunId, formatElapsed, elapsedSince, formatCost } from '../lib/form
 import { useIsDocker, openInIde } from '../lib/health';
 import { statusTextClass, statusLabel } from '../lib/run-status';
 
+/** Present + non-empty — narrows `string | null | undefined` to `string`. */
+const hasValue = (v: string | null | undefined): v is string => v != null && v !== '';
+
 interface ActiveRunCardProps {
   run: Run;
   showProject?: boolean;
   selected?: boolean;
+  /**
+   * True when this run's approval is currently surfaced in the pending-input
+   * banner at the top of the feed. The card then shows a pointer instead of a
+   * second live ApprovalPanel; dismissing the banner restores the inline panel.
+   */
+  inputPromoted?: boolean;
 }
 
 /**
@@ -27,13 +36,15 @@ interface ActiveRunCardProps {
  *
  * Paused:
  *   - Amber pulsing dot
- *   - Inline ApprovalPanel with context input + Approve/Reject
+ *   - Inline ApprovalPanel with context input + Approve/Reject (unless the
+ *     approval is promoted to the banner, in which case a pointer shows)
  *   - User can resolve without leaving the feed
  */
 export function ActiveRunCard({
   run,
   showProject = false,
   selected = false,
+  inputPromoted = false,
 }: ActiveRunCardProps): ReactElement {
   const navigate = useNavigate();
   const isDocker = useIsDocker();
@@ -41,6 +52,7 @@ export function ActiveRunCard({
   const canOpen = run.projectId !== null && !run.id.startsWith('demo-');
   const canOpenIde =
     !isDocker && run.workingPath !== null && run.workingPath !== '' && !run.id.startsWith('demo-');
+  const showDetailGrid = run.userMessage !== '' || run.status === 'running';
 
   const onCardClick = (): void => {
     if (canOpen) navigate(`/console/p/${run.projectId}/r/${run.id}`);
@@ -119,16 +131,25 @@ export function ActiveRunCard({
           </div>
         </div>
 
-        {/* Activity detail — running only */}
-        {run.status === 'running' ? (
+        {/* Provenance + activity detail: the triggering input (when present, truncated —
+            full text on hover), plus live node/tool rows while running. */}
+        {showDetailGrid ? (
           <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
-            {run.currentNode !== null && run.currentNode !== undefined && run.currentNode !== '' ? (
+            {run.userMessage !== '' ? (
+              <>
+                <span className="font-mono text-text-tertiary">input</span>
+                <span className="truncate font-mono text-text-secondary" title={run.userMessage}>
+                  {run.userMessage}
+                </span>
+              </>
+            ) : null}
+            {run.status === 'running' && hasValue(run.currentNode) ? (
               <>
                 <span className="font-mono text-text-tertiary">node</span>
                 <span className="font-mono text-text-primary">{run.currentNode}</span>
               </>
             ) : null}
-            {run.lastTool !== null && run.lastTool !== undefined && run.lastTool !== '' ? (
+            {run.status === 'running' && hasValue(run.lastTool) ? (
               <>
                 <span className="font-mono text-text-tertiary">tool</span>
                 <span className="font-mono text-text-primary">
@@ -147,10 +168,19 @@ export function ActiveRunCard({
             from the last text event), because the approval node's own
             `message` is usually just a pointer ("answer the questions above"). */}
         {run.status === 'paused' && run.approval !== null && run.approval !== undefined ? (
-          <>
-            <ApprovalContext run={run} />
-            <ApprovalPanel run={run} />
-          </>
+          inputPromoted ? (
+            <div className="mt-2 flex items-center gap-2 rounded border border-warning/25 bg-warning/[0.05] px-3 py-2 text-[12px] text-warning">
+              <span aria-hidden className="leading-none">
+                ⚠
+              </span>
+              <span>Waiting for your input — see the banner at the top.</span>
+            </div>
+          ) : (
+            <>
+              <ApprovalContext run={run} />
+              <ApprovalPanel run={run} />
+            </>
+          )
         ) : null}
       </div>
     </article>

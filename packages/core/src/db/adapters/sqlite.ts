@@ -162,6 +162,21 @@ export class SqliteAdapter implements IDatabase {
    * the columns were added to createSchema().
    */
   private migrateColumns(): void {
+    // Users columns. `role` is the web-auth identity seam (default 'admin').
+    // Better Auth's own tables are PostgreSQL-only — web auth is never enabled
+    // on SQLite — so only the role column is backfilled here.
+    try {
+      const userCols = this.db.prepare("PRAGMA table_info('remote_agent_users')").all() as {
+        name: string;
+      }[];
+      const userColNames = new Set(userCols.map(c => c.name));
+      if (!userColNames.has('role')) {
+        this.db.run("ALTER TABLE remote_agent_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+      }
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_users_columns_failed');
+    }
+
     // Conversations columns
     try {
       const cols = this.db.prepare("PRAGMA table_info('remote_agent_conversations')").all() as {
@@ -290,6 +305,7 @@ export class SqliteAdapter implements IDatabase {
         id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
         display_name TEXT,
         email TEXT,
+        role TEXT NOT NULL DEFAULT 'admin',
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
@@ -303,6 +319,21 @@ export class SqliteAdapter implements IDatabase {
         platform_display_name TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(platform, platform_user_id)
+      );
+
+      -- User GitHub tokens (per-user device-flow tokens, encrypted at rest) [PR-C]
+      CREATE TABLE IF NOT EXISTS remote_agent_user_github_tokens (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES remote_agent_users(id) ON DELETE CASCADE,
+        github_user_id INTEGER NOT NULL,
+        github_login TEXT NOT NULL,
+        access_token_encrypted TEXT NOT NULL,
+        refresh_token_encrypted TEXT,
+        access_token_expires_at TEXT,
+        refresh_token_expires_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(user_id)
       );
 
       -- Codebases table
@@ -427,6 +458,19 @@ export class SqliteAdapter implements IDatabase {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
+      -- Per-node provider session IDs persisted across workflow re-runs
+      CREATE TABLE IF NOT EXISTS remote_agent_workflow_node_sessions (
+        workflow_name TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_session_id TEXT NOT NULL,
+        last_run_id TEXT REFERENCES remote_agent_workflow_runs(id) ON DELETE SET NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (workflow_name, node_id, scope_key, provider)
+      );
+
       -- Indexes
       CREATE INDEX IF NOT EXISTS idx_codebase_env_vars_codebase_id ON remote_agent_codebase_env_vars(codebase_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_platform ON remote_agent_conversations(platform_type, platform_conversation_id);
@@ -438,7 +482,10 @@ export class SqliteAdapter implements IDatabase {
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON remote_agent_workflow_runs(status);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_run_id ON remote_agent_workflow_events(workflow_run_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_type ON remote_agent_workflow_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at ON remote_agent_workflow_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON remote_agent_messages(conversation_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_scope ON remote_agent_workflow_node_sessions(scope_key);
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_workflow ON remote_agent_workflow_node_sessions(workflow_name);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv ON remote_agent_workflow_runs(parent_conversation_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_hidden ON remote_agent_conversations(hidden);
       DROP INDEX IF EXISTS idx_conversations_codebase;

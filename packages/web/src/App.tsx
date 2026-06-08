@@ -11,7 +11,9 @@ import { WorkflowsPage } from '@/routes/WorkflowsPage';
 import { WorkflowExecutionPage } from '@/routes/WorkflowExecutionPage';
 import { WorkflowBuilderPage } from '@/routes/WorkflowBuilderPage';
 import { SettingsPage } from '@/routes/SettingsPage';
+import { LoginPage } from '@/routes/LoginPage';
 import { ConsoleApp } from '@/experiments/console/ConsoleApp';
+import { SessionGate } from '@/components/auth/SessionGate';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -68,9 +70,30 @@ export function App(): React.ReactElement {
         <ProjectProvider>
           <BrowserRouter>
             <Routes>
-              {/* Console experiment mounts OUTSIDE Layout so it does not inherit TopNav. */}
-              <Route path="/console/*" element={<ConsoleApp />} />
-              <Route element={<Layout />}>
+              {/* Login mounts OUTSIDE the SessionGate so it is always reachable. */}
+              <Route path="/login" element={<LoginPage />} />
+              {/*
+                Console mounts OUTSIDE Layout (so it does not inherit TopNav) but
+                still INSIDE SessionGate — otherwise /console would bypass web auth
+                that every other app route enforces. When web auth is disabled (the
+                solo default) SessionGate passes children through unchanged after a
+                brief auth-status check (cached for the session) — no login required.
+              */}
+              <Route
+                path="/console/*"
+                element={
+                  <SessionGate>
+                    <ConsoleApp />
+                  </SessionGate>
+                }
+              />
+              <Route
+                element={
+                  <SessionGate>
+                    <Layout />
+                  </SessionGate>
+                }
+              >
                 <Route path="/" element={<Navigate to="/chat" replace />} />
                 <Route path="/chat" element={<ChatPage />} />
                 <Route path="/chat/*" element={<ChatPage />} />
