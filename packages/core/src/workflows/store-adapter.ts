@@ -8,12 +8,15 @@ import type { WorkflowRunStatus } from '@archon/workflows/schemas/workflow-run';
 import type { MergedConfig } from '../config/config-types';
 import * as workflowDb from '../db/workflows';
 import * as workflowEventDb from '../db/workflow-events';
+import * as workflowNodeSessionDb from '../db/workflow-node-sessions';
 import * as codebaseDb from '../db/codebases';
 import * as envVarDb from '../db/env-vars';
 import { getAgentProvider } from '@archon/providers';
 import { loadConfig as loadMergedConfig } from '../config/config-loader';
 import { createLogger } from '@archon/paths';
 import type { IGitHubAppAuthProvider } from '../github-auth';
+import { isPerUserGitHubEnabled } from '../github-auth/config';
+import { getDecryptedAccessToken } from '../db/user-github-token-store';
 
 // Compile-time assertion: MergedConfig must remain a structural subtype of WorkflowConfig.
 // If MergedConfig drifts from WorkflowConfig, this line becomes a type error.
@@ -60,6 +63,9 @@ export function createWorkflowStore(): IWorkflowStore {
     getCompletedDagNodeOutputs: workflowEventDb.getCompletedDagNodeOutputs,
     getCodebase: codebaseDb.getCodebase,
     getCodebaseEnvVars: envVarDb.getCodebaseEnvVars,
+    getWorkflowNodeSession: workflowNodeSessionDb.getWorkflowNodeSession,
+    upsertWorkflowNodeSession: workflowNodeSessionDb.upsertWorkflowNodeSession,
+    deleteWorkflowNodeSessions: workflowNodeSessionDb.deleteWorkflowNodeSessions,
   };
 }
 
@@ -107,5 +113,17 @@ export function createWorkflowDeps(): WorkflowDeps {
           }
         }
       : undefined,
+    // Per-user token policy (PR-C): when per-user mode is on, route a run's
+    // gh/git through the originating user's personal token (decrypted, refreshed
+    // on read), or scrub the org/bot token when they haven't connected.
+    isPerUserGitHubEnabled: () => isPerUserGitHubEnabled(),
+    getUserGithubToken: async (userId: string): Promise<string | undefined> => {
+      try {
+        return (await getDecryptedAccessToken(userId)) ?? undefined;
+      } catch (err) {
+        getLog().warn({ err: err as Error, userId }, 'workflow_deps.user_token_resolve_failed');
+        return undefined;
+      }
+    },
   };
 }

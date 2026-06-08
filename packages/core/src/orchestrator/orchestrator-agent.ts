@@ -25,31 +25,50 @@ import { formatToolCall } from '@archon/workflows/utils/tool-formatter';
 import { classifyAndFormatError } from '../utils/error-formatter';
 import { toError } from '../utils/error';
 import { getAgentProvider, getProviderCapabilities } from '@archon/providers';
+import { buildManageRunTool } from './manage-run-tool';
 import { getArchonWorkspacesPath, ensureArchonWorkspacesPath } from '@archon/paths';
 import { syncArchonToWorktree } from '../utils/worktree-sync';
 import { syncWorkspace, toRepoPath } from '@archon/git';
 import type { WorkspaceSyncResult } from '@archon/git';
 import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discovery';
-import { findWorkflow } from '@archon/workflows/router';
+import { findWorkflow, resolveWorkflowName } from '@archon/workflows/router';
 import { executeWorkflow, hydrateResumableRun } from '@archon/workflows/executor';
+import {
+  assertWorkflowRequirementsMet,
+  WorkflowRequirementError,
+} from '@archon/workflows/utils/workflow-requirements';
 import type {
   WorkflowDefinition,
   WorkflowWithSource,
   WorkflowLoadError,
+  WorkflowSource,
 } from '@archon/workflows/schemas/workflow';
+import { isPerUserGitHubEnabled } from '../github-auth/config';
+import { getDecryptedAccessToken } from '../db/user-github-token-store';
 import { createWorkflowDeps } from '../workflows/store-adapter';
 import { loadConfig } from '../config/config-loader';
 import type { MergedConfig } from '../config/config-types';
 import { generateAndSetTitle } from '../services/title-generator';
 import { validateAndResolveIsolation, dispatchBackgroundWorkflow } from './orchestrator';
 import { IsolationBlockedError } from '@archon/isolation';
-import { buildOrchestratorSystemAppend, formatWorkflowContextSection } from './prompt-builder';
+import {
+  buildOrchestratorSystemAppend,
+  buildRunManagementSection,
+  formatWorkflowContextSection,
+} from './prompt-builder';
 import type { WorkflowResultContext } from './prompt-builder';
 import * as messageDb from '../db/messages';
 import * as workflowDb from '../db/workflows';
 import * as workflowEventDb from '../db/workflow-events';
 import { getCodebaseEnvVars } from '../db/env-vars';
 import type { ApprovalContext } from '@archon/workflows/schemas/workflow-run';
+import {
+  buildAiProfile,
+  isLiteralSpec,
+  resolveModelSpec,
+  routePresetEffort,
+  type ModelAliasPreset,
+} from '@archon/workflows/model-validation';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -64,6 +83,50 @@ function getLog(): ReturnType<typeof createLogger> {
 const MAX_BATCH_ASSISTANT_CHUNKS = 20;
 /** Max total chunks (assistant + tool) to keep in batch mode */
 const MAX_BATCH_TOTAL_CHUNKS = 200;
+function applyPresetToRequestOptions(
+  provider: string,
+  preset: ModelAliasPreset,
+  options: SendQueryOptions
+): void {
+  if (preset.thinking !== undefined) {
+    options.nodeConfig = { ...(options.nodeConfig ?? {}), thinking: preset.thinking };
+  }
+
+  if (preset.effort === undefined) return;
+
+  const routed = routePresetEffort(provider, preset.effort);
+  if (!routed) {
+    // Cross-provider effort mismatch — warn instead of silently dropping.
+    getLog().warn({ provider, effort: preset.effort }, 'orchestrator.preset_effort_unsupported');
+    return;
+  }
+  if (routed.field === 'effort') {
+    options.nodeConfig = { ...(options.nodeConfig ?? {}), effort: routed.value };
+  } else {
+    options.assistantConfig = {
+      ...(options.assistantConfig ?? {}),
+      modelReasoningEffort: routed.value,
+    };
+  }
+}
+
+interface ResolvedModelRequest {
+  provider: string;
+  model: string | undefined;
+  preset?: ModelAliasPreset;
+}
+
+function resolveModelRequest(
+  aiProfile: ReturnType<typeof buildAiProfile>,
+  modelRef: string,
+  fallbackProvider: string
+): ResolvedModelRequest {
+  const spec = resolveModelSpec(aiProfile, modelRef);
+  if (isLiteralSpec(spec)) {
+    return { provider: fallbackProvider, model: spec.literal };
+  }
+  return { provider: spec.provider, model: spec.model, preset: spec };
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -316,8 +379,34 @@ async function dispatchOrchestratorWorkflow(
   workflow: WorkflowDefinition,
   userMessage: string,
   isolationHints?: HandleMessageContext['isolationHints'],
-  userId?: string
+  userId?: string,
+  /**
+   * Discovery source of the workflow — telemetry only (bundled workflows
+   * report their real name, custom ones report "custom"). Optional: callers
+   * that don't have it readily in scope omit it and the run reports "custom".
+   */
+  source?: WorkflowSource
 ): Promise<void> {
+  // Capability gate: hard-fail before any worktree/clone/AI cost if the
+  // workflow declares `requires: [github]` and the originating user hasn't
+  // connected. No-op when per-user GitHub is disabled (solo PAT installs).
+  if (isPerUserGitHubEnabled() && workflow.requires?.length) {
+    const githubConnected = userId ? Boolean(await getDecryptedAccessToken(userId)) : false;
+    try {
+      assertWorkflowRequirementsMet(workflow, { githubConnected });
+    } catch (err) {
+      if (err instanceof WorkflowRequirementError) {
+        getLog().info(
+          { workflowName: workflow.name, conversationId, userId, requirement: err.requirement },
+          'workflow.requirement_unmet'
+        );
+        await platform.sendMessage(conversationId, err.message);
+        return;
+      }
+      throw err;
+    }
+  }
+
   // Auto-attach project to conversation
   await db.updateConversation(conversation.id, {
     codebase_id: codebase.id,
@@ -389,7 +478,29 @@ async function dispatchOrchestratorWorkflow(
     // gate) — surface that to the user and fall through to a fresh run on
     // the same worktree rather than silently restarting.
     const deps = createWorkflowDeps();
-    const prepared = await hydrateResumableRun(deps, resumableRun);
+    let prepared: Awaited<ReturnType<typeof hydrateResumableRun>>;
+    try {
+      prepared = await hydrateResumableRun(deps, resumableRun);
+    } catch (err) {
+      // resumeWorkflowRun is a compare-and-swap: if another surface (web Resume,
+      // a concurrent re-dispatch, the CLI) already claimed this run, it throws
+      // WorkflowNotResumableError. Surface a friendly note instead of leaking the
+      // raw internal string to the generic failure catch, and do NOT fall through
+      // to a fresh run — the other resumer owns the worktree (#1830 I2).
+      if (err instanceof workflowDb.WorkflowNotResumableError) {
+        getLog().info(
+          { workflowName: workflow.name, runId: resumableRun.id, status: err.currentStatus },
+          'orchestrator.resume_lost_race'
+        );
+        await platform.sendMessage(
+          conversationId,
+          `⚠️ **${workflow.name}** is already being resumed (status: ${err.currentStatus}). ` +
+            'No action taken — follow the existing run for progress.'
+        );
+        return;
+      }
+      throw err;
+    }
     if (prepared) {
       await executeWorkflow(
         deps,
@@ -403,6 +514,7 @@ async function dispatchOrchestratorWorkflow(
           codebaseId: codebase.id,
           parentConversationId: conversation.id,
           userId,
+          source,
           ...prepared,
         }
       );
@@ -423,6 +535,7 @@ async function dispatchOrchestratorWorkflow(
           codebaseId: codebase.id,
           parentConversationId: conversation.id,
           userId,
+          source,
         }
       );
     }
@@ -439,6 +552,7 @@ async function dispatchOrchestratorWorkflow(
         availableWorkflows: [workflow],
         isolationHints,
         userId,
+        source,
       },
       workflow
     );
@@ -456,6 +570,7 @@ async function dispatchOrchestratorWorkflow(
         codebaseId: codebase.id,
         parentConversationId: conversation.id,
         userId,
+        source,
       }
     );
   }
@@ -669,16 +784,6 @@ export async function handleMessage(
       conversationId
     );
 
-    // 1c. Auto-generate title for untitled conversations (fire-and-forget)
-    if (!conversation.title && !message.startsWith('/')) {
-      void generateAndSetTitle(
-        conversation.id,
-        message,
-        conversation.ai_assistant_type,
-        getArchonWorkspacesPath()
-      );
-    }
-
     // Natural-language approval routing — if a workflow is paused in this
     // conversation, treat any non-slash message as the approval response.
     if (!message.startsWith('/')) {
@@ -746,6 +851,9 @@ export async function handleMessage(
           const { workflows: discoveredWorkflows } = await discoverAllWorkflows(conversation);
           const allWorkflows: WorkflowDefinition[] = discoveredWorkflows.map(w => w.workflow);
           const workflow = findWorkflow(pausedRun.workflow_name, allWorkflows);
+          const workflowSource = workflow
+            ? discoveredWorkflows.find(w => w.workflow === workflow)?.source
+            : undefined;
           if (!workflow) {
             await platform.sendMessage(
               conversationId,
@@ -774,7 +882,8 @@ export async function handleMessage(
             workflow,
             pausedRun.user_message,
             isolationHints,
-            userId
+            userId,
+            workflowSource
           );
           getLog().info(
             { conversationId, workflowRunId: pausedRun.id, workflowName: pausedRun.workflow_name },
@@ -939,14 +1048,16 @@ export async function handleMessage(
       });
     }
 
-    // 5. Send to AI provider
-    const aiClient = getAgentProvider(conversation.ai_assistant_type);
-    getLog().debug({ assistantType: conversation.ai_assistant_type }, 'sending_to_ai');
-
     // Reuse the config already loaded during workflow discovery (avoids a second disk read).
     // Fall back to loadConfig only when no codebase is scoped (discoveredConfig is undefined).
     const config = discoveredConfig ?? (await loadConfig());
-    const providerKey = conversation.ai_assistant_type;
+    const configuredProviderKey = conversation.ai_assistant_type;
+    const aiProfile = buildAiProfile(configuredProviderKey, {
+      repoTiers: config.tiers,
+      repoAliases: config.aliases,
+    });
+    const chatRequest = resolveModelRequest(aiProfile, 'large', configuredProviderKey);
+    const providerKey = chatRequest.provider;
     let dbEnvVars: Record<string, string> = {};
     if (conversation.codebase_id) {
       try {
@@ -973,17 +1084,112 @@ export async function handleMessage(
 
     // Claude supports the preset object for prompt caching; other providers
     // need a plain string (Pi coerces non-string to undefined, Codex ignores it).
-    const systemAppend = buildOrchestratorSystemAppend(conversation, codebases, workflows);
+    let systemAppend = buildOrchestratorSystemAppend(conversation, codebases, workflows);
+    // Capabilities are only consulted for project-scoped chats (both the native tool
+    // and the CLI pointer are scoped features), so look them up lazily — this also
+    // avoids a registry lookup (and a throw for an unregistered provider) on the
+    // unscoped path.
+    const scopedCaps =
+      conversation.codebase_id !== null ? getProviderCapabilities(providerKey) : null;
+    // Providers WITHOUT the in-process manage_run tool (Codex/OpenCode/Copilot) get a
+    // system-prompt pointer to the `archon workflow …` CLI so they can still manage this
+    // project's runs over bash. Claude/Pi get the native tool below and are nudged to it
+    // — adding the CLI pointer there would be redundant and steer them onto a bash path
+    // that needs `archon` on PATH. Project-scoped only: the CLI commands require a
+    // git-repo cwd, which unscoped chats (cwd ~/.archon/workspaces) don't have.
+    if (scopedCaps !== null && !scopedCaps.nativeTools) {
+      systemAppend += `\n\n${buildRunManagementSection()}`;
+    }
     const systemPrompt =
       providerKey === 'claude'
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: systemAppend }
         : systemAppend;
 
     const requestOptions: SendQueryOptions = {
-      assistantConfig: config.assistants[providerKey] ?? {},
+      assistantConfig: { ...(config.assistants[providerKey] ?? {}) },
       env: Object.keys(effectiveEnv).length > 0 ? effectiveEnv : undefined,
+      model: chatRequest.model,
       systemPrompt,
     };
+    if (chatRequest.preset) {
+      applyPresetToRequestOptions(providerKey, chatRequest.preset, requestOptions);
+    }
+
+    if (!conversation.title && !message.startsWith('/')) {
+      const titleRequest = resolveModelRequest(aiProfile, 'small', configuredProviderKey);
+      const titleOptions: SendQueryOptions = {
+        model: titleRequest.model,
+        assistantConfig: { ...(config.assistants[titleRequest.provider] ?? {}) },
+      };
+      if (titleRequest.preset) {
+        applyPresetToRequestOptions(titleRequest.provider, titleRequest.preset, titleOptions);
+      }
+      void generateAndSetTitle(
+        conversation.id,
+        message,
+        titleRequest.provider,
+        cwd,
+        undefined,
+        titleOptions.assistantConfig,
+        titleOptions
+      );
+    }
+
+    // 5. Send to AI provider
+    const aiClient = getAgentProvider(providerKey);
+    getLog().debug(
+      { assistantType: conversation.ai_assistant_type, resolvedAssistantType: providerKey },
+      'sending_to_ai'
+    );
+
+    // Project-scoped chats get the `manage_run` tool so the agent can see and
+    // launch this project's workflow runs. Only when a codebase is scoped and
+    // the provider supports in-process native tools (Claude, Pi). The explicit
+    // codebase_id check (redundant with scopedCaps !== null) narrows it to string
+    // for the block below.
+    if (conversation.codebase_id !== null && scopedCaps?.nativeTools) {
+      const scopedCodebaseId = conversation.codebase_id;
+      requestOptions.nativeTools = [
+        buildManageRunTool({
+          codebaseId: scopedCodebaseId,
+          startWorkflow: async (workflowName, msg): Promise<string> => {
+            let wf: WorkflowDefinition | undefined;
+            try {
+              wf = resolveWorkflowName(workflowName, workflows);
+            } catch (e: unknown) {
+              return toError(e).message; // ambiguous-name error is user-facing
+            }
+            if (wf === undefined) {
+              const names = workflows.map(w => w.name).join(', ');
+              return `No workflow named "${workflowName}". Available: ${names}`;
+            }
+            try {
+              await dispatchBackgroundWorkflow(
+                {
+                  platform,
+                  conversationId,
+                  cwd,
+                  originalMessage: msg.length > 0 ? msg : `Run ${wf.name}`,
+                  conversationDbId: conversation.id,
+                  codebaseId: scopedCodebaseId,
+                  availableWorkflows: workflows,
+                  userId,
+                },
+                wf
+              );
+            } catch (e: unknown) {
+              const err = toError(e);
+              getLog().error(
+                { err, workflow: wf.name, codebaseId: scopedCodebaseId, conversationId },
+                'manage_run.start_failed'
+              );
+              return `Failed to start workflow "${wf.name}": ${err.message}`;
+            }
+            return `Started workflow "${wf.name}" in the background — it'll appear in the runs list and the workflow dock shortly.`;
+          },
+        }),
+      ];
+    }
 
     const mode = platform.getStreamingMode();
     if (mode === 'stream') {
@@ -1783,7 +1989,8 @@ async function handleWorkflowRunCommand(
       resolvedWorkflow,
       userMessage,
       isolationHints,
-      userId
+      userId,
+      resolvedEntry?.source
     );
     return;
   }

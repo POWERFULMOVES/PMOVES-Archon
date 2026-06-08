@@ -68,6 +68,8 @@ import { WebAdapter } from './adapters/web';
 import { MessagePersistence } from './adapters/web/persistence';
 import { SSETransport } from './adapters/web/transport';
 import { WorkflowEventBridge } from './adapters/web/workflow-bridge';
+import { DashboardEventPoller } from './adapters/web/dashboard-event-poller';
+import { PgNotifyListener } from './adapters/web/pg-notify-listener';
 import { registerApiRoutes } from './routes/api';
 import {
   handleMessage,
@@ -76,12 +78,16 @@ import {
   classifyAndFormatError,
   startCleanupScheduler,
   stopCleanupScheduler,
+  getDbNotificationListener,
   loadConfig,
   logConfig,
   getPort,
   createGitHubAppAuthProvider,
   loadAppPrivateKey,
   registerGitHubAppAuthProvider,
+  isPerUserGitHubEnabled,
+  assertEncryptionKeyAtBoot,
+  getDecryptedAccessToken,
   type GitHubAuth,
   type IGitHubAppAuthProvider,
 } from '@archon/core';
@@ -93,8 +99,10 @@ import {
   logArchonPaths,
   validateAppDefaultsPaths,
   shutdownTelemetry,
+  captureArchonStarted,
 } from '@archon/paths';
 import { selectGitHubAuthMode, parseGitCredentialPath } from './github-auth-bootstrap';
+import { getAuth, closeAuth, isWebAuthEnabled, assertWebAuthAtBoot, getSignupMode } from './auth';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -195,6 +203,9 @@ export interface ServerOptions {
 
 export async function startServer(opts: ServerOptions = {}): Promise<void> {
   getLog().info('server_starting');
+  // Anonymous once-per-boot startup event (self-gates on opt-out). Flushed by
+  // the shutdownTelemetry() call in the SIGINT/SIGTERM shutdown handler.
+  captureArchonStarted({ surface: 'server' });
 
   // Database auto-detected: SQLite (default) or PostgreSQL (if DATABASE_URL set)
   // No required environment variables - SQLite works out of the box
@@ -301,6 +312,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   await webAdapter.start();
   persistence.startPeriodicFlush();
 
+  // Stream workflow runs started in ANY process (incl. the `archon` CLI / `--detach`)
+  // to the console dashboard. The in-process WorkflowEventBridge only sees runs
+  // executed inside the server; this poller tails the events table. On Postgres,
+  // LISTEN/NOTIFY wakes it for near-instant push (poll becomes a slow backstop);
+  // on SQLite it polls fast.
+  const dashboardPoller = new DashboardEventPoller();
+  const dbNotifier = getDbNotificationListener();
+  let pgNotifyListener: PgNotifyListener | undefined;
+  if (dbNotifier) {
+    dashboardPoller.start(transport, 10_000);
+    pgNotifyListener = new PgNotifyListener(dbNotifier, dashboardPoller);
+    await pgNotifyListener.start();
+  } else {
+    dashboardPoller.start(transport, 1_500);
+  }
+
   // Mutable — pushed to as each adapter starts, read by the /api/health endpoint.
   // Must be a live reference because Telegram starts after the HTTP listener begins
   // accepting requests, so a snapshot taken at registration time would miss it.
@@ -346,6 +373,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         throw new Error('GitHub App mode misconfigured: GITHUB_APP_ID and WEBHOOK_SECRET required');
       }
       const privateKey = loadAppPrivateKey();
+      // Fail fast on a malformed TOKEN_ENCRYPTION_KEY when per-user is enabled,
+      // so we never store unencryptable tokens at runtime. If the key is absent,
+      // per-user GitHub is simply disabled (App-for-bot-only remains valid).
+      assertEncryptionKeyAtBoot();
+      if (!isPerUserGitHubEnabled()) {
+        getLog().warn(
+          'github_app.per_user_disabled — set TOKEN_ENCRYPTION_KEY (and GITHUB_APP_CLIENT_ID) to enable per-user GitHub identity'
+        );
+      }
       const defaultInstallationId = process.env.GITHUB_APP_INSTALLATION_ID
         ? Number(process.env.GITHUB_APP_INSTALLATION_ID)
         : undefined;
@@ -361,7 +397,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       const botMention =
         process.env.GITHUB_BOT_MENTION || process.env.BOT_DISPLAY_NAME || config.botName;
       const auth: GitHubAuth = { kind: 'app', provider: githubAppAuthProvider };
-      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention);
+      // Per-user comment attribution: when enabled, let the adapter author PR/
+      // issue comments under the originating user's GitHub identity. Resolver
+      // returns undefined for unconnected users → bot identity fallback.
+      const getUserToken = isPerUserGitHubEnabled()
+        ? async (userId: string): Promise<string | undefined> =>
+            (await getDecryptedAccessToken(userId)) ?? undefined
+        : undefined;
+      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention, { getUserToken });
       await github.start();
       activePlatforms.push('GitHub (App)');
       getLog().info(
@@ -428,7 +471,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       const discordAdapter = discord; // Capture for use in callback
 
       // Register message handler
-      discordAdapter.onMessage(async message => {
+      discordAdapter.onMessage(async ({ message, platformUserId, displayName }) => {
         // Get initial conversation ID
         let conversationId = discordAdapter.getConversationId(message);
 
@@ -465,8 +508,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         }
 
         // Resolve Discord author → Archon user UUID.
-        // message.author.username is already display-quality on Discord (no extra API call needed).
-        const userId = await resolveUserId('discord', message.author.id, message.author.username);
+        // displayName is already display-quality on Discord (no extra API call needed).
+        const userId = await resolveUserId('discord', platformUserId, displayName);
 
         // Fire-and-forget: handler returns immediately, processing happens async
         lockManager
@@ -573,6 +616,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     getLog().info('platform_adapters_skipped');
   }
 
+  // Fail fast on a misconfigured web-auth secret before binding a socket: when
+  // web auth is enabled, BETTER_AUTH_SECRET must be long enough to be a real
+  // signing key. No-op when web auth is disabled.
+  assertWebAuthAtBoot();
+
   // Setup Hono server
   const app = new OpenAPIHono({ defaultHook: validationErrorHook });
   const port = opts.port ?? (await getPort());
@@ -582,6 +630,43 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     getLog().error({ err, path: c.req.path, method: c.req.method }, 'unhandled_request_error');
     return c.json({ error: 'Internal server error' }, 500);
   });
+
+  // Opt-in web auth (Better Auth). Mount the handler at /api/auth/* AFTER
+  // app.onError and BEFORE registerApiRoutes (so it wins over the '*' SPA
+  // fallback). getAuth() returns null when web auth is disabled — solo/SQLite
+  // installs mount nothing and behave exactly as before.
+  //
+  // Better Auth's basePath is /api/auth, so its handler is a catch-all under
+  // that prefix. Archon ALSO owns a few /api/auth/* routes (status + the GitHub
+  // device flow) registered later in registerApiRoutes. To avoid shadowing
+  // them, explicitly fall through (next()) for those Archon-owned paths so the
+  // later route handlers run; everything else under /api/auth/* is Better Auth.
+  // DELETE isn't registered here, so DELETE /api/auth/github is never
+  // intercepted either. (Raw app.on, not registerOpenApiRoute: Better Auth is
+  // an external handler serving its own non-OpenAPI surface, like the webhooks.)
+  const webAuth = getAuth();
+  if (webAuth) {
+    const isArchonOwnedAuthPath = (path: string): boolean =>
+      path === '/api/auth/status' ||
+      path === '/api/auth/github' ||
+      path.startsWith('/api/auth/github/');
+    app.on(['POST', 'GET'], '/api/auth/*', (c, next) => {
+      if (isArchonOwnedAuthPath(c.req.path)) return next();
+      return webAuth.handler(c.req.raw);
+    });
+    getLog().info('web_auth.handler_registered');
+    // Safe-default signal: web auth is on but no allowlist + no open-signup flag
+    // → self-serve registration is OFF. Surface it so an operator who meant to
+    // invite teammates isn't silently locked out of signups.
+    if (getSignupMode() === 'disabled') {
+      getLog().warn(
+        {
+          hint: 'Set ARCHON_AUTH_ALLOWED_EMAILS to invite users, or ARCHON_AUTH_OPEN_SIGNUP=true for open signup.',
+        },
+        'web_auth.signup_disabled_no_allowlist'
+      );
+    }
+  }
 
   // Register Web UI API routes
   registerApiRoutes(app, webAdapter, lockManager, activePlatforms);
@@ -621,9 +706,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   //
   // SECURITY: hands out live installation access tokens to anyone who can hit
   // this URL. MUST be exposed on 127.0.0.1 only — the reverse proxy in front
-  // of Archon must NOT forward `/internal/*`. The startup WARN below fires when
-  // the operator binds the server to 0.0.0.0 with App mode active, making the
-  // misconfiguration obvious in logs.
+  // of Archon must NOT forward `/internal/*`. The startup guard below refuses
+  // to start the server (fatal error) when the operator binds to a non-loopback
+  // host with App mode active, unless ARCHON_ALLOW_INTERNAL_ON_PUBLIC_BIND=1.
   if (github?.getAuthMode() === 'app') {
     // Request schema for /internal/git-credential. Validates the small
     // host/path payload the credential helper sends. Inline declaration
@@ -779,6 +864,29 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     }
   }
 
+  // Security guardrail (advisory): the web identity header (ARCHON_WEB_AUTH_HEADER,
+  // default X-Archon-User) is trusted as-is — Archon attributes web requests to
+  // whoever the header names. That is only sound when Archon is reachable SOLELY
+  // through a reverse proxy that authenticates and sets the header (loopback bind).
+  // On a non-loopback bind any client that can reach the port can forge it:
+  // cosmetic misattribution without per-user GitHub, but in per-user mode a forged
+  // header can read/disconnect another user's GitHub connection or bind a
+  // device-flow token under their identity. WARN (not fatal) so existing exposed
+  // installs without per-user identity keep starting — but the misconfiguration is
+  // surfaced. The default header name means the trust is live even when
+  // ARCHON_WEB_AUTH_HEADER is unset, so per-user mode alone arms this check.
+  // Web auth (Better Auth) also keeps the header active as a fallback (proxy
+  // deploys / auth-service sidecar), so an enabled install on a public bind
+  // gets the same advisory.
+  const webAuthHeaderTrustActive =
+    Boolean(process.env.ARCHON_WEB_AUTH_HEADER) || isPerUserGitHubEnabled() || isWebAuthEnabled();
+  if (webAuthHeaderTrustActive && hostname !== '127.0.0.1' && hostname !== 'localhost') {
+    getLog().warn(
+      { hostname, headerName: process.env.ARCHON_WEB_AUTH_HEADER || 'X-Archon-User' },
+      'web_auth.header_trust_on_public_bind'
+    );
+  }
+
   const server = Bun.serve({
     fetch: app.fetch,
     hostname,
@@ -847,6 +955,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           slack?.stop();
           gitea?.stop();
           gitlab?.stop();
+          pgNotifyListener?.stop();
+          dashboardPoller.stop();
           await webAdapter.stop();
         } catch (error) {
           getLog().error({ err: error }, 'adapter_stop_error');
@@ -854,6 +964,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
         // Flush queued telemetry events before pool closes the process.
         await shutdownTelemetry();
+
+        // Release the dedicated Better Auth pool (no-op when web auth is off).
+        await closeAuth();
 
         return pool.end();
       })

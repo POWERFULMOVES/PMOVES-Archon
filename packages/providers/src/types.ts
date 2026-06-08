@@ -79,7 +79,7 @@ export interface CopilotProviderDefaults {
 }
 
 /**
- * Community provider defaults for Pi (@mariozechner/pi-coding-agent).
+ * Community provider defaults for Pi (@earendil-works/pi-coding-agent).
  * v1 minimal shape; extend as capabilities are wired in.
  */
 export interface PiProviderDefaults {
@@ -251,6 +251,33 @@ export interface AgentRequestOptions {
   forkSession?: boolean;
   /** When false, skip writing session transcript to disk. */
   persistSession?: boolean;
+  /**
+   * In-process tools the model may call this turn. Defined once by the caller
+   * (e.g. core's manage_run) and adapted per provider — Claude wraps each via
+   * `createSdkMcpServer`/`tool()`, Pi via `customTools`. Providers without an
+   * in-process tool path (Codex/OpenCode) ignore them. Gated on the
+   * `nativeTools` capability.
+   */
+  nativeTools?: NativeTool[];
+}
+
+/**
+ * A provider-neutral in-process tool. The handler runs in the host process and
+ * closes over whatever live context it needs (DB, operations, conversation), so
+ * `@archon/providers` never imports `@archon/core` — the tool crosses the
+ * boundary as data + a function on the request options.
+ *
+ * `inputSchema` is canonical JSON Schema (object). Each provider converts it to
+ * its SDK's schema form. The handler is expected to return a text result rather
+ * than throw — provider adapters add no safety net, so an uncaught throw would
+ * surface into the agent loop. (core's `buildManageRunTool` guarantees this with
+ * an outer try/catch around its dispatch.)
+ */
+export interface NativeTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handler: (input: Record<string, unknown>) => Promise<string>;
 }
 
 /**
@@ -327,13 +354,25 @@ export interface ProviderCapabilities {
   /** Whether the provider supports inline sub-agent definitions (Claude SDK's options.agents). */
   agents: boolean;
   toolRestrictions: boolean;
-  structuredOutput: boolean;
+  /**
+   * Structured-output guarantee tier for `output_format`:
+   *  - `'enforced'`    — SDK/backend grammar-constrains decoding (Claude, Codex,
+   *    OpenCode). The request path is native; Archon still validates post-parse
+   *    as a net for the refusal / `max_tokens`-truncation edges.
+   *  - `'best-effort'` — prompt-augmentation + repair + post-parse validate (Pi,
+   *    Copilot). No backend grammar; on a validation miss the executor re-asks up
+   *    to 3× (prompt + schema errors), then fails the node.
+   *  - `false`         — the provider cannot produce structured output at all.
+   */
+  structuredOutput: 'enforced' | 'best-effort' | false;
   envInjection: boolean;
   costControl: boolean;
   effortControl: boolean;
   thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
+  /** Whether the provider can register in-process `NativeTool`s for a turn. */
+  nativeTools: boolean;
 }
 
 /**
