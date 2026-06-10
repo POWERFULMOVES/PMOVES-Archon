@@ -192,6 +192,32 @@ export {
   GithubIdentityConflictError,
 } from './db/users';
 
+// Per-user AI-provider credentials (Phase 2, #1891 PR-1)
+// Public foundation: gate + delivery map. PR-2 will add connect-service /
+// route handlers; PR-3 will add the OAuth bridge.
+export {
+  isPerUserProviderKeysEnabled,
+  assertProviderKeysKeyAtBoot,
+  deliverCredential,
+  KNOWN_PROVIDERS,
+  persistProviderApiKey,
+  InvalidProviderKeyError,
+  type ResolvedCredential,
+  type DeliveryResult,
+  type DeliveryOptions,
+  type OAuthCredentials,
+  type PersistProviderApiKeyResult,
+} from './credentials';
+export {
+  saveUserProviderKey,
+  getUserProviderKeyRecord,
+  listUserProviderKeys,
+  deleteUserProviderKey,
+  getDecryptedProviderCredential,
+  listDecryptedUserProviderCredentials,
+  type SaveUserProviderKeyParams,
+} from './db/user-provider-key-store';
+
 // Path validation
 export { isPathWithinWorkspace, validateAndResolvePath } from './utils/path-validation';
 

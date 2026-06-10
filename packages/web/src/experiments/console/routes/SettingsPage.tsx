@@ -1,6 +1,8 @@
 import { type ReactElement } from 'react';
 import { AssistantConfigPanel } from '../components/AssistantConfigPanel';
+import { ProviderConnectionsPanel } from '../components/ProviderConnectionsPanel';
 import { SystemPanel } from '../components/SystemPanel';
+import { GithubIdentityPanel } from '../components/GithubIdentityPanel';
 
 /**
  * Global (installation-wide) console settings — assistant config + system health.
@@ -10,13 +12,15 @@ import { SystemPanel } from '../components/SystemPanel';
 export function SettingsPage(): ReactElement {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-col gap-3 border-b border-border px-6 py-4">
-        <h1 className="truncate text-base font-medium text-text-primary">Settings</h1>
+      <header className="px-10 pt-[22px]">
+        <h1 className="text-[22px] font-extrabold tracking-[-0.4px] text-text-primary">Settings</h1>
       </header>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        <div className="mx-auto flex max-w-2xl flex-col gap-6">
+      <div className="flex-1 overflow-y-auto px-10 pb-14 pt-5">
+        <div className="mx-auto flex max-w-[680px] flex-col gap-[22px]">
           <AssistantConfigPanel />
+          <ProviderConnectionsPanel />
           <SystemPanel />
+          <GithubIdentityPanel />
         </div>
       </div>
     </div>
