@@ -64,6 +64,12 @@ jobs:
   e2e-codex:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # PMOVES: OPENAI_API_KEY at job level so the smoke step's `if` can read it.
+    # PMOVES avoids managed OpenAI (self-hosts via TensorZero); when the secret is
+    # absent the Codex tier skips gracefully instead of failing on a 401 (Claude +
+    # deterministic tiers still run). Mirrors upstream, which is also red without it.
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,50 +84,66 @@ jobs:
           node-version: 22
 
       - name: Install Codex CLI
+        if: ${{ env.OPENAI_API_KEY != '' }}
         run: npm install -g @openai/codex
 
       - name: Install dependencies
+        if: ${{ env.OPENAI_API_KEY != '' }}
         run: bun install --frozen-lockfile
 
       - name: Run Codex smoke test
+        if: ${{ env.OPENAI_API_KEY != '' }}
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: bun run cli workflow run e2e-codex-smoke --no-worktree "smoke test"
+
+      - name: Skip notice (no OPENAI_API_KEY)
+        if: ${{ env.OPENAI_API_KEY == '' }}
+        run: echo "OPENAI_API_KEY not set — skipping Codex smoke tier (PMOVES uses Claude + deterministic)."
 
   # ─── Tier 3: Mixed providers ───────────────────────────────────────────
   e2e-mixed:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [e2e-claude, e2e-codex]
+    # PMOVES: mixed tier exercises BOTH providers — gate on OPENAI_API_KEY (the one
+    # PMOVES doesn't carry) so it skips gracefully rather than 401-ing. Job-level
+    # env so the step `if` can read it.
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Bun
+        if: ${{ env.OPENAI_API_KEY != '' }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.11
 
       - name: Setup Node.js
+        if: ${{ env.OPENAI_API_KEY != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install Claude Code CLI
+        if: ${{ env.OPENAI_API_KEY != '' }}
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install Codex CLI
+        if: ${{ env.OPENAI_API_KEY != '' }}
         run: npm install -g @openai/codex
 
       - name: Install dependencies
+        if: ${{ env.OPENAI_API_KEY != '' }}
         run: bun install --frozen-lockfile
 
       - name: Run mixed providers test
+        if: ${{ env.OPENAI_API_KEY != '' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # YAML `env:` values don't expand `~`, so set CLAUDE_BIN_PATH in the
@@ -129,3 +151,7 @@ jobs:
           # at $HOME/.local/bin/claude.
           export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
           bun run cli workflow run e2e-mixed-providers --no-worktree "smoke test"
+
+      - name: Skip notice (no OPENAI_API_KEY)
+        if: ${{ env.OPENAI_API_KEY == '' }}
+        run: echo "OPENAI_API_KEY not set — skipping mixed-providers tier (needs both Claude + Codex)."
