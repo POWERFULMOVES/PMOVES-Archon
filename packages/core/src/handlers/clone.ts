@@ -281,7 +281,10 @@ function normalizeRepoUrl(rawUrl: string): {
   repoName: string;
   targetPath: string;
 } {
-  const normalizedUrl = rawUrl.replace(/\/+$/, '');
+  // Bounded trailing-slash strip (1–32) avoids polynomial backtracking on a
+  // hostile clone URL; no legitimate URL has more trailing slashes than that.
+  // (CodeQL js/polynomial-redos)
+  const normalizedUrl = rawUrl.replace(/\/{1,32}$/, '');
 
   let workingUrl = normalizedUrl;
   // Convert SSH URLs (git@host:owner/repo) to HTTPS for any host
@@ -310,6 +313,16 @@ export async function cloneRepository(repoUrl: string): Promise<RegisterResult> 
   if (repoUrl.startsWith('/') || repoUrl.startsWith('~') || repoUrl.startsWith('.')) {
     const resolvedPath = repoUrl.startsWith('~') ? expandTilde(repoUrl) : resolve(repoUrl);
     return registerRepository(resolvedPath);
+  }
+
+  // Reject any value git would interpret as an option instead of a positional
+  // repo URL — e.g. `--upload-pack=<cmd>` reaches `git clone` on the
+  // unauthenticated/unknown-host path below and yields arbitrary command
+  // execution. Local-path forms (/, ~, .) already returned above, so at this
+  // point a leading '-' can only be a hostile flag.
+  // (CodeQL js/second-order-command-line-injection)
+  if (repoUrl.startsWith('-')) {
+    throw new Error(`Invalid repository URL: must not begin with '-' (got: ${repoUrl}).`);
   }
 
   const { workingUrl, ownerName, repoName, targetPath } = normalizeRepoUrl(repoUrl);

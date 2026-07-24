@@ -343,6 +343,14 @@ export async function cloneRepository(
   options?: { token?: string }
 ): Promise<GitResult<void>> {
   try {
+    // Reject a URL git would treat as an option instead of a positional (e.g.
+    // `--upload-pack=<cmd>` → arbitrary command execution). Defense-in-depth:
+    // current callers prepend a fixed scheme, but this is a reusable library
+    // entrypoint. (CodeQL js/second-order-command-line-injection)
+    if (url.startsWith('-')) {
+      throw new Error(`Invalid repository URL: must not begin with '-'.`);
+    }
+
     let cloneUrl = url;
     if (options?.token) {
       // Construct authenticated URL: https://<token>@github.com/owner/repo.git

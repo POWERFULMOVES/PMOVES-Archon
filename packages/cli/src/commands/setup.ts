@@ -1781,7 +1781,10 @@ export function writeHomePiModelConfig(model: string): void {
     return;
   }
 
-  const escaped = model.replace(/"/g, '\\"');
+  // Escape backslash BEFORE quote so the value is a valid YAML double-quoted
+  // scalar — in that context `\` is the escape introducer, so an unescaped
+  // backslash would corrupt config.yaml. (CodeQL js/incomplete-sanitization)
+  const escaped = model.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
   if (existing.includes('assistants:')) {
     // Don't risk splicing into the user's existing assistants: block — show
@@ -2334,7 +2337,9 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
         const configPath = join(archonDir, 'config.yaml');
         const existing = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
         if (!existing.includes('docs:')) {
-          const escaped = docsPath.trim().replace(/"/g, '\\"');
+          // Escape backslash before quote for a valid YAML double-quoted scalar
+          // (CodeQL js/incomplete-sanitization) — see writeHomePiModelConfig.
+          const escaped = docsPath.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
           writeFileSync(configPath, existing + `\ndocs:\n  path: "${escaped}"\n`);
         } else {
           note(

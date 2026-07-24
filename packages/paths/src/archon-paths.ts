@@ -538,7 +538,10 @@ export function slugifyFolderName(name: string): string {
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    // Bounded edge-dash trim (1–64) avoids polynomial backtracking on a hostile
+    // display name; SAFE_NAME permits edge dashes, so a >64-dash run leaving a
+    // residual dash is cosmetic only. (CodeQL js/polynomial-redos)
+    .replace(/^-{1,64}|-{1,64}$/g, '');
   return slug.length > 0 && SAFE_NAME.test(slug) ? slug : 'folder';
 }
 
