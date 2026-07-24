@@ -18,6 +18,11 @@ on:
         type: boolean
         default: false
 
+# Least-privilege default (CodeQL actions/missing-workflow-permissions); every
+# job here only reads the repo. Elevate per-job if one ever needs more.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

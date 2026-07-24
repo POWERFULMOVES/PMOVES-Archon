@@ -11,6 +11,11 @@ on:
         required: true
         type: string
 
+# Least-privilege default (CodeQL actions/missing-workflow-permissions); the
+# release / update-homebrew jobs elevate to contents: write per-job below.
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false

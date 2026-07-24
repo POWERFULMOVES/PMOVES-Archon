@@ -479,7 +479,10 @@ Use 'glab mr view ${String(mr.iid)}' for full details and 'glab mr diff ${String
     const repoUrl = `${urlObj.protocol}//oauth2:${this.token}@${urlObj.host}/${projectPath}.git`;
 
     try {
-      await execFileAsync('git', ['-c', 'credential.helper=', 'clone', repoUrl, repoPath], {
+      // `--` end-of-options: repoUrl is always the positional repository, never
+      // an option. This clone does not route through the shared `--`-guarded
+      // helper, so guard it directly. (CodeQL js/shell-command-constructed-from-input)
+      await execFileAsync('git', ['-c', 'credential.helper=', 'clone', '--', repoUrl, repoPath], {
         timeout: 120000,
       });
     } catch (error) {

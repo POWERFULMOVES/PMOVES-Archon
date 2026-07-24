@@ -5,6 +5,10 @@ on:
     paths:
       - 'packages/docs-web/src/data/marketplace.ts'
 
+# Least-privilege default (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Validate marketplace entries
