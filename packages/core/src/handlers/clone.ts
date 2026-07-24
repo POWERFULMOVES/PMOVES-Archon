@@ -394,7 +394,9 @@ export async function cloneRepository(repoUrl: string): Promise<RegisterResult> 
   }
 
   try {
-    await execFileAsync('git', ['clone', cloneUrl, targetPath]);
+    // `--` end-of-options: cloneUrl is always the positional repository, never
+    // an option, even if it begins with '-'. (CodeQL js/second-order-command-line-injection)
+    await execFileAsync('git', ['clone', '--', cloneUrl, targetPath]);
   } catch (error) {
     const safeErr = sanitizeError(error as Error);
     throw new Error(`Failed to clone repository: ${safeErr.message}`);

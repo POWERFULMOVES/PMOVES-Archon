@@ -359,7 +359,10 @@ export async function cloneRepository(
       cloneUrl = parsed.toString();
     }
 
-    await execFileAsync('git', ['clone', cloneUrl, targetPath], { timeout: 120000 });
+    // `--` end-of-options: git treats cloneUrl strictly as the positional
+    // repository, never as an option, even if it begins with '-'. Neutralizes
+    // second-order command-line injection. (CodeQL js/second-order-command-line-injection)
+    await execFileAsync('git', ['clone', '--', cloneUrl, targetPath], { timeout: 120000 });
     return { ok: true, value: undefined };
   } catch (error) {
     const err = error as Error;

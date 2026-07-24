@@ -1882,7 +1882,7 @@ branch refs/heads/feature/auth
       expect(result).toEqual({ ok: true, value: undefined });
       expect(execSpy).toHaveBeenCalledWith(
         'git',
-        ['clone', 'https://github.com/owner/repo.git', '/tmp/target'],
+        ['clone', '--', 'https://github.com/owner/repo.git', '/tmp/target'],
         { timeout: 120000 }
       );
     });
@@ -1895,8 +1895,8 @@ branch refs/heads/feature/auth
       });
 
       expect(result).toEqual({ ok: true, value: undefined });
-      // Verify the token is in the URL
-      const cloneUrl = execSpy.mock.calls[0]![1][1] as string;
+      // Verify the token is in the URL (args: ['clone', '--', <url>, <target>])
+      const cloneUrl = execSpy.mock.calls[0]![1][2] as string;
       expect(cloneUrl).toContain('ghp_abc123');
       expect(cloneUrl).toContain('github.com');
     });

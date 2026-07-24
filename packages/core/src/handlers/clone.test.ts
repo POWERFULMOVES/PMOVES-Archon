@@ -222,7 +222,7 @@ describe('cloneRepository', () => {
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
       // URL passed to git clone must not have trailing slash
-      expect(cloneCall?.[1]?.[1]).toBe('https://github.com/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toBe('https://github.com/owner/repo');
     });
 
     test('strips .git suffix when extracting owner/repo but keeps it in clone URL', async () => {
@@ -268,9 +268,9 @@ describe('cloneRepository', () => {
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
       // SSH converted to HTTPS
-      expect(cloneCall?.[1]?.[1]).toContain('https://github.com/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toContain('https://github.com/owner/repo');
       // No SSH format in the clone URL
-      expect(cloneCall?.[1]?.[1]).not.toContain('git@');
+      expect(cloneCall?.[1]?.[2]).not.toContain('git@');
     });
 
     test('extracts correct owner/repo from SSH URL', async () => {
@@ -296,8 +296,8 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toContain('https://gh-work/owner/repo');
-      expect(cloneCall?.[1]?.[1]).not.toContain('git@');
+      expect(cloneCall?.[1]?.[2]).toContain('https://gh-work/owner/repo');
+      expect(cloneCall?.[1]?.[2]).not.toContain('git@');
     });
 
     test('converts SSH URL with non-github host to HTTPS', async () => {
@@ -313,8 +313,8 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toContain('https://gitlab.example.com/team/project');
-      expect(cloneCall?.[1]?.[1]).not.toContain('git@');
+      expect(cloneCall?.[1]?.[2]).toContain('https://gitlab.example.com/team/project');
+      expect(cloneCall?.[1]?.[2]).not.toContain('git@');
     });
   });
 
@@ -336,7 +336,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toContain('ghp_testtoken123@github.com');
+      expect(cloneCall?.[1]?.[2]).toContain('ghp_testtoken123@github.com');
     });
 
     test('does NOT inject GH_TOKEN into non-github URLs when no forge token set', async () => {
@@ -353,7 +353,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).not.toContain('ghp_testtoken123');
+      expect(cloneCall?.[1]?.[2]).not.toContain('ghp_testtoken123');
     });
 
     test('converts SSH to HTTPS and injects GH_TOKEN', async () => {
@@ -364,7 +364,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toContain('ghp_testtoken123@github.com');
+      expect(cloneCall?.[1]?.[2]).toContain('ghp_testtoken123@github.com');
     });
   });
 
@@ -390,7 +390,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toBe('https://oauth2:glpat-testtoken456@gitlab.com/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toBe('https://oauth2:glpat-testtoken456@gitlab.com/owner/repo');
       delete process.env.GITLAB_TOKEN;
     });
 
@@ -409,7 +409,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toBe(
+      expect(cloneCall?.[1]?.[2]).toBe(
         'https://oauth2:glpat-selfhosted@gitlab.mycompany.com/owner/repo'
       );
       delete process.env.GITLAB_TOKEN;
@@ -430,7 +430,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toBe('https://gitea-token-789@gitea.myorg.com/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toBe('https://gitea-token-789@gitea.myorg.com/owner/repo');
       delete process.env.GITEA_TOKEN;
     });
 
@@ -449,7 +449,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toBe('https://forgejo-token@forgejo.example.org/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toBe('https://forgejo-token@forgejo.example.org/owner/repo');
       delete process.env.GITEA_TOKEN;
     });
 
@@ -469,7 +469,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).toBe('https://bitbucket.org/owner/repo');
+      expect(cloneCall?.[1]?.[2]).toBe('https://bitbucket.org/owner/repo');
     });
 
     test('does not leak token when forge name appears only in URL path', async () => {
@@ -487,7 +487,7 @@ describe('cloneRepository', () => {
       const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
         args => args[0] === 'git' && args[1]?.[0] === 'clone'
       );
-      expect(cloneCall?.[1]?.[1]).not.toContain('glpat-shouldnotleak');
+      expect(cloneCall?.[1]?.[2]).not.toContain('glpat-shouldnotleak');
       delete process.env.GITLAB_TOKEN;
     });
   });
@@ -1198,11 +1198,11 @@ describe('normalizeRepoUrl (via cloneRepository)', () => {
   const expectCloneTargetPath = async (url: string): Promise<string> => {
     mockCreateCodebase.mockResolvedValueOnce(makeCodebase() as ReturnType<typeof makeCodebase>);
     await cloneRepository(url);
-    // The target path is the second positional arg to `git clone <url> <path>`
+    // args are `git clone -- <url> <path>`; the target path is the last positional
     const cloneCall = (spyExecFileAsync.mock.calls as string[][]).find(
       args => args[0] === 'git' && args[1]?.[0] === 'clone'
     );
-    return cloneCall?.[1]?.[2] ?? '';
+    return cloneCall?.[1]?.[3] ?? '';
   };
 
   test('HTTPS URL produces expected project source path', async () => {
