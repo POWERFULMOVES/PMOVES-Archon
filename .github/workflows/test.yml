@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, dev, PMOVES.AI-Edition-Hardened]
 
+# Least-privilege default (CodeQL actions/missing-workflow-permissions); test +
+# docker-build only read the repo.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
