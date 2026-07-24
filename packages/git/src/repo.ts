@@ -348,7 +348,7 @@ export async function cloneRepository(
     // current callers prepend a fixed scheme, but this is a reusable library
     // entrypoint. (CodeQL js/second-order-command-line-injection)
     if (url.startsWith('-')) {
-      throw new Error(`Invalid repository URL: must not begin with '-'.`);
+      throw new Error('Invalid repository URL: it must not start with a dash.');
     }
 
     let cloneUrl = url;
