@@ -155,7 +155,7 @@ export async function updateConversation(
   id: string,
   updates: { title?: string }
 ): Promise<{ success: boolean }> {
-  return fetchJSON(`/api/conversations/${id}`, {
+  return fetchJSON(`/api/conversations/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -163,7 +163,7 @@ export async function updateConversation(
 }
 
 export async function deleteConversation(id: string): Promise<{ success: boolean }> {
-  return fetchJSON(`/api/conversations/${id}`, { method: 'DELETE' });
+  return fetchJSON(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export async function sendMessage(
@@ -227,10 +227,19 @@ export type WorkflowEventResponse = components['schemas']['WorkflowEvent'];
 
 export type WorkflowListEntry = components['schemas']['WorkflowListEntry'];
 
-export async function listWorkflows(cwd?: string): Promise<WorkflowListEntry[]> {
+export interface WorkflowListResult {
+  workflows: WorkflowListEntry[];
+  /** Repo-owner-curated names from `.archon/config.yaml`, declared order. */
+  recommended: string[];
+}
+
+export async function listWorkflows(cwd?: string): Promise<WorkflowListResult> {
   const params = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
-  const result = await fetchJSON<{ workflows: WorkflowListEntry[] }>(`/api/workflows${params}`);
-  return result.workflows;
+  const result = await fetchJSON<{
+    workflows: WorkflowListEntry[];
+    recommended: string[];
+  }>(`/api/workflows${params}`);
+  return { workflows: result.workflows, recommended: result.recommended ?? [] };
 }
 
 export async function runWorkflow(

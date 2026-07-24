@@ -19,6 +19,31 @@ function getLog(): ReturnType<typeof createLogger> {
 export type PrState = 'MERGED' | 'CLOSED' | 'OPEN' | 'NONE';
 
 /**
+ * Decide whether a git remote URL points at GitHub by parsing its HOST, not by
+ * substring-matching 'github.com' anywhere in the string. A substring check
+ * treats `https://github.com.evil.example/x.git` or `https://evil/github.com`
+ * as GitHub. (CodeQL js/incomplete-url-substring-sanitization)
+ *
+ * Handles both URL forms (`https://`, `ssh://`, `git://`) and scp-style
+ * `git@github.com:owner/repo.git` remotes, which `new URL()` cannot parse.
+ */
+function isGitHubRemote(remoteUrl: string): boolean {
+  let host = '';
+  const scpMatch = /^[^/@]+@([^:/]+):/.exec(remoteUrl);
+  if (scpMatch) {
+    host = scpMatch[1];
+  } else {
+    try {
+      host = new URL(remoteUrl).hostname;
+    } catch {
+      return false;
+    }
+  }
+  host = host.toLowerCase();
+  return host === 'github.com' || host.endsWith('.github.com');
+}
+
+/**
  * Look up the PR state for a branch in the GitHub remote.
  *
  * Returns:
@@ -53,7 +78,7 @@ export async function getPrState(
     return 'NONE';
   }
 
-  if (!remoteUrl.toLowerCase().includes('github.com')) {
+  if (!isGitHubRemote(remoteUrl)) {
     getLog().debug({ repoPath, branch, remoteUrl }, 'isolation.pr_state_github_only');
     cache?.set(branch, 'NONE');
     return 'NONE';

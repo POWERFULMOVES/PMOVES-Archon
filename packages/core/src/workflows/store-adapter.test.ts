@@ -30,6 +30,8 @@ mock.module('../db/workflows', () => ({
   failWorkflowRun: mockFailWorkflowRun,
   cancelWorkflowRun: mockCancelWorkflowRun,
   pauseWorkflowRun: mockPauseWorkflowRun,
+  claimWriteback: mock(() => Promise.resolve({ claimed: true })),
+  releaseWritebackClaim: mock(() => Promise.resolve()),
 }));
 
 const mockCreateWorkflowEvent = mock(() => Promise.resolve());
@@ -46,6 +48,20 @@ mock.module('../db/codebases', () => ({
 
 mock.module('@archon/providers', () => ({
   getAgentProvider: mock(() => ({})),
+  getRegisteredProviders: mock(() => []),
+  // Vendor → env-var map consumed by credentials/delivery (#1955). A realistic
+  // subset of the generated map (incl. HF_TOKEN, the upstream var).
+  PI_PROVIDER_ENV_VARS: {
+    anthropic: 'ANTHROPIC_API_KEY',
+    openai: 'OPENAI_API_KEY',
+    'github-copilot': 'COPILOT_GITHUB_TOKEN',
+    openrouter: 'OPENROUTER_API_KEY',
+    google: 'GEMINI_API_KEY',
+    groq: 'GROQ_API_KEY',
+    huggingface: 'HF_TOKEN',
+    'google-vertex': 'GOOGLE_CLOUD_API_KEY',
+  },
+  PI_AMBIENT_VENDORS: ['amazon-bedrock', 'google-vertex'],
 }));
 
 mock.module('../config/config-loader', () => ({
@@ -102,6 +118,8 @@ describe('createWorkflowStore', () => {
       'completeWorkflowRun',
       'failWorkflowRun',
       'pauseWorkflowRun',
+      'claimWriteback',
+      'releaseWritebackClaim',
       'cancelWorkflowRun',
       'createWorkflowEvent',
       'getCompletedDagNodeOutputs',
@@ -210,6 +228,18 @@ describe('createWorkflowDeps', () => {
       mockListDecryptedUserProviderCredentials.mockRejectedValueOnce(new Error('db gone'));
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+      expect(result).toEqual({ env: {}, files: [] });
+    });
+
+    // Regression guard for #2035: enabling the credential vault (auto-key on by
+    // default) must be ADDITIVE. An unconnected user yields an empty env bag, so
+    // their ambient ANTHROPIC_API_KEY / OPENAI_API_KEY pass through untouched —
+    // there is no scrub on the AI-provider path (unlike the GitHub org-token path).
+    // A future change that scrubbed ambient provider keys would fail this.
+    test('getUserProviderEnv is additive: unconnected user gets empty env (no ambient scrub)', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([]);
+      const deps = createWorkflowDeps();
+      const result = await deps.getUserProviderEnv?.('u-unconnected', '/tmp/art');
       expect(result).toEqual({ env: {}, files: [] });
     });
 

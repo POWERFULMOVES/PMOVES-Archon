@@ -19,8 +19,11 @@ export function sanitizeCredentials(input: string): string {
     }
   }
 
-  // Catch any URL-embedded credentials we might have missed
-  result = result.replace(/https:\/\/[^@\s]+@github\.com/g, 'https://[REDACTED]@github.com');
+  // Catch any URL-embedded credentials we might have missed. The userinfo
+  // segment is length-bounded (1–256) so this cannot degrade to polynomial
+  // backtracking on hostile input — real GitHub PAT/user:pass combos are far
+  // shorter, so redaction coverage is unchanged. (CodeQL js/polynomial-redos)
+  result = result.replace(/https:\/\/[^@\s]{1,256}@github\.com/g, 'https://[REDACTED]@github.com');
 
   return result;
 }

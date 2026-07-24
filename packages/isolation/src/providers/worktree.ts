@@ -704,9 +704,11 @@ export class WorktreeProvider implements IIsolationProvider {
   ): Promise<{ warnings: string[] }> {
     const repoPath = request.canonicalRepoPath;
 
-    // Sync uses only the configured base branch (or auto-detects via getDefaultBranch).
+    // Sync uses explicit repo config first, then the registered codebase's
+    // default branch (request.baseBranch), then auto-detects via getDefaultBranch.
     // request.fromBranch is the start-point for worktree creation, not a sync target.
-    const baseBranch = await this.syncWorkspaceBeforeCreate(repoPath, worktreeConfig?.baseBranch);
+    const preferredBaseBranch = worktreeConfig?.baseBranch ?? request.baseBranch;
+    const baseBranch = await this.syncWorkspaceBeforeCreate(repoPath, preferredBaseBranch);
 
     const override: WorktreeBaseOverride = {
       repoLocal: resolveRepoLocalOverride(worktreeConfig?.path, repoPath),
@@ -807,15 +809,15 @@ export class WorktreeProvider implements IIsolationProvider {
         { repoPath, branch: configuredBaseBranch ?? 'auto-detect' },
         'workspace_sync_starting'
       );
-      // Only hard-reset for Archon-managed clones (under ~/.archon/workspaces/).
-      // Locally-registered repos get fetch-only to avoid destroying uncommitted work.
+      // Only hard-reset for Archon-managed clones when creating isolated worktrees.
+      // Locally-registered repos keep the non-destructive fast-forward mode.
       const isManagedClone = repoPath
         .replace(/\\/g, '/')
         .startsWith(getArchonWorkspacesPath().replace(/\\/g, '/'));
       const { branch } = await syncWorkspace(
         repoPath,
         configuredBaseBranch ? toBranchName(configuredBaseBranch) : undefined,
-        { resetAfterFetch: isManagedClone }
+        { mode: isManagedClone ? 'reset' : 'fast-forward' }
       );
       getLog().debug({ repoPath, branch }, 'workspace_synced');
       return branch;
@@ -1089,10 +1091,21 @@ export class WorktreeProvider implements IIsolationProvider {
         : `origin/${baseBranch}`;
 
     try {
-      // Try to create with new branch
+      // `--no-track` keeps `branch.<name>.merge` unset; otherwise `gh pr view`
+      // (no PR number) resolves to the base branch's PR via upstream config.
       await execFileAsync(
         'git',
-        ['-C', repoPath, 'worktree', 'add', worktreePath, '-b', branchName, startPoint],
+        [
+          '-C',
+          repoPath,
+          'worktree',
+          'add',
+          '--no-track',
+          worktreePath,
+          '-b',
+          branchName,
+          startPoint,
+        ],
         {
           timeout: GIT_OPERATION_TIMEOUT_MS,
         }

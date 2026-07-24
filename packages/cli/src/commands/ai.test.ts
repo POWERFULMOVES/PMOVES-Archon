@@ -24,7 +24,14 @@ const noopLogger = () => ({
 });
 
 let enabled = true;
-const KNOWN = new Set<string>(['claude', 'codex', 'openrouter', 'anthropic', 'openai']);
+// Vendor-canonical ids (#1955); legacy claude/codex/copilot normalize onto them.
+const KNOWN = new Set<string>(['anthropic', 'openai', 'github-copilot', 'openrouter']);
+const LEGACY_ALIASES: Record<string, string> = {
+  claude: 'anthropic',
+  codex: 'openai',
+  copilot: 'github-copilot',
+};
+const normalizeVendor = (id: string): string => LEGACY_ALIASES[id] ?? id;
 
 const mockPersist = mock(
   async (_userId: string, provider: string, _apiKey: string, label?: string | null) => ({
@@ -39,12 +46,67 @@ const mockList = mock(
 );
 const mockDelete = mock(async (_userId: string, _provider: string) => {});
 
+const SUBSCRIPTION = new Set<string>(['anthropic', 'openai', 'github-copilot']);
+const mockStartOAuth = mock(
+  async (_userId: string, _provider: string) =>
+    ({
+      sessionId: 's1',
+      mode: 'device',
+      userCode: 'WXYZ',
+      verificationUri: 'https://x/dev',
+      expiresIn: 600,
+    }) as {
+      sessionId: string;
+      mode: 'manual' | 'device';
+      url?: string;
+      userCode?: string;
+      verificationUri?: string;
+      expiresIn: number;
+    }
+);
+const mockPollOAuth = mock(
+  (_sessionId: string, _userId: string, _code?: string) =>
+    ({ status: 'connected' }) as { status: 'pending' | 'connected' | 'error'; detail?: string }
+);
+
+const mockUpdateGlobalConfig = mock(async (_updates: unknown) => {});
+let loadConfigResult: {
+  assistant: string;
+  tiers?: Record<string, unknown>;
+  aliases?: Record<string, unknown>;
+} = {
+  assistant: 'claude',
+  tiers: {},
+};
+const mockLoadConfig = mock(async () => loadConfigResult);
+
+// Per-user prefs store (Phase 3 --scope user surface)
+let userPrefsResult: Record<string, unknown> = {};
+const mockGetUserAiPrefs = mock(async (_userId: string) => userPrefsResult);
+const mockSetUserTiers = mock(async (_userId: string, _patch: unknown) => {});
+const mockSetUserAliases = mock(async (_userId: string, _patch: unknown) => {});
+const mockSetUserDefault = mock(
+  async (_userId: string, _provider: string | null, _model: string | null) => {}
+);
+
 mock.module('@archon/core', () => ({
   isPerUserProviderKeysEnabled: () => enabled,
   persistProviderApiKey: mockPersist,
   listUserProviderKeys: mockList,
   deleteUserProviderKey: mockDelete,
-  KNOWN_PROVIDERS: KNOWN,
+  listConnectableVendors: () => [...KNOWN].sort(),
+  isConnectableVendor: (id: string) => KNOWN.has(normalizeVendor(id)),
+  normalizeCredentialVendor: normalizeVendor,
+  LEGACY_VENDOR_ALIASES: LEGACY_ALIASES,
+  SUBSCRIPTION_PROVIDERS: SUBSCRIPTION,
+  startOAuth: mockStartOAuth,
+  pollOAuth: mockPollOAuth,
+  loadConfig: mockLoadConfig,
+  updateGlobalConfig: mockUpdateGlobalConfig,
+  getUserAiPrefs: mockGetUserAiPrefs,
+  setUserTiers: mockSetUserTiers,
+  setUserAliases: mockSetUserAliases,
+  setUserDefault: mockSetUserDefault,
 }));
 mock.module('@archon/core/db/users', () => ({
   findOrCreateUserByPlatformIdentity: mock(async () => ({ id: 'u1' })),
@@ -52,7 +114,24 @@ mock.module('@archon/core/db/users', () => ({
 mock.module('./auth', () => ({ resolveCliUserId: () => 'cli-alice' }));
 mock.module('@archon/paths', () => ({ createLogger: noopLogger }));
 
-import { aiKeySetCommand, aiListCommand, aiLogoutCommand, aiLoginNotImplemented } from './ai';
+// @archon/providers is NOT mocked — register builtins so isRegisteredProvider()
+// (used by the tier/default commands) resolves claude/codex/etc.
+import { registerBuiltinProviders } from '@archon/providers';
+registerBuiltinProviders();
+
+import {
+  aiKeySetCommand,
+  aiListCommand,
+  aiLogoutCommand,
+  aiLoginCommand,
+  aiTierSetCommand,
+  aiTierListCommand,
+  aiTierUnsetCommand,
+  aiAliasSetCommand,
+  aiAliasListCommand,
+  aiAliasUnsetCommand,
+  aiDefaultCommand,
+} from './ai';
 
 let logSpy: ReturnType<typeof spyOn<Console, 'log'>>;
 let errSpy: ReturnType<typeof spyOn<Console, 'error'>>;
@@ -65,6 +144,14 @@ beforeEach(() => {
   mockPersist.mockClear();
   mockList.mockClear();
   mockDelete.mockClear();
+  mockUpdateGlobalConfig.mockClear();
+  mockLoadConfig.mockClear();
+  mockGetUserAiPrefs.mockClear();
+  mockSetUserTiers.mockClear();
+  mockSetUserAliases.mockClear();
+  mockSetUserDefault.mockClear();
+  userPrefsResult = {};
+  loadConfigResult = { assistant: 'claude', tiers: {} };
   logSpy = spyOn(console, 'log').mockImplementation(() => {});
   errSpy = spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -73,13 +160,15 @@ afterEach(() => {
   errSpy.mockRestore();
 });
 
-describe('gate (TOKEN_ENCRYPTION_KEY off)', () => {
+describe('gate (vault unavailable — defensive guard)', () => {
   it('every command exits 1 with guidance and never touches the store', async () => {
+    // The vault is enabled by default now (auto-key), so this branch is only
+    // reachable as a defensive guard; assert it still fails closed.
     enabled = false;
     expect(await aiKeySetCommand('openrouter')).toBe(1);
     expect(await aiListCommand()).toBe(1);
     expect(await aiLogoutCommand('openrouter')).toBe(1);
-    expect(out()).toContain('TOKEN_ENCRYPTION_KEY');
+    expect(out()).toContain('Credential vault unavailable');
     expect(mockPersist).not.toHaveBeenCalled();
     expect(mockList).not.toHaveBeenCalled();
     expect(mockDelete).not.toHaveBeenCalled();
@@ -167,9 +256,275 @@ describe('aiLogoutCommand', () => {
   });
 });
 
-describe('aiLoginNotImplemented', () => {
-  it('returns 1 and points at `key set`', () => {
-    expect(aiLoginNotImplemented()).toBe(1);
-    expect(out()).toContain('archon ai key set');
+describe('aiLoginCommand', () => {
+  beforeEach(() => {
+    mockStartOAuth.mockClear();
+    mockPollOAuth.mockClear();
+  });
+
+  it('gate off → 1, no bridge call', async () => {
+    enabled = false;
+    expect(await aiLoginCommand('claude')).toBe(1);
+    expect(mockStartOAuth).not.toHaveBeenCalled();
+  });
+
+  it('missing provider → 1', async () => {
+    expect(await aiLoginCommand(undefined)).toBe(1);
+    expect(mockStartOAuth).not.toHaveBeenCalled();
+  });
+
+  it('non-subscription provider → 1, no bridge call', async () => {
+    expect(await aiLoginCommand('openrouter')).toBe(1);
+    expect(out()).toContain('does not support subscription login');
+    expect(mockStartOAuth).not.toHaveBeenCalled();
+  });
+
+  it('device flow → connected → 0', async () => {
+    mockStartOAuth.mockResolvedValueOnce({
+      sessionId: 's1',
+      mode: 'device',
+      userCode: 'WXYZ',
+      verificationUri: 'https://x/dev',
+      expiresIn: 600,
+    });
+    mockPollOAuth.mockReturnValueOnce({ status: 'connected' });
+    expect(await aiLoginCommand('copilot')).toBe(0);
+    // Legacy 'copilot' arg normalizes to the vendor id before the bridge (#1955).
+    expect(mockStartOAuth).toHaveBeenCalledWith('u1', 'github-copilot');
+    expect(out()).toContain('WXYZ');
+  });
+
+  it('device flow → error → 1', async () => {
+    mockStartOAuth.mockResolvedValueOnce({
+      sessionId: 's1',
+      mode: 'device',
+      userCode: 'WXYZ',
+      verificationUri: 'https://x/dev',
+      expiresIn: 600,
+    });
+    mockPollOAuth.mockReturnValueOnce({ status: 'error', detail: 'denied' });
+    expect(await aiLoginCommand('copilot')).toBe(1);
+    expect(out()).toContain('denied');
+  });
+});
+
+describe('aiTierSetCommand', () => {
+  it('sets a tier → 0 and writes a clean RawAliasEntry', async () => {
+    expect(await aiTierSetCommand('large', 'claude', 'opus', 'high')).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledTimes(1);
+    const arg = mockUpdateGlobalConfig.mock.calls[0]?.[0] as { tiers: Record<string, unknown> };
+    expect(arg.tiers.large).toEqual({ provider: 'claude', model: 'opus', effort: 'high' });
+  });
+
+  it('invalid tier name → 1, no write', async () => {
+    expect(await aiTierSetCommand('huge', 'claude', 'opus', undefined)).toBe(1);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('unknown provider → 1, no write', async () => {
+    expect(await aiTierSetCommand('large', 'bogus-provider', 'x', undefined)).toBe(1);
+    expect(out()).toContain('Unknown provider');
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('invalid effort for the provider → 1, no write', async () => {
+    expect(await aiTierSetCommand('large', 'claude', 'opus', 'ultra')).toBe(1);
+    expect(out()).toContain('Invalid effort');
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('missing model → 1', async () => {
+    expect(await aiTierSetCommand('large', 'claude', undefined, undefined)).toBe(1);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('aiTierUnsetCommand', () => {
+  it('unset → 0 and writes null', async () => {
+    expect(await aiTierUnsetCommand('medium')).toBe(0);
+    const arg = mockUpdateGlobalConfig.mock.calls[0]?.[0] as { tiers: Record<string, unknown> };
+    expect(arg.tiers.medium).toBeNull();
+  });
+
+  it('invalid tier → 1, no write', async () => {
+    expect(await aiTierUnsetCommand('xl')).toBe(1);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('aiTierListCommand', () => {
+  it('lists configured tiers + built-in defaults, exits 0', async () => {
+    loadConfigResult = {
+      assistant: 'claude',
+      tiers: { large: { provider: 'codex', model: 'gpt-5.5' } },
+    };
+    expect(await aiTierListCommand(false)).toBe(0);
+    const text = out();
+    expect(text).toContain('codex/gpt-5.5'); // configured large
+    expect(text).toContain('default'); // unset tiers show their default
+  });
+
+  it('--json emits structured output', async () => {
+    loadConfigResult = { assistant: 'claude', tiers: {} };
+    expect(await aiTierListCommand(true)).toBe(0);
+    const parsed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as {
+      defaultAssistant: string;
+      tiers: unknown[];
+    };
+    expect(parsed.defaultAssistant).toBe('claude');
+    expect(Array.isArray(parsed.tiers)).toBe(true);
+  });
+});
+
+describe('aiDefaultCommand', () => {
+  it('sets the default assistant → 0', async () => {
+    expect(await aiDefaultCommand('codex', undefined)).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledWith({ defaultAssistant: 'codex' });
+  });
+
+  it('with model → also writes assistants.<provider>.model', async () => {
+    expect(await aiDefaultCommand('codex', 'gpt-5.5')).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledWith({
+      defaultAssistant: 'codex',
+      assistants: { codex: { model: 'gpt-5.5' } },
+    });
+  });
+
+  it('unknown provider → 1, no write', async () => {
+    expect(await aiDefaultCommand('nope', undefined)).toBe(1);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('--scope user (per-user prefs, Phase 3)', () => {
+  it('tier set --scope user → writes the DB store, not config.yaml', async () => {
+    expect(await aiTierSetCommand('large', 'claude', 'opus', undefined, 'user')).toBe(0);
+    expect(mockSetUserTiers).toHaveBeenCalledWith('u1', {
+      large: { provider: 'claude', model: 'opus' },
+    });
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('tier set --scope install → config.yaml, not the DB store', async () => {
+    expect(await aiTierSetCommand('large', 'claude', 'opus', undefined, 'install')).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledTimes(1);
+    expect(mockSetUserTiers).not.toHaveBeenCalled();
+  });
+
+  it('invalid --scope value → 1, no writes', async () => {
+    expect(await aiTierSetCommand('large', 'claude', 'opus', undefined, 'global')).toBe(1);
+    expect(out()).toContain("Invalid --scope 'global'");
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+    expect(mockSetUserTiers).not.toHaveBeenCalled();
+  });
+
+  it('tier unset --scope user → null patch on the DB store', async () => {
+    expect(await aiTierUnsetCommand('medium', 'user')).toBe(0);
+    expect(mockSetUserTiers).toHaveBeenCalledWith('u1', { medium: null });
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('default --scope user → per-user default provider (model pin cleared)', async () => {
+    expect(await aiDefaultCommand('codex', undefined, 'user')).toBe(0);
+    expect(mockSetUserDefault).toHaveBeenCalledWith('u1', 'codex', null);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('default <provider> <model> --scope user → atomic provider + model write', async () => {
+    expect(await aiDefaultCommand('codex', 'gpt-5.5', 'user')).toBe(0);
+    expect(mockSetUserDefault).toHaveBeenCalledWith('u1', 'codex', 'gpt-5.5');
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('tier list shows the per-user override with a [just you] marker', async () => {
+    loadConfigResult = {
+      assistant: 'claude',
+      tiers: { large: { provider: 'claude', model: 'opus' } },
+    };
+    userPrefsResult = { tiers: { large: { provider: 'codex', model: 'gpt-5.5' } } };
+    expect(await aiTierListCommand(false)).toBe(0);
+    const text = out();
+    expect(text).toContain('codex/gpt-5.5');
+    expect(text).toContain('[just you]');
+  });
+});
+
+describe('aiAliasSetCommand', () => {
+  it('sets an install alias → 0 via updateGlobalConfig', async () => {
+    expect(await aiAliasSetCommand('@fast', 'claude', 'haiku', undefined, undefined)).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledWith({
+      aliases: { '@fast': { provider: 'claude', model: 'haiku' } },
+    });
+  });
+
+  it('--scope user → DB store', async () => {
+    expect(await aiAliasSetCommand('@fast', 'claude', 'haiku', undefined, 'user')).toBe(0);
+    expect(mockSetUserAliases).toHaveBeenCalledWith('u1', {
+      '@fast': { provider: 'claude', model: 'haiku' },
+    });
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('reserved tier name → 1, no write', async () => {
+    expect(await aiAliasSetCommand('large', 'claude', 'opus', undefined, undefined)).toBe(1);
+    expect(out()).toContain('reserved');
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('missing @ prefix → 1, no write', async () => {
+    expect(await aiAliasSetCommand('fast', 'claude', 'haiku', undefined, undefined)).toBe(1);
+    expect(out()).toContain("must start with '@'");
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('unknown provider → 1, no write', async () => {
+    expect(await aiAliasSetCommand('@fast', 'bogus', 'x', undefined, undefined)).toBe(1);
+    expect(mockUpdateGlobalConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('aiAliasUnsetCommand', () => {
+  it('install scope → null patch via updateGlobalConfig', async () => {
+    expect(await aiAliasUnsetCommand('@fast', undefined)).toBe(0);
+    expect(mockUpdateGlobalConfig).toHaveBeenCalledWith({ aliases: { '@fast': null } });
+  });
+
+  it('--scope user → null patch on the DB store', async () => {
+    expect(await aiAliasUnsetCommand('@fast', 'user')).toBe(0);
+    expect(mockSetUserAliases).toHaveBeenCalledWith('u1', { '@fast': null });
+  });
+});
+
+describe('aiAliasListCommand', () => {
+  it('merges install + user aliases, user wins, marker shown', async () => {
+    loadConfigResult = {
+      assistant: 'claude',
+      aliases: {
+        '@fast': { provider: 'claude', model: 'haiku' },
+        '@deep': { provider: 'claude', model: 'opus' },
+      },
+    };
+    userPrefsResult = { aliases: { '@fast': { provider: 'codex', model: 'gpt-5-mini' } } };
+    expect(await aiAliasListCommand(false)).toBe(0);
+    const text = out();
+    expect(text).toContain('codex/gpt-5-mini');
+    expect(text).toContain('[just you]');
+    expect(text).toContain('claude/opus');
+  });
+
+  it('prints a hint when nothing is configured', async () => {
+    expect(await aiAliasListCommand(false)).toBe(0);
+    expect(out()).toContain('No @custom aliases configured');
+  });
+
+  it('--json emits structured rows', async () => {
+    loadConfigResult = {
+      assistant: 'claude',
+      aliases: { '@fast': { provider: 'claude', model: 'haiku' } },
+    };
+    expect(await aiAliasListCommand(true)).toBe(0);
+    const parsed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as { aliases: unknown[] };
+    expect(Array.isArray(parsed.aliases)).toBe(true);
+    expect(parsed.aliases.length).toBe(1);
   });
 });

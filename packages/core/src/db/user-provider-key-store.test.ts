@@ -1,7 +1,14 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
 import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockLogger } from '../test/mocks/logger';
 
 process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
+
+const mockLogger = createMockLogger();
+mock.module('@archon/paths', () => ({
+  createLogger: mock(() => mockLogger),
+  getCredentialKeyPath: mock(() => '/mock/.archon/credential-key'),
+}));
 
 const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
 mock.module('./connection', () => ({
@@ -9,7 +16,36 @@ mock.module('./connection', () => ({
   getDialect: () => mockPostgresDialect,
 }));
 
-import { encryptToken, getEncryptionKey } from '../utils/token-crypto';
+// Pi OAuth wrapper: mint a bearer from the stored blob (echoing the creds so the
+// store sees "no rotation" by default). Provider singletons stubbed with `.id`.
+const mockGetOAuthApiKey = mock(
+  async (_providerId: string, creds: Record<string, unknown>) =>
+    ({ newCredentials: Object.values(creds)[0] ?? {}, apiKey: 'minted-oauth-key' }) as {
+      newCredentials: Record<string, unknown>;
+      apiKey: string;
+    } | null
+);
+mock.module('@archon/providers/oauth', () => ({
+  getOAuthApiKey: mockGetOAuthApiKey,
+  anthropicOAuthProvider: { id: 'anthropic' },
+  openaiCodexOAuthProvider: { id: 'openaiCodex' },
+  githubCopilotOAuthProvider: { id: 'github-copilot' },
+}));
+
+// The openai vendor refreshes through the Archon-owned flow (NOT Pi's
+// getOAuthApiKey — it would drop id_token on rotation, #1924). Same contract.
+const mockMintOpenAi = mock(
+  async (creds: Record<string, unknown>) =>
+    ({ newCredentials: creds, apiKey: 'openai-minted-key' }) as {
+      newCredentials: Record<string, unknown>;
+      apiKey: string;
+    } | null
+);
+mock.module('../credentials/openai-oauth', () => ({
+  mintOpenAiOAuthApiKey: mockMintOpenAi,
+}));
+
+import { encryptToken, decryptToken, getEncryptionKey } from '../utils/token-crypto';
 import {
   saveUserProviderKey,
   getUserProviderKeyRecord,
@@ -41,11 +77,11 @@ function oauthRow(overrides: Partial<UserProviderKeyRow> = {}): UserProviderKeyR
   return {
     id: 'pk-2',
     user_id: 'user-1',
-    provider: 'codex',
+    provider: 'claude',
     kind: 'oauth',
     api_key_encrypted: null,
     oauth_creds_encrypted: encryptToken(JSON.stringify({ access: 'oauth-bearer' }), key),
-    label: 'ChatGPT subscription',
+    label: 'Claude subscription',
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
@@ -168,31 +204,158 @@ describe('user-provider-key-store', () => {
       expect(await getDecryptedProviderCredential('user-1', 'openrouter')).toBeNull();
     });
 
-    test('OAuth read path is deferred to G4 — returns null even when row exists', async () => {
+    test('oauth row → mints a usable bearer via getOAuthApiKey', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()]));
-      expect(await getDecryptedProviderCredential('user-1', 'codex')).toBeNull();
+      const cred = await getDecryptedProviderCredential('user-1', 'claude');
+      expect(cred).toEqual({
+        kind: 'oauth',
+        oauthApiKey: 'minted-oauth-key',
+        rawCreds: { access: 'oauth-bearer' },
+      });
+      expect(mockGetOAuthApiKey).toHaveBeenCalled();
+    });
+
+    test('oauth row → null when getOAuthApiKey yields no key', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()]));
+      mockGetOAuthApiKey.mockResolvedValueOnce(null);
+      expect(await getDecryptedProviderCredential('user-1', 'claude')).toBeNull();
+    });
+
+    test('oauth row → null on corrupt ciphertext (decrypt/parse fails), no refresh attempt', async () => {
+      mockGetOAuthApiKey.mockClear();
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([oauthRow({ oauth_creds_encrypted: 'not-a-valid-ciphertext' })])
+      );
+      expect(await getDecryptedProviderCredential('user-1', 'claude')).toBeNull();
+      expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
+    });
+
+    test('oauth row → null when oauth ciphertext is missing (corrupt row)', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([oauthRow({ oauth_creds_encrypted: null })])
+      );
+      expect(await getDecryptedProviderCredential('user-1', 'claude')).toBeNull();
+    });
+
+    test('oauth rotation → re-saves the new blob', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()])); // record SELECT
+      mockGetOAuthApiKey.mockResolvedValueOnce({
+        newCredentials: { access: 'ROTATED', refresh: 'r2', expires: 999 },
+        apiKey: 'minted-after-rotate',
+      });
+      const cred = await getDecryptedProviderCredential('user-1', 'claude');
+      expect(cred).toMatchObject({ kind: 'oauth', oauthApiKey: 'minted-after-rotate' });
+      // 1 SELECT (record) + 1 INSERT (resave of the rotated blob).
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      const insertParams = mockQuery.mock.calls[1]?.[1] as unknown[];
+      expect(insertParams[2]).toBe('oauth');
+      expect(insertParams[4]).not.toContain('ROTATED'); // re-encrypted, not plaintext
+    });
+
+    test('coalesces concurrent oauth reads → a single refresh (inflight Map)', async () => {
+      mockGetOAuthApiKey.mockClear();
+      mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()]));
+      mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()]));
+      const [a, b] = await Promise.all([
+        getDecryptedProviderCredential('user-1', 'claude'),
+        getDecryptedProviderCredential('user-1', 'claude'),
+      ]);
+      expect(a).toEqual(b);
+      expect(mockGetOAuthApiKey).toHaveBeenCalledTimes(1);
+    });
+
+    // ---- openai: Archon-owned refresh path (#1924) ----
+
+    function openaiBlob(): Record<string, unknown> {
+      return { access: 'oa', refresh: 'or', expires: 1, accountId: 'acct-1', id_token: 'idt-1' };
+    }
+    function openaiOauthRow(provider = 'openai'): UserProviderKeyRow {
+      return oauthRow({
+        provider,
+        oauth_creds_encrypted: encryptToken(JSON.stringify(openaiBlob()), getEncryptionKey()),
+        label: 'ChatGPT subscription',
+      });
+    }
+
+    test('openai oauth row → routes through the Archon flow, NOT Pi getOAuthApiKey (#1924)', async () => {
+      mockGetOAuthApiKey.mockClear();
+      mockMintOpenAi.mockClear();
+      mockQuery.mockResolvedValueOnce(createQueryResult([openaiOauthRow()]));
+      const cred = await getDecryptedProviderCredential('user-1', 'openai');
+      expect(cred).toEqual({
+        kind: 'oauth',
+        oauthApiKey: 'openai-minted-key',
+        rawCreds: openaiBlob(),
+      });
+      expect(mockMintOpenAi).toHaveBeenCalledTimes(1);
+      expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
+    });
+
+    test("legacy 'codex' rows normalize onto the openai path", async () => {
+      mockGetOAuthApiKey.mockClear();
+      mockMintOpenAi.mockClear();
+      mockQuery.mockResolvedValueOnce(createQueryResult([openaiOauthRow('codex')]));
+      const cred = await getDecryptedProviderCredential('user-1', 'codex');
+      expect(cred).toMatchObject({ kind: 'oauth', oauthApiKey: 'openai-minted-key' });
+      expect(mockMintOpenAi).toHaveBeenCalledTimes(1);
+      expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
+    });
+
+    test('openai rotation → re-saves a blob that still carries the id_token', async () => {
+      mockMintOpenAi.mockResolvedValueOnce({
+        newCredentials: {
+          access: 'ROTATED',
+          refresh: 'or-2',
+          expires: 999,
+          accountId: 'acct-1',
+          id_token: 'idt-rotated',
+        },
+        apiKey: 'ROTATED',
+      });
+      mockQuery.mockResolvedValueOnce(createQueryResult([openaiOauthRow()]));
+      const cred = await getDecryptedProviderCredential('user-1', 'openai');
+      expect(cred).toMatchObject({ kind: 'oauth', oauthApiKey: 'ROTATED' });
+      // 1 SELECT (record) + 1 INSERT (resave). The re-encrypted blob must keep
+      // id_token — the exact field a Pi-driven rotation would have dropped.
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      const insertParams = mockQuery.mock.calls[1]?.[1] as unknown[];
+      const resaved = JSON.parse(
+        decryptToken(insertParams[4] as string, getEncryptionKey())
+      ) as Record<string, unknown>;
+      expect(resaved.id_token).toBe('idt-rotated');
+      expect(resaved.access).toBe('ROTATED');
+    });
+
+    test('openai refresh failure → null (never throws into the inject path)', async () => {
+      mockMintOpenAi.mockRejectedValueOnce(new Error('refresh failed (401)'));
+      mockQuery.mockResolvedValueOnce(createQueryResult([openaiOauthRow()]));
+      expect(await getDecryptedProviderCredential('user-1', 'openai')).toBeNull();
     });
   });
 
   describe('listDecryptedUserProviderCredentials', () => {
-    test('decrypts api_key rows and skips OAuth rows (G4 pending)', async () => {
+    test('decrypts api_key rows AND oauth rows (oauth minted via getOAuthApiKey)', async () => {
       // First call: list metadata (api_key + oauth).
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
           { provider: 'openrouter', kind: 'api_key', label: null },
-          { provider: 'codex', kind: 'oauth', label: 'sub' },
+          { provider: 'claude', kind: 'oauth', label: 'sub' },
         ])
       );
       // Second call: getDecryptedProviderCredential for openrouter → api_key row.
       mockQuery.mockResolvedValueOnce(createQueryResult([apiKeyRow()]));
-      // Third call: getDecryptedProviderCredential for codex → oauth row (returns null).
+      // Third call: getDecryptedProviderCredential for claude → oauth row (resolves now).
       mockQuery.mockResolvedValueOnce(createQueryResult([oauthRow()]));
 
       const out = await listDecryptedUserProviderCredentials('user-1');
-      expect(out).toHaveLength(1);
-      expect(out[0]).toEqual({
-        provider: 'openrouter',
-        cred: { kind: 'api_key', apiKey: 'sk-or-test' },
+      expect(out).toHaveLength(2);
+      expect(out.find(o => o.provider === 'openrouter')?.cred).toEqual({
+        kind: 'api_key',
+        apiKey: 'sk-or-test',
+      });
+      expect(out.find(o => o.provider === 'claude')?.cred).toMatchObject({
+        kind: 'oauth',
+        oauthApiKey: 'minted-oauth-key',
       });
     });
 
@@ -225,6 +388,35 @@ describe('user-provider-key-store', () => {
       expect(out).toHaveLength(1);
       expect(out[0]!.provider).toBe('claude');
       expect(out[0]!.cred).toEqual({ kind: 'api_key', apiKey: 'sk-claude-test' });
+    });
+
+    test('logs ERROR (not WARN) when ALL per-provider fetches fail (mass_decrypt_failure)', async () => {
+      mockLogger.error.mockClear();
+      mockLogger.warn.mockClear();
+
+      // List query: two providers.
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          { provider: 'openrouter', kind: 'api_key', label: null },
+          { provider: 'anthropic', kind: 'api_key', label: null },
+        ])
+      );
+      // Both individual fetches fail — simulates key-rotation/deletion.
+      mockQuery.mockRejectedValueOnce(new Error('decrypt fail'));
+      mockQuery.mockRejectedValueOnce(new Error('decrypt fail'));
+
+      const out = await listDecryptedUserProviderCredentials('user-1');
+
+      expect(out).toHaveLength(0);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'user-1', total: 2, resolved: 0 }),
+        'user_provider_key.mass_decrypt_failure'
+      );
+      // Must NOT also emit a WARN for the same event.
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('partial_decrypt_failure')
+      );
     });
   });
 });

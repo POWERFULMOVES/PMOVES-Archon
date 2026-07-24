@@ -23,6 +23,16 @@ conversation (`createConversation` is JSON-only) — the UI shows a notice to
 re-attach once the chat exists. Drag-drop / paste / optimistic chips are tracked
 in #1913.
 
+## Chat user scoping
+
+On multi-user installs (web auth enabled) each signed-in user gets their own
+per-project conversation: the list request passes the non-enforcing `mine=true`
+filter, and the first send lazily creates a conversation attributed to the
+sender. Chat turns execute with the **sender's** per-user credentials and AI
+prefs (the conversation creator is only a fallback when no sender identity
+resolves). Solo installs see no change — without an identity, `mine=true`
+narrows nothing.
+
 ## Constraints
 
 - **Isolated.** Forbidden imports from `packages/web/src/{components,stores,contexts,routes,hooks}` and `@tanstack/react-query`, `@/lib/api` (function exports). Enforced by ESLint. Type-only imports from `@/lib/api.generated` are allowed.
@@ -49,3 +59,8 @@ Active experiment under `/console`. The original milestoned plan (`M1`–`M4`)
 that scaffolded this surface has been completed; ongoing work is driven by
 user feedback during dogfooding rather than a milestone roadmap. Issues and
 ideas land via the PR template's UX Journey section.
+
+In progress: the `builder/` subtree (Archon Studio workflow builder). PR-1
+ships the data layer — types, variant registry, round-trip model, validation —
+with no route mount; PR-2 adds the canvas UI and PR-3 wires saving through the
+workflow API. See `builder/README.md`.

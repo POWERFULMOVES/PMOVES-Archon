@@ -68,8 +68,9 @@ export class GiteaAdapter implements IPlatformAdapter {
     botMention?: string,
     options?: { retryDelayMs?: (attempt: number) => number }
   ) {
-    // Normalize base URL (remove trailing slash)
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    // Normalize base URL (remove trailing slash). Bounded 1–32 (CodeQL
+    // js/polynomial-redos): covers any real base URL, no polynomial backtracking.
+    this.baseUrl = baseUrl.replace(/\/{1,32}$/, '');
     this.token = token;
     this.webhookSecret = webhookSecret;
     this.lockManager = lockManager;

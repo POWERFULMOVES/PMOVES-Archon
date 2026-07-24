@@ -109,6 +109,8 @@ aliases:
 
 ```
 
+The `tiers:` block above is no longer hand-edit-only -- you can also set the `small`/`medium`/`large` presets from the console **AI Settings** -> **Model Tiers** panel, or from the CLI with [`archon ai tier set`](/reference/cli/#ai). Connecting your own provider API key or subscription is covered in [Per-user credentials and AI Settings](/getting-started/ai-assistants/#per-user-credentials-and-ai-settings).
+
 ## Repository Configuration
 
 Create `.archon/config.yaml` in any repository for project-specific settings:
@@ -155,6 +157,12 @@ docs:
 defaults:
   loadDefaultCommands: true   # Load app's bundled default commands at runtime
   loadDefaultWorkflows: true  # Load app's bundled default workflows at runtime
+
+# Recommended workflows for this project (declared order = pin order in the UI)
+# recommendedWorkflows:
+#   - archon-fix-github-issue
+#   - archon-idea-to-pr
+#   - archon-plan
 
 # Per-project environment variables for workflow execution (Claude SDK only)
 # Injected into the Claude subprocess env. Use the Web UI Settings panel for secrets.
@@ -236,7 +244,55 @@ worktree:
 
 **Docs path behavior:** The `docs.path` setting controls where the `$DOCS_DIR` variable points. When not configured, `$DOCS_DIR` defaults to `docs/`. Unlike `$BASE_BRANCH`, this variable always has a safe default and never throws an error. Configure it when your documentation lives outside the standard `docs/` directory (e.g., `packages/docs-web/src/content/docs`).
 
+### Recommended workflows (`recommendedWorkflows`)
+
+Repo owners curate an **ordered list of recommended workflows** that lives inside the project's own `.archon/config.yaml`. The list is surfaced **pinned on top** of both UI surfaces under a fixed "Recommended for this project" header:
+
+- The **Workflows page** grid renders the pinned cards above a divider, then the rest of the workflows below.
+- The **sidebar run dropdown** renders two native `<optgroup>` blocks: `Recommended` (declared order) and `Other workflows`.
+
+```yaml
+recommendedWorkflows:
+  - archon-fix-github-issue
+  - archon-idea-to-pr
+  - archon-plan
+```
+
+**Semantics:**
+
+- **List order = pin order.** First entry appears first in both UIs.
+- Each entry is a **workflow name** matched against the discovered set (bundled + global + project).
+- A name that matches **no** discovered workflow is **silently ignored** (debug log). The list is advisory — a stale entry never breaks discovery.
+- Search and category filters apply to **both** partitions. If filtering hides all recommended cards, the header is not rendered.
+- Key **absent or empty** → flat list, no header, no divider. Zero-config safe.
+- The list lives **per-project only** — it is not part of global config (`~/.archon/config.yaml`) and is not per-user.
+
 **Worktree path behavior:** By default, every repo's worktrees live under `~/.archon/workspaces/<owner>/<repo>/worktrees/<branch>` — outside the repo, invisible to the IDE. Set `worktree.path` to opt in to a **repo-local** layout instead: worktrees are created at `<repoRoot>/<worktree.path>/<branch>` so they show up in the file tree and editor workspace. A common choice is `.worktrees`. Because worktrees now live inside the repository tree, you should add the directory to your `.gitignore` (Archon does not modify user-owned files). The configured path must be relative to the repo root; absolute paths and paths containing `..` segments fail loudly at worktree creation rather than silently falling back.
+
+### Container isolation (folder projects)
+
+**Folder projects** run in place by default. Opt into overlay-isolated Docker execution — writes land in an overlay upper layer, not the live root — with the `--container` CLI flag, the `container.enabled` config key, or a workflow's `container.enabled` policy. Valid on both global and repo `.archon/config.yaml` (repo overrides global per-field):
+
+```yaml
+container:
+  image: archon-runner:latest # runner image tag (default: archon-runner:latest)
+  network: bridge # 'bridge' (default) or 'none' (no egress)
+  memoryMb: 4096 # hard memory cap in MiB (positive integer)
+  pidsLimit: 512 # process cap / fork-bomb guard (positive integer)
+  enabled: false # run folder projects in a container without --container (default false)
+```
+
+**Selection precedence:** `--container` flag > workflow `container.enabled` > config `container.enabled` > `false`. (A workflow `enabled: false` hard-disables relative to config, but the flag still wins.)
+
+**Write-back mode** is a per-workflow policy (not a config key). After a container run finishes, its overlay diff is reviewed before touching the live root:
+
+```yaml
+# In a workflow YAML (.archon/workflows/*.yaml):
+container:
+  write_back: approve # 'approve' (default) pauses at a write-back gate; 'auto' applies without pausing
+```
+
+**Prerequisites:** Docker, and the runner image built once with `bun run build:runner-image` (tags `archon-runner:<version>` + `:latest`). Container mode is **folder-project-only** (a repo project errors). Pausing workflows (approval/interactive gates) **are** supported — a pause `docker stop`s the container (near-zero resources while awaiting a decision) and resume rediscovers and restarts it. `$ARTIFACTS_DIR` is not mounted into the container (see [variables](/reference/variables/)). For the full flow, pause economics, and security posture, see the [Container isolation guide](/guides/container-isolation/) and `packages/isolation/docker/SECURITY.md`.
 
 ## Environment Variables
 
@@ -250,11 +306,11 @@ Environment variables override all other configuration. They are organized by ca
 | `PORT` | HTTP server listen port | `3090` (auto-allocated in worktrees) |
 | `LOG_LEVEL` | Logging verbosity (`fatal`, `error`, `warn`, `info`, `debug`, `trace`) | `info` |
 | `BOT_DISPLAY_NAME` | Bot name shown in batch-mode "starting" messages | `Archon` |
-| `DEFAULT_AI_ASSISTANT` | Default AI assistant. Must match a registered provider id — currently `claude`, `codex`, `pi`, or `copilot`. | `claude` |
+| `DEFAULT_AI_ASSISTANT` | Fallback AI assistant when no config file sets the assistant. Overridden by `defaultAssistant` in global config or `assistant` in repo config. Must match a registered provider id — currently `claude`, `codex`, `pi`, or `copilot`. | `claude` |
 | `MAX_CONCURRENT_CONVERSATIONS` | Maximum concurrent AI conversations | `10` |
 | `SESSION_RETENTION_DAYS` | Delete inactive sessions older than N days | `30` |
-| `ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING` | When set to `1`, suppresses the stderr warning emitted when `archon` is run inside a Claude Code session | -- |
 | `ARCHON_VERBOSE_BOOT` | When set to `1`, prints `[archon] loaded N keys from …` lines to stderr at boot. Also enabled by `LOG_LEVEL=debug` or `LOG_LEVEL=trace`. Silent by default to avoid interleaving with interactive command output. | -- |
+| `ARCHON_BASH_PATH` | Override the bash executable path used by `bash` nodes and loop `until_bash`. Eagerly validated at resolution time — typos surface immediately instead of as opaque ENOENTs inside the first bash-node fire. | `bash` on Linux/macOS; on Windows, the first existing of the common Git-Bash locations: `%ProgramFiles%\Git\bin\bash.exe`, `%ProgramFiles%\Git\usr\bin\bash.exe`, `%ProgramFiles(x86)%\Git\bin\bash.exe`, `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`, `%USERPROFILE%\scoop\apps\git\current\bin\bash.exe` |
 
 ### AI Providers -- Claude
 
@@ -328,7 +384,7 @@ An opt-in layer on top of [GitHub App mode](/adapters/github-app-setup/) that le
 | Variable | Description | Default |
 | --- | --- | --- |
 | `GITHUB_APP_CLIENT_ID` | The App's **Client ID** (starts with `Iv1.`/`Iv23…`, distinct from the numeric `GITHUB_APP_ID`). Required for the device flow that connects per-user identities. | -- |
-| `TOKEN_ENCRYPTION_KEY` | 64-char hex (32 bytes; `openssl rand -hex 32`) used to encrypt stored per-user tokens at rest (AES-256-GCM). Setting it with `GITHUB_APP_ID` enables per-user mode. **Rotating it invalidates all stored user tokens** (users must reconnect). | -- |
+| `TOKEN_ENCRYPTION_KEY` | 64-char hex (32 bytes; `openssl rand -hex 32`) used to encrypt stored per-user tokens at rest (AES-256-GCM). **Per-user GitHub identity** requires this + `GITHUB_APP_ID`. **AI credential vault** auto-provisions its own key at `~/.archon/credential-key` — this env var overrides that file on managed/multi-user deploys. **Rotating it invalidates all stored user credentials** — everyone must reconnect. | -- |
 | `ARCHON_ALLOW_ORG_GITHUB_TOKEN_FALLBACK` | When `false` (default), a workflow run by an **unconnected** user has `GH_TOKEN`/`GITHUB_TOKEN` scrubbed (so `gh`/`git` fail) rather than silently using the shared org/bot token. Set `true` to opt back into the shared token. | `false` |
 | `ARCHON_WEB_AUTH_HEADER` | Name of the reverse-proxy-set header Archon trusts to identify the web user (reverse-proxy fallback; still honored alongside Better Auth web login below). Only safe when Archon is reachable **solely** through the proxy on a loopback bind — on a public bind the header is forgeable. Absent header → unattributed (never elevated). | `X-Archon-User` |
 
@@ -398,7 +454,7 @@ Signup uses email + password (no email verification by default). **Signup postur
 
 ### Telemetry
 
-Archon sends a few anonymous events — `archon_started` (once per process), `workflow_invoked` (workflow start), and `workflow_completed`/`workflow_failed` (run outcome). Categorical only: workflow name (real for bundled workflows, `"custom"` for your own), platform, provider id (model id on `workflow_invoked`), node shape, outcome/duration, OS/arch/version, and a random install UUID. No code, prompts, paths, IP, geo, or error text. Any one of the variables below disables it. See `archon telemetry status` to inspect the live state.
+Archon sends a few anonymous events — `archon_started` (once per process), `archon_active` (daily server heartbeat), `chat_turn_handled` (direct chat turn — platform, provider, model, duration, and usage totals; never message content), `workflow_invoked` (workflow start), `workflow_completed`/`workflow_failed` (run outcome), `workflow_approval_resolved` (binary approve/reject), and `codebase_registered` (pure count — no name/path/URL). Categorical only: workflow name (real for bundled workflows, `"custom"` for your own), platform, provider id (model id on `workflow_invoked`), node shape and feature flags, outcome/duration, aggregate usage totals (tokens/cost/loop iterations), a fixed-enum failure class (never error text), deployment shape (adapter/db/auth booleans), OS/arch/version, and a random install UUID. No code, prompts, paths, IP, geo, or error text. Any one of the variables below disables it. See `archon telemetry status` to inspect the live state.
 
 | Variable | Description | Default |
 | --- | --- | --- |

@@ -8,11 +8,13 @@
  * Deliberately far thinner than `github-auth/connect-service.ts` — there is no
  * external identity to fetch and no identity to link / conflict-guard. The row
  * is keyed `(user_id, provider)` and the upsert is idempotent, so re-connecting
- * a provider just replaces the stored key. OAuth subscription persistence lands
- * with the Pi OAuth bridge in PR-3.
+ * a provider just replaces the stored key. `persistProviderOAuth` (below) stores
+ * the subscription credential blob the oauth-bridge mints.
  */
 import { createLogger } from '@archon/paths';
-import { KNOWN_PROVIDERS } from './delivery';
+import { normalizeCredentialVendor, type OAuthCredentials } from './delivery';
+import { isConnectableVendor, listConnectableVendors } from './catalog';
+import { SUBSCRIPTION_PROVIDERS } from './oauth-providers';
 import { saveUserProviderKey } from '../db/user-provider-key-store';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -42,10 +44,12 @@ export interface PersistProviderApiKeyResult {
 }
 
 /**
- * Validate and store a user's API key for `provider`. Throws
- * {@link InvalidProviderKeyError} (before any DB write) when the key is blank or
- * the provider is not in {@link KNOWN_PROVIDERS}; any other throw is a storage
- * failure. The plaintext key is encrypted inside the store and is never logged.
+ * Validate and store a user's API key for a credential vendor. Accepts legacy
+ * agent-keyed ids (`claude`/`codex`/`copilot`) and stores under the
+ * vendor-canonical id. Throws {@link InvalidProviderKeyError} (before any DB
+ * write) when the key is blank or the vendor is not in the registry-derived
+ * connectable catalog; any other throw is a storage failure. The plaintext key
+ * is encrypted inside the store and is never logged.
  */
 export async function persistProviderApiKey(
   userId: string,
@@ -57,20 +61,58 @@ export async function persistProviderApiKey(
   if (!trimmedKey) {
     throw new InvalidProviderKeyError('API key must not be empty.');
   }
-  if (!KNOWN_PROVIDERS.has(provider)) {
+  const vendor = normalizeCredentialVendor(provider);
+  if (!isConnectableVendor(vendor)) {
     throw new InvalidProviderKeyError(
-      `Unknown provider '${provider}'. Known: ${[...KNOWN_PROVIDERS].sort().join(', ')}.`
+      `Unknown provider '${provider}'. Known: ${listConnectableVendors().join(', ')}.`
     );
   }
   const normalizedLabel = label?.trim() || null;
   await saveUserProviderKey({
     userId,
-    provider,
+    provider: vendor,
     kind: 'api_key',
     apiKey: trimmedKey,
     label: normalizedLabel,
   });
-  // Never log the key value — provider + user only.
-  getLog().info({ userId, provider }, 'provider_api_key.persisted');
-  return { provider, kind: 'api_key', label: normalizedLabel };
+  // Never log the key value — vendor + user only.
+  getLog().info({ userId, provider: vendor }, 'provider_api_key.persisted');
+  return { provider: vendor, kind: 'api_key', label: normalizedLabel };
+}
+
+/** Secret-free result of a successful subscription (OAuth) connect. */
+export interface PersistProviderOAuthResult {
+  provider: string;
+  kind: 'oauth';
+}
+
+/**
+ * Store a user's OAuth subscription credential blob for a vendor. Accepts
+ * legacy agent-keyed ids and stores under the vendor-canonical id. Throws
+ * {@link InvalidProviderKeyError} when the vendor has no subscription flow
+ * (`anthropic`/`openai`/`github-copilot` today). The blob is encrypted inside
+ * the store and never logged; it's refreshed on read by
+ * `getDecryptedProviderCredential`.
+ */
+export async function persistProviderOAuth(
+  userId: string,
+  provider: string,
+  oauthCreds: OAuthCredentials
+): Promise<PersistProviderOAuthResult> {
+  const vendor = normalizeCredentialVendor(provider);
+  if (!SUBSCRIPTION_PROVIDERS.has(vendor)) {
+    throw new InvalidProviderKeyError(
+      `Provider '${provider}' does not support subscription login. ` +
+        `Subscription providers: ${[...SUBSCRIPTION_PROVIDERS].sort().join(', ')}.`
+    );
+  }
+  await saveUserProviderKey({
+    userId,
+    provider: vendor,
+    kind: 'oauth',
+    oauthCreds,
+    label: 'subscription',
+  });
+  getLog().info({ userId, provider: vendor }, 'provider_oauth.persisted');
+  return { provider: vendor, kind: 'oauth' };
 }

@@ -49,11 +49,11 @@ mock.module('@archon/core/db/users', () => ({
 }));
 
 // --- Provider-key store/connect surface (the unit under test, via mocked core) ---
+// Vendor-canonical ids (#1955) — legacy claude/codex/copilot are aliases.
 const KNOWN = new Set<string>([
-  'claude',
-  'codex',
   'anthropic',
   'openai',
+  'github-copilot',
   'google',
   'groq',
   'mistral',
@@ -62,6 +62,12 @@ const KNOWN = new Set<string>([
   'openrouter',
   'huggingface',
 ]);
+const LEGACY_ALIASES: Record<string, string> = {
+  claude: 'anthropic',
+  codex: 'openai',
+  copilot: 'github-copilot',
+};
+const normalizeVendor = (id: string): string => LEGACY_ALIASES[id] ?? id;
 
 // Mirror core's typed validation error so the route's `instanceof` check (400 vs
 // opaque 500) is exercised: validation throws this; storage failures throw plain.
@@ -69,6 +75,15 @@ class InvalidProviderKeyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidProviderKeyError';
+  }
+}
+
+// Mirror core's retryable port-wedge error so the oauth/start route's
+// `instanceof` check (actionable 503 vs opaque 500) is exercised (#1963).
+class OAuthCallbackPortBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OAuthCallbackPortBusyError';
   }
 }
 
@@ -99,6 +114,18 @@ const mockDelete = mock(async (userId: string, provider: string) => {
   savedKeys = savedKeys.filter(k => !(k.userId === userId && k.provider === provider));
 });
 
+// Vendor-keyed like production (#1955); all three subscription vendors (#1924 lifted).
+const SUBSCRIPTION = new Set<string>(['anthropic', 'openai', 'github-copilot']);
+const mockStartOAuth = mock(async (_userId: string, provider: string) => ({
+  sessionId: 'sess-1',
+  mode: 'manual' as const,
+  url: `https://auth/${provider}`,
+  expiresIn: 600,
+}));
+const mockPollOAuth = mock((_sessionId: string, _userId: string, _code?: string) => ({
+  status: 'pending' as const,
+}));
+
 mock.module('@archon/core', () => ({
   handleMessage: mock(async () => {}),
   getDatabaseType: () => 'postgresql',
@@ -107,6 +134,7 @@ mock.module('@archon/core', () => ({
   registerRepository: mock(async () => ({ codebaseId: 'x', alreadyExisted: false })),
   ConversationNotFoundError: class ConversationNotFoundError extends Error {},
   generateAndSetTitle: mock(async () => {}),
+  resolveTitleRequest: mock(async () => ({ provider: 'claude', options: {} })),
   isPerUserGitHubEnabled: () => false,
   getArchonWorkspacesPath: () => '/tmp/.archon/workspaces',
   createLogger: noopLogger,
@@ -116,7 +144,21 @@ mock.module('@archon/core', () => ({
   InvalidProviderKeyError,
   listUserProviderKeys: mockList,
   deleteUserProviderKey: mockDelete,
-  KNOWN_PROVIDERS: KNOWN,
+  listConnectableVendors: () => [...KNOWN].sort(),
+  buildAgentCredentialMatrix: (connections: { provider: string; kind: string }[]) => [
+    {
+      id: 'claude',
+      displayName: 'Claude (Anthropic)',
+      catalog: 'static',
+      ready: connections.some(c => normalizeVendor(c.provider) === 'anthropic'),
+      credentials: [],
+    },
+  ],
+  normalizeCredentialVendor: normalizeVendor,
+  SUBSCRIPTION_PROVIDERS: SUBSCRIPTION,
+  startOAuth: mockStartOAuth,
+  pollOAuth: mockPollOAuth,
+  OAuthCallbackPortBusyError,
 }));
 
 mock.module('@archon/paths', () => ({
@@ -233,19 +275,46 @@ describe('GET /api/auth/providers', () => {
     expect(body.enabled).toBe(true);
     expect(body.connections).toEqual([]);
     expect(body.available).toContain('openrouter');
-    expect(body.available).toContain('claude');
+    expect(body.available).toContain('anthropic'); // vendor-canonical since #1955
     // available is sorted
     expect([...body.available]).toEqual([...body.available].sort());
   });
 
-  test('gate off → { enabled:false }, available still present, DB never queried', async () => {
+  test('gate off → { enabled:false }, available + agents still present, DB never queried', async () => {
     keysEnabled = false;
     const res = await makeApp().request('/api/auth/providers', { headers: ALICE });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { enabled: boolean; available: string[] };
+    const body = (await res.json()) as {
+      enabled: boolean;
+      available: string[];
+      agents: { id: string; catalog: string; ready: boolean }[];
+    };
     expect(body.enabled).toBe(false);
     expect(body.available.length).toBeGreaterThan(0);
+    // The agent matrix renders even without per-user keys (solo installs rely
+    // on its installEnv/ambient detection) — built from an empty connection set.
+    expect(body.agents).toEqual([
+      {
+        id: 'claude',
+        displayName: 'Claude (Anthropic)',
+        catalog: 'static',
+        ready: false,
+        credentials: [],
+      },
+    ]);
     expect(mockList).not.toHaveBeenCalled();
+  });
+
+  test('agents matrix reflects the connected set (ready flips with a connection)', async () => {
+    savedKeys.push({
+      userId: 'user-from-alice',
+      provider: 'anthropic',
+      apiKey: 'sk-x',
+      label: null,
+    });
+    const res = await makeApp().request('/api/auth/providers', { headers: ALICE });
+    const body = (await res.json()) as { agents: { id: string; ready: boolean }[] };
+    expect(body.agents.find(a => a.id === 'claude')?.ready).toBe(true);
   });
 
   test('lists connected providers as metadata only (no secret fields)', async () => {
@@ -373,6 +442,15 @@ describe('DELETE /api/auth/providers/:provider', () => {
     expect(res2.status).toBe(200);
   });
 
+  test("legacy 'claude' id deletes the migrated 'anthropic' row", async () => {
+    const res = await makeApp().request('/api/auth/providers/claude', {
+      method: 'DELETE',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(200);
+    expect(mockDelete).toHaveBeenCalledWith('user-from-alice', 'anthropic');
+  });
+
   test('gate off → 404', async () => {
     keysEnabled = false;
     const res = await makeApp().request('/api/auth/providers/openrouter', {
@@ -384,6 +462,124 @@ describe('DELETE /api/auth/providers/:provider', () => {
 
   test('no identity → 401', async () => {
     const res = await makeApp().request('/api/auth/providers/openrouter', { method: 'DELETE' });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/auth/providers/:provider/oauth/start', () => {
+  beforeEach(() => {
+    authInstance = null;
+    keysEnabled = true;
+    mockStartOAuth.mockClear();
+  });
+
+  test('starts a session for a subscription vendor', async () => {
+    const res = await makeApp().request('/api/auth/providers/anthropic/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ sessionId: 'sess-1', mode: 'manual' });
+    expect(mockStartOAuth).toHaveBeenCalledWith('user-from-alice', 'anthropic');
+  });
+
+  test("legacy 'claude' id normalizes to 'anthropic' (regression: raw-param 400)", async () => {
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(200);
+    expect(mockStartOAuth).toHaveBeenCalledWith('user-from-alice', 'anthropic');
+  });
+
+  test('non-subscription provider → 400, bridge not started', async () => {
+    const res = await makeApp().request('/api/auth/providers/openrouter/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(400);
+    expect(mockStartOAuth).not.toHaveBeenCalled();
+  });
+
+  test('gate off → 404', async () => {
+    keysEnabled = false;
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test('bridge throws → opaque 500 (no internal message leak)', async () => {
+    mockStartOAuth.mockRejectedValueOnce(new Error('callback server at 127.0.0.1:53999 failed'));
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain('53999');
+  });
+
+  test('held callback port → 503 with the actionable message (#1963)', async () => {
+    mockStartOAuth.mockRejectedValueOnce(
+      new OAuthCallbackPortBusyError(
+        "A previous 'anthropic' login attempt is still holding the OAuth callback port. " +
+          'Wait a few seconds and retry; if it persists, restart the Archon server.'
+      )
+    );
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/start', {
+      method: 'POST',
+      headers: ALICE,
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('callback port');
+    expect(body.error).toContain('retry');
+  });
+
+  test('no identity → 401', async () => {
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/start', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/auth/providers/:provider/oauth/poll', () => {
+  beforeEach(() => {
+    authInstance = null;
+    keysEnabled = true;
+    mockPollOAuth.mockClear();
+  });
+
+  test('relays the bridge poll status (bound to the caller userId)', async () => {
+    mockPollOAuth.mockReturnValueOnce({ status: 'connected' });
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/poll', {
+      method: 'POST',
+      headers: { ...ALICE, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-1', code: 'CODE' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'connected' });
+    expect(mockPollOAuth).toHaveBeenCalledWith('sess-1', 'user-from-alice', 'CODE');
+  });
+
+  test('gate off → 404', async () => {
+    keysEnabled = false;
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/poll', {
+      method: 'POST',
+      headers: { ...ALICE, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's' }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test('no identity → 401', async () => {
+    const res = await makeApp().request('/api/auth/providers/claude/oauth/poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's' }),
+    });
     expect(res.status).toBe(401);
   });
 });

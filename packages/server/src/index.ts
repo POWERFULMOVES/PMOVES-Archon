@@ -8,6 +8,12 @@
 // when `bun run dev:server` is run from inside a target repo those keys leak
 // into the server process. stripCwdEnv() removes them before ~/.archon/.env loads.
 import '@archon/paths/strip-cwd-env-boot';
+// Pure env→bool boot helper (zero deps) — safe to import before the heavier
+// application imports below. Decides the Claude global-auth sentinel posture.
+import {
+  shouldDefaultClaudeGlobalAuth,
+  hasClaudeBootAuthPosture,
+} from './boot/claude-auth-posture';
 
 // Load environment variables — after CWD stripping, before application imports.
 import { config } from 'dotenv';
@@ -35,23 +41,24 @@ if (envPath) {
 import { loadArchonEnv } from '@archon/paths/env-loader';
 loadArchonEnv(process.cwd());
 
-// CLAUDECODE=1 warning is emitted inside stripCwdEnv() (boot import above)
-// BEFORE the marker is deleted from process.env. No duplicate warning here.
-
-// Smart default: use Claude Code's built-in OAuth if no explicit credentials
-if (
-  !process.env.CLAUDE_API_KEY &&
-  !process.env.CLAUDE_CODE_OAUTH_TOKEN &&
-  process.env.CLAUDE_USE_GLOBAL_AUTH === undefined
-) {
+// Smart default: fall back to Claude Code's built-in OAuth (`claude /login`)
+// ONLY for solo installs with no explicit credentials. Per-user installs
+// (TOKEN_ENCRYPTION_KEY) deliver Claude auth per-request, so the global-auth
+// sentinel is skipped there — it's misleading, not load-bearing (#1983).
+if (shouldDefaultClaudeGlobalAuth(process.env)) {
   process.env.CLAUDE_USE_GLOBAL_AUTH = 'true';
 }
 
 import { registerBuiltinProviders, registerCommunityProviders } from '@archon/providers';
+import { getVendorCatalog } from '@archon/core';
 
 // Bootstrap provider registry before any provider lookups
 registerBuiltinProviders();
 registerCommunityProviders();
+// Fail fast at boot (not on first API request) if any registration declares a
+// credential vendor the delivery map can't deliver — that's a provider bug
+// that must block startup, not surface as a runtime 500 (#1955).
+getVendorCatalog();
 
 import { OpenAPIHono, z } from '@hono/zod-openapi';
 import { validationErrorHook } from './routes/openapi-defaults';
@@ -71,6 +78,7 @@ import { WorkflowEventBridge } from './adapters/web/workflow-bridge';
 import { DashboardEventPoller } from './adapters/web/dashboard-event-poller';
 import { PgNotifyListener } from './adapters/web/pg-notify-listener';
 import { registerApiRoutes } from './routes/api';
+import { registerGithubWebhookRoute } from './routes/webhooks';
 import {
   handleMessage,
   pool,
@@ -86,6 +94,8 @@ import {
   loadAppPrivateKey,
   registerGitHubAppAuthProvider,
   isPerUserGitHubEnabled,
+  isPerUserProviderKeysEnabled,
+  getDatabaseType,
   assertEncryptionKeyAtBoot,
   assertProviderKeysKeyAtBoot,
   getDecryptedAccessToken,
@@ -101,6 +111,7 @@ import {
   validateAppDefaultsPaths,
   shutdownTelemetry,
   captureArchonStarted,
+  captureArchonActive,
 } from '@archon/paths';
 import { selectGitHubAuthMode, parseGitCredentialPath } from './github-auth-bootstrap';
 import {
@@ -213,7 +224,35 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   getLog().info('server_starting');
   // Anonymous once-per-boot startup event (self-gates on opt-out). Flushed by
   // the shutdownTelemetry() call in the SIGINT/SIGTERM shutdown handler.
-  captureArchonStarted({ surface: 'server' });
+  // Deployment shape is categorical only — booleans/enums derived from which
+  // integrations are configured, never the config values themselves. The
+  // adapter gates mirror the env checks the adapter-init section below uses
+  // (loadArchonEnv() ran at module load, so process.env is final here).
+  const deploymentShape = {
+    dbKind: getDatabaseType(),
+    webAuthEnabled: isWebAuthEnabled(),
+    multiUser: isPerUserProviderKeysEnabled(),
+    githubAuthMode: selectGitHubAuthMode(process.env).kind,
+    adapterSlack: Boolean(process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN),
+    adapterTelegram: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+    adapterDiscord: Boolean(process.env.DISCORD_BOT_TOKEN),
+    adapterGitea: Boolean(
+      process.env.GITEA_URL && process.env.GITEA_TOKEN && process.env.GITEA_WEBHOOK_SECRET
+    ),
+    adapterGitlab: Boolean(process.env.GITLAB_TOKEN && process.env.GITLAB_WEBHOOK_SECRET),
+  };
+  captureArchonStarted({ surface: 'server', ...deploymentShape });
+
+  // Daily heartbeat so long-running servers stay visible in active-install
+  // metrics (a boot-only event undercounts server installs after day one).
+  // unref() so the timer never keeps the process alive on shutdown.
+  // captureArchonActive is synchronous fire-and-forget (errors swallowed
+  // internally) — if it ever becomes async, this callback must not return
+  // its promise unhandled.
+  const TELEMETRY_HEARTBEAT_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  setInterval(() => {
+    captureArchonActive({ surface: 'server', ...deploymentShape });
+  }, TELEMETRY_HEARTBEAT_INTERVAL_MS).unref();
 
   // Phase 2: validate the encryption key the moment per-user provider keys are
   // enabled, regardless of GitHub App configuration. TOKEN_ENCRYPTION_KEY alone
@@ -225,14 +264,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Database auto-detected: SQLite (default) or PostgreSQL (if DATABASE_URL set)
   // No required environment variables - SQLite works out of the box
 
-  // Validate AI assistant credentials (warn if missing, don't fail)
-  // Using || intentionally: empty string should be treated as missing credential
-  // CLAUDE_USE_GLOBAL_AUTH=true: Use Claude Code's built-in OAuth (from `claude /login`)
-  const hasClaudeCredentials = Boolean(
-    process.env.CLAUDE_API_KEY ||
-    process.env.CLAUDE_CODE_OAUTH_TOKEN ||
-    process.env.CLAUDE_USE_GLOBAL_AUTH
-  );
+  // Validate AI assistant credentials (warn if missing, don't fail).
+  // A per-user install (TOKEN_ENCRYPTION_KEY) is a valid posture even with no
+  // shared Claude key — auth is delivered per request from the encrypted store,
+  // so it must NOT trip the no-credentials exit (#1983).
+  const hasClaudeCredentials = hasClaudeBootAuthPosture(process.env);
   const hasCodexCredentials = process.env.CODEX_ID_TOKEN && process.env.CODEX_ACCESS_TOKEN;
 
   if (!hasClaudeCredentials && !hasCodexCredentials) {
@@ -688,32 +724,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // GitHub webhook endpoint
   if (github) {
-    app.post('/webhooks/github', async c => {
-      const eventType = c.req.header('x-github-event');
-      const deliveryId = c.req.header('x-github-delivery');
-
-      try {
-        const signature = c.req.header('x-hub-signature-256');
-        if (!signature) {
-          return c.json({ error: 'Missing signature header' }, 400);
-        }
-
-        // CRITICAL: Use c.req.text() for raw body (signature verification)
-        const payload = await c.req.text();
-
-        // Process async (fire-and-forget for fast webhook response)
-        // Note: github.handleWebhook() has internal error handling that notifies users
-        // This catch is a fallback for truly unexpected errors (e.g., signature verification bugs)
-        github.handleWebhook(payload, signature).catch((error: unknown) => {
-          getLog().error({ err: error, eventType, deliveryId }, 'webhook_processing_error');
-        });
-
-        return c.text('OK', 200);
-      } catch (error) {
-        getLog().error({ err: error, eventType, deliveryId }, 'webhook_endpoint_error');
-        return c.json({ error: 'Internal server error' }, 500);
-      }
-    });
+    registerGithubWebhookRoute(app, github);
     getLog().info('github_webhook_registered');
   }
 

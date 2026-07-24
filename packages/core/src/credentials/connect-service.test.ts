@@ -1,7 +1,13 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
+import { registerBuiltinProviders, registerCommunityProviders } from '@archon/providers';
 import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
 
 process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
+
+// Connect-time validation derives the vendor catalog from the provider
+// registry (#1955) — bootstrap it like process entrypoints do.
+registerBuiltinProviders();
+registerCommunityProviders();
 
 // Mirror the store test harness: mock the DB connection so saveUserProviderKey
 // runs for real (encrypting the key) against an inspectable query mock.
@@ -11,7 +17,7 @@ mock.module('../db/connection', () => ({
   getDialect: () => mockPostgresDialect,
 }));
 
-import { persistProviderApiKey } from './connect-service';
+import { persistProviderApiKey, persistProviderOAuth } from './connect-service';
 
 describe('persistProviderApiKey', () => {
   beforeEach(() => {
@@ -53,10 +59,41 @@ describe('persistProviderApiKey', () => {
     expect(params[5]).toBe('Personal');
   });
 
-  test('normalizes a blank label to null', async () => {
+  test('normalizes a blank label to null and a legacy id to its vendor id', async () => {
     const result = await persistProviderApiKey('user-1', 'claude', 'sk-ant', '   ');
     expect(result.label).toBeNull();
+    expect(result.provider).toBe('anthropic'); // legacy 'claude' stored vendor-keyed (#1955)
     const params = mockQuery.mock.calls[0]?.[1] as unknown[];
+    expect(params[1]).toBe('anthropic');
     expect(params[5]).toBeNull();
+  });
+});
+
+describe('persistProviderOAuth', () => {
+  beforeEach(() => {
+    mockQuery.mockClear();
+  });
+
+  test('rejects a non-subscription provider (no DB write)', async () => {
+    await expect(persistProviderOAuth('user-1', 'openrouter', { access: 'x' })).rejects.toThrow(
+      /does not support subscription login/
+    );
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('stores an encrypted oauth blob for a subscription provider (vendor-keyed)', async () => {
+    const result = await persistProviderOAuth('user-1', 'claude', {
+      access: 'a',
+      refresh: 'r',
+      expires: 123,
+    });
+    expect(result).toEqual({ provider: 'anthropic', kind: 'oauth' });
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    // params: [userId, provider, kind, api_key_encrypted, oauth_creds_encrypted, label]
+    const params = mockQuery.mock.calls[0]?.[1] as unknown[];
+    expect(params[2]).toBe('oauth');
+    expect(params[3]).toBeNull(); // no api key
+    expect(typeof params[4]).toBe('string'); // encrypted oauth blob
+    expect(params[4]).not.toContain('access'); // ciphertext, not plaintext JSON
   });
 });
