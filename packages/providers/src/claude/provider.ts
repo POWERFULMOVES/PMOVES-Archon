@@ -34,7 +34,8 @@ import {
   type HookCallback,
   type HookCallbackMatcher,
   type SDKAssistantMessageError,
-  type TerminalReason,
+  type SDKResultMessage,
+  type ModelUsage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type {
   IAgentProvider,
@@ -86,6 +87,44 @@ function normalizeClaudeUsage(usage?: {
     output,
     ...(typeof total === 'number' ? { total } : {}),
   };
+}
+
+/**
+ * Pick the concrete model that did the bulk of a turn's work from the SDK's
+ * per-model usage record.
+ *
+ * More than one entry is reachable for a single turn: a subagent pinned to
+ * another model via `agents:`, or a `fallbackModel` takeover. Key insertion
+ * order happens to put the main model first today, but nothing in the SDK
+ * guarantees it — so select by greatest output-token count (the main model
+ * produces the bulk of the output) and WARN whenever the record is ambiguous,
+ * so a multi-model turn is visible instead of silently collapsed.
+ *
+ * `modelUsage` is non-optional in the SDK types but arrives over an IPC
+ * boundary, so the absent/empty cases stay guarded — absence yields undefined
+ * and the caller omits `resolvedModel` entirely rather than inventing a value.
+ * On a tie (or output counts the SDK didn't send) the first key wins, which is
+ * exactly the pre-#2314 behavior — safe, and the warning still fires.
+ */
+function selectResolvedModelId(
+  modelUsage: Record<string, ModelUsage> | undefined
+): string | undefined {
+  if (!modelUsage) return undefined;
+  const entries = Object.entries(modelUsage);
+  if (entries.length === 0) return undefined;
+  if (entries.length === 1) return entries[0][0];
+
+  const outputTokensOf = (usage: ModelUsage): number =>
+    Number.isFinite(usage.outputTokens) ? usage.outputTokens : 0;
+  let selected = entries[0];
+  for (const entry of entries.slice(1)) {
+    if (outputTokensOf(entry[1]) > outputTokensOf(selected[1])) selected = entry;
+  }
+  getLog().warn(
+    { models: entries.map(([id]) => id), selected: selected[0] },
+    'claude.resolved_model_ambiguous'
+  );
+  return selected[0];
 }
 
 /**
@@ -600,6 +639,7 @@ interface ToolResultEntry {
   toolName: string;
   toolOutput: string;
   toolCallId?: string;
+  toolOutcome: 'success' | 'error' | 'interrupted';
 }
 
 /** Bun-runnable JS extensions. `.ts`/`.tsx`/`.jsx` are excluded — the SDK has
@@ -702,7 +742,10 @@ function buildBaseClaudeOptions(
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     systemPrompt: requestOptions?.systemPrompt ?? { type: 'preset', preset: 'claude_code' },
-    settingSources: assistantDefaults.settingSources ?? ['project', 'user'],
+    // Per-node override wins over the assistant-level default; the final
+    // fallback stays ['project', 'user'] (the SDK-loading default Archon ships).
+    settingSources: requestOptions?.nodeConfig?.settingSources ??
+      assistantDefaults.settingSources ?? ['project', 'user'],
     hooks: buildToolCaptureHooks(toolResultQueue),
     stderr: (data: string): void => {
       const output = data.trim();
@@ -754,6 +797,7 @@ function buildToolCaptureHooks(toolResultQueue: ToolResultEntry[]): Options['hoo
                 toolName,
                 toolOutput: output.length > maxLen ? output.slice(0, maxLen) + '...' : output,
                 ...(toolUseId !== undefined ? { toolCallId: toolUseId } : {}),
+                toolOutcome: 'success',
               });
             } catch (e) {
               getLog().error({ err: e, input }, 'claude.post_tool_use_hook_error');
@@ -781,6 +825,7 @@ function buildToolCaptureHooks(toolResultQueue: ToolResultEntry[]): Options['hoo
                 toolName,
                 toolOutput: `${prefix}: ${errorText}`,
                 ...(toolUseId !== undefined ? { toolCallId: toolUseId } : {}),
+                toolOutcome: isInterrupt ? 'interrupted' : 'error',
               });
             } catch (e) {
               getLog().error({ err: e, input }, 'claude.post_tool_use_failure_hook_error');
@@ -819,6 +864,7 @@ async function* streamClaudeMessages(
           toolName: tr.toolName,
           toolOutput: tr.toolOutput,
           ...(tr.toolCallId !== undefined ? { toolCallId: tr.toolCallId } : {}),
+          toolOutcome: tr.toolOutcome,
         };
       }
     }
@@ -988,40 +1034,19 @@ async function* streamClaudeMessages(
       getLog().warn({ rateLimitInfo: rateLimitMsg.rate_limit_info }, 'claude.rate_limit_event');
       yield { type: 'rate_limit', rateLimitInfo: rateLimitMsg.rate_limit_info ?? {} };
     } else if (event.type === 'result') {
-      const resultMsg = msg as {
-        session_id?: string;
-        is_error?: boolean;
-        subtype?: string;
-        usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
-        structured_output?: unknown;
-        total_cost_usd?: number;
-        stop_reason?: string | null;
-        num_turns?: number;
-        errors?: string[];
-        result?: string;
-        terminal_reason?: TerminalReason;
-        api_error_status?: number | null;
-        model_usage?: Record<
-          string,
-          {
-            input_tokens: number;
-            output_tokens: number;
-            cache_read_input_tokens?: number;
-            cache_creation_input_tokens?: number;
-          }
-        >;
-      };
+      const resultMsg = msg as SDKResultMessage;
+      const resolvedModelId = selectResolvedModelId(resultMsg.modelUsage);
       // The terminal result resolves any recorded synthetic error message.
       const syntheticError = pendingSdkError;
       pendingSdkError = undefined;
       const tokens = normalizeClaudeUsage(resultMsg.usage);
-      const sdkErrors = Array.isArray(resultMsg.errors) ? resultMsg.errors : undefined;
+      const sdkErrors = 'errors' in resultMsg ? resultMsg.errors : undefined;
 
       // `is_error: true` + `subtype: 'success'` is ambiguous: it is BOTH the
       // SDK's stop-sequence termination encoding (#1425, a legitimate success)
       // AND its API-failure-as-text encoding (#1797 — auth/billing/rate-limit
       // errors that even set stop_reason: 'stop_sequence').
-      const isSuccessWithErrorFlag = resultMsg.is_error === true && resultMsg.subtype === 'success';
+      const isSuccessWithErrorFlag = resultMsg.is_error && resultMsg.subtype === 'success';
 
       // Disambiguate structurally: a preceding synthetic error message
       // (primary, typed signal), or the typed terminal_reason 'api_error'
@@ -1054,7 +1079,7 @@ async function* streamClaudeMessages(
       // Fail-safe (never observed in practice): a synthetic error message
       // followed by a non-error result. Yield the withheld text late rather
       // than silently swallowing content.
-      if (syntheticError !== undefined && resultMsg.is_error !== true) {
+      if (syntheticError !== undefined && !resultMsg.is_error) {
         getLog().warn(
           { sessionId: resultMsg.session_id, errorCode: syntheticError.code },
           'claude.synthetic_error_not_confirmed'
@@ -1068,7 +1093,7 @@ async function* streamClaudeMessages(
       // subtype: 'success' — its encoding of "non-default termination, not a
       // failure". Treat that pair as a clean success so downstream consumers
       // (which gate failure on isError) don't misclassify it.
-      const isRealError = resultMsg.is_error === true && !isSuccessWithErrorFlag;
+      const isRealError = resultMsg.is_error && !isSuccessWithErrorFlag;
       if (isRealError) {
         getLog().error(
           {
@@ -1092,7 +1117,7 @@ async function* streamClaudeMessages(
         type: 'result',
         sessionId: resultMsg.session_id,
         ...(tokens ? { tokens } : {}),
-        ...(resultMsg.structured_output !== undefined
+        ...('structured_output' in resultMsg && resultMsg.structured_output !== undefined
           ? { structuredOutput: resultMsg.structured_output }
           : {}),
         ...(isRealError ? { isError: true, errorSubtype: resultMsg.subtype } : {}),
@@ -1100,9 +1125,7 @@ async function* streamClaudeMessages(
         ...(resultMsg.total_cost_usd !== undefined ? { cost: resultMsg.total_cost_usd } : {}),
         ...(resultMsg.stop_reason != null ? { stopReason: resultMsg.stop_reason } : {}),
         ...(resultMsg.num_turns !== undefined ? { numTurns: resultMsg.num_turns } : {}),
-        ...(resultMsg.model_usage
-          ? { modelUsage: resultMsg.model_usage as Record<string, unknown> }
-          : {}),
+        ...(resolvedModelId ? { resolvedModel: { id: resolvedModelId } } : {}),
       };
     }
   }
@@ -1127,6 +1150,7 @@ async function* streamClaudeMessages(
         toolName: tr.toolName,
         toolOutput: tr.toolOutput,
         ...(tr.toolCallId !== undefined ? { toolCallId: tr.toolCallId } : {}),
+        toolOutcome: tr.toolOutcome,
       };
     }
   }

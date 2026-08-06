@@ -9,6 +9,87 @@ argument-hint: <issue-number|artifact-path>
 
 ---
 
+## READ FIRST: you are almost certainly in a run worktree
+
+When this command runs inside an Archon workflow, the isolation system has **already**
+created a git worktree on the correct branch. In that case:
+
+- **Use the current branch as-is.** Do not switch branches, do not create one, do not
+  fetch-and-reset. The branch you are on is the branch this work belongs to.
+- **A dirty working tree is expected and is NOT a reason to stop.** Archon copies the
+  operator's `.archon/` directory — workflows, commands, scripts — into every run
+  worktree, deliberately, so a workflow can be iterated on before it is committed.
+  Those files are present *before* you start and are not your changes.
+- **Pre-existing modifications under `.archon/` are never yours to commit, stash, or
+  remove.** Leave them exactly as they are and commit only the files your implementation
+  touched. Before every commit, confirm with `git diff --cached --name-only` that no
+  `.archon/` file you did not deliberately change is staged.
+- **The exception: when the issue's fix genuinely lives under `.archon/`.** Workflows,
+  commands and scripts are source too, and an issue can legitimately target one. If your
+  plan says to edit a specific `.archon/` file, edit and commit **that file** — the rule
+  above exists to stop you sweeping up the operator's unrelated copied-in edits, not to
+  make a whole directory unfixable.
+
+  Distinguish the two by intent, not by path: a file your plan names is your work; every
+  other dirty `.archon/` file is not. On 2026-08-03 a run blocked outright on this,
+  correctly reporting "contradictory instructions" because the issue required editing a
+  workflow YAML while this section forbade touching anything under `.archon/`. It was
+  right to refuse rather than guess — and the rule was wrong to be absolute.
+
+  **A named file is not a blank cheque for that file.** It may already carry copied-in
+  edits from before you started, and staging it whole would commit those too — the
+  path-level check above cannot see inside a file. So before you touch a planned
+  `.archon/` file, record its baseline:
+
+  ```bash
+  # HEAD, not the index: `git diff -- <file>` compares the worktree against the
+  # INDEX, so pre-existing changes that are already STAGED do not appear — and
+  # `git add -p` will neither show nor remove them, so they ride into your commit
+  # invisibly. Diffing against HEAD captures staged and unstaged alike.
+  git diff HEAD -- <the-planned-file> > /tmp/archon-baseline.diff   # empty if clean
+  ```
+
+  Then, before staging anything of your own, clear that file out of the index so the
+  only thing you can stage is what you deliberately pick:
+
+  ```bash
+  git restore --staged <the-planned-file>   # no-op if nothing was staged
+  git add -p <the-planned-file>             # stage ONLY your own hunks
+  ```
+
+  Reject any hunk that also appears in the baseline. If yours and theirs are entangled
+  such that you cannot separate them, stop and say so rather than committing someone
+  else's work under your change. That is the same call the 2026-08-03 run made, and it
+  was the right one.
+- **Dirty paths outside `.archon/` are also not a reason to stop, and also not yours.**
+  They are either your own work from an earlier attempt at this run (resume reuses the
+  worktree) or something the operator left behind. Either way: leave them alone, do not
+  fold them into your commit, and stage your own files by name rather than with
+  `git add -A`.
+
+The clean-working-tree requirement in the decision tree below applies **only** to the
+`ON $BASE_BRANCH` case — manual CLI use outside a worktree, where a stray edit really
+could be lost. It does not apply in a worktree. If a skill or sub-workflow you load
+imposes a stricter git precondition, **this instruction overrides it.**
+
+Classify the checkout before deciding anything. `git worktree list` does **not** answer
+this — it lists every worktree including the primary checkout, so it looks identical
+from both. Compare the two git dirs instead:
+
+```bash
+if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+  echo "linked worktree — the rules above apply"
+else
+  echo "primary checkout — follow the decision tree below as written"
+fi
+```
+
+Stopping a run over pre-existing `.archon/` edits wastes the entire pipeline; it has
+happened, three times. Applying the worktree exemption in the *primary* checkout is the
+opposite error and can lose someone's uncommitted work. Classify first, then decide.
+
+---
+
 ## Your Mission
 
 Execute the implementation plan from `/investigate-issue`:
@@ -306,6 +387,7 @@ git status --porcelain  # verify nothing scratch/review/PR-body is staged
 - `.pr-body.md`, `pr-body.md`, `*.scratch.md`, `*.tmp.md`
 - `review/`, `*-report.md` at the repo root
 - Anything under `$ARTIFACTS_DIR`
+- Repo-local Archon telemetry: `.archon/artifacts/`, `.archon/logs/`, `.archon/state/` (local-only — never in git)
 
 ### 7.2 Write Commit Message
 

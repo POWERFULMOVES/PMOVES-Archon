@@ -171,6 +171,11 @@ export interface TokenUsage {
   cost?: number;
 }
 
+/** Concrete model identifier reported by a provider after a request completes. */
+export interface ResolvedModel {
+  id: string;
+}
+
 /**
  * Message chunk from AI assistant.
  * Discriminated union with per-type required fields for type safety.
@@ -199,7 +204,8 @@ export type MessageChunk =
       cost?: number;
       stopReason?: string;
       numTurns?: number;
-      modelUsage?: Record<string, unknown>;
+      /** Concrete model reported by the provider; omitted when its SDK does not expose one. */
+      resolvedModel?: ResolvedModel;
       /**
        * Outcome of a session-resume attempt, so a failed resume is observable
        * instead of silently continuing with a fresh (cold) session:
@@ -228,6 +234,19 @@ export type MessageChunk =
       toolOutput: string;
       /** Matching ID for the originating `tool` chunk. See `tool` variant above. */
       toolCallId?: string;
+      /**
+       * Known statuses are provider-reported. `unknown` covers two distinct
+       * cases that share one property — no authoritative status exists:
+       *   1. the provider completed the tool but reports no status (e.g. Codex
+       *      web_search, provider.ts:591), and
+       *   2. a synthetic closure emitted with no provider result at all.
+       * Never inferred from formatted output: a tool whose text merely looks
+       * like an error is still `unknown`, because guessing here would put a
+       * fabricated status next to reported ones and make neither trustworthy.
+       */
+      toolOutcome?: 'success' | 'error' | 'interrupted' | 'unknown';
+      /** Provider-reported process exit code, when the tool exposes one. */
+      exitCode?: number;
     }
   // ─── Subagent Task Lifecycle (Claude SDK `system` subtypes) ────────────
   // Forwarded by the Claude provider from SDKTaskStartedMessage /
@@ -511,6 +530,14 @@ export interface NodeConfig {
   maxBudgetUsd?: number;
   systemPrompt?: SystemPromptInput;
   fallbackModel?: string;
+  /**
+   * Per-node override for Claude Code settingSources — which filesystem
+   * setting sources the SDK loads (CLAUDE.md, skills, commands, agents).
+   * Overrides the assistant-level default; falls back to ['project', 'user']
+   * when neither is set. Claude-only; other providers ignore it (the
+   * dag-executor warns via the settingSources capability axis).
+   */
+  settingSources?: ('project' | 'user')[];
   idle_timeout?: number;
   /**
    * Per-node override for Claude's `agentProgressSummaries` flag (Phase 4 of #975).
@@ -590,6 +617,13 @@ export interface ProviderCapabilities {
   thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
+  /**
+   * Whether the provider honors the per-node `settingSources` override (which
+   * filesystem setting sources the agent loads: CLAUDE.md, skills, commands,
+   * agents). `true` for Claude only — the Claude Agent SDK's `settingSources`
+   * option; other providers have no equivalent knob.
+   */
+  settingSources: boolean;
   /** Whether the provider can register in-process `NativeTool`s for a turn. */
   nativeTools: boolean;
   /**

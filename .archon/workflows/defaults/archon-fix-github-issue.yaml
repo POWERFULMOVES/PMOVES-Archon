@@ -25,29 +25,69 @@ nodes:
   # PHASE 1: FETCH & CLASSIFY
   # ═══════════════════════════════════════════════════════════════
 
-  - id: extract-issue-number
-    prompt: |
-      Find the GitHub issue number for this request.
-
-      Request: $ARGUMENTS
-
-      Rules:
-      - If the message contains an explicit issue number (e.g., "#709", "issue 709", "709"), extract that number.
-      - If the message is ambiguous (e.g., "fix the SQLite timestamp bug"), use `gh issue list` to search for matching issues and pick the best match.
-
-      CRITICAL: Your final output must be ONLY the bare number with no quotes, no markdown, no explanation. Example correct output: 709
+  - id: parse-request
+    command: archon-parse-user-request
+    model: small
+    output_format:
+      type: object
+      properties:
+        user_request:
+          type: string
+        issue_number:
+          type: string
+        repo:
+          type: string
+        repo_url:
+          type: string
+      required:
+        - user_request
+        - issue_number
+        - repo
+        - repo_url
 
   - id: fetch-issue
     bash: |
-      # $extract-issue-number.output is injected pre-quoted by Archon — do NOT
-      # wrap it in double quotes (that corrupts the value; see issue #1884).
-      ISSUE_NUM=$(echo $extract-issue-number.output | grep -oE '[0-9]+' | head -1)
-      if [ -z "$ISSUE_NUM" ]; then
-        echo "Failed to extract issue number from:" $extract-issue-number.output >&2
+      # Substitutions are injected already shell-quoted by Archon — assign them
+      # unquoted, then quote normally as locals (see #1884).
+      req=$parse-request.output.user_request
+      num=$parse-request.output.issue_number
+      repo=$parse-request.output.repo
+      url=$parse-request.output.repo_url
+
+      # user_request is the ONE guaranteed field: verbatim input, never empty for
+      # a non-empty message. Empty here means the parse step failed to return what
+      # it was given — a real defect, and a countable one, rather than an unusual
+      # input. The other three are best-effort by contract.
+      if [ -z "$req" ]; then
+        echo "parse-request returned an empty user_request — the parse step failed." >&2
+        echo "This is a parser defect, not a bad request. Consider raising its model tier." >&2
         exit 1
       fi
-      gh issue view "$ISSUE_NUM" --json title,body,labels,comments,state,url,author
-    depends_on: [extract-issue-number]
+
+      # `gh issue view <n>` resolves against the CURRENT checkout, so a number
+      # separated from the repository it came from silently fetches this repo's
+      # issue of the same number (#2412). Prefer whichever form the operator
+      # actually gave, most-complete first, and never reassemble one from parts.
+      if [ -n "$url" ]; then
+        # A URL carries its repository with it — no number needed, and no
+        # reassembly step to get wrong. Checked BEFORE the numeric gate below: a
+        # best-effort miss on issue_number must not fail a run whose URL alone is
+        # a complete, valid argument.
+        gh issue view "$url" --json title,body,labels,comments,state,url,author
+      else
+        if ! printf '%s' "$num" | grep -qE '^[0-9]+$'; then
+          echo "No GitHub issue number found in: $req" >&2
+          echo "This workflow fixes a GitHub issue; give it an issue number or URL." >&2
+          exit 1
+        fi
+        if [ -n "$repo" ]; then
+          # owner/repo#N states the repository explicitly; honour it.
+          gh issue view "$num" --repo "$repo" --json title,body,labels,comments,state,url,author
+        else
+          gh issue view "$num" --json title,body,labels,comments,state,url,author
+        fi
+      fi
+    depends_on: [parse-request]
 
   - id: classify
     prompt: |
@@ -121,7 +161,14 @@ nodes:
       elif [ -f "$ARTIFACTS_DIR/investigation.md" ]; then
         echo "investigation.md exists from investigate step"
       else
-        echo "WARNING: No investigation.md or plan.md found — implement may fail"
+        # Fail, do not warn. investigate/plan can "succeed" while producing no
+        # artifact — an AI node that declines the task still exits 0, so the
+        # refusal reads downstream as a completed investigation. This node holds
+        # the only cheap deterministic view of that precondition, so it is where
+        # the run has to stop, before implement spends a model on nothing.
+        echo "bridge-artifacts: neither investigation.md nor plan.md exists in \$ARTIFACTS_DIR." >&2
+        echo "The investigate/plan phase produced no specification — implement has nothing to work from." >&2
+        exit 1
       fi
     depends_on: [investigate, plan]
     trigger_rule: one_success
@@ -167,6 +214,7 @@ nodes:
            - `.pr-body.md`, `pr-body.md`, `*.scratch.md`, `*.tmp.md` at any path
            - `review/`, `*-report.md` at the repo root
            - Anything under `$ARTIFACTS_DIR`
+           - Repo-local Archon telemetry: `.archon/artifacts/`, `.archon/logs/`, `.archon/state/` (local-only — never in git)
          - Verify with `git status --porcelain` that nothing scratch is staged before committing
          - If files you don't recognize as part of the fix appear modified or untracked, leave them alone
       2. Push the branch: `git push -u origin HEAD`
@@ -174,24 +222,27 @@ nodes:
          - `$ARTIFACTS_DIR/investigation.md` or `$ARTIFACTS_DIR/plan.md`
          - `$ARTIFACTS_DIR/implementation.md`
          - `$ARTIFACTS_DIR/validation.md`
-      4. Check if a PR already exists for this branch: `gh pr list --head $(git branch --show-current)`
+      4. Resolve the origin repo — in a fork clone, gh otherwise targets the upstream parent:
+         `ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')`
+         Then check if a PR already exists for this branch: `gh pr list --repo "$ORIGIN_REPO" --head $(git branch --show-current)`
          - If PR exists, skip creation and capture its number
       5. Look for the project's PR template at `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`, or `docs/PULL_REQUEST_TEMPLATE.md`. Read whichever one exists.
-      6. Create a DRAFT PR: `gh pr create --draft --base $BASE_BRANCH`
+      6. Create a DRAFT PR: `gh pr create --repo "$ORIGIN_REPO" --draft --base $BASE_BRANCH`
          - Title: concise, imperative mood, under 70 chars
          - Body: if a PR template was found, fill in **every section** with details from the artifacts. Don't skip sections or leave placeholders. If no template, write a body with summary, changes, validation evidence, and `Fixes #...`.
          - **PR body file location**: if you write the body to a file (e.g. for `--body-file`), the file MUST live at `$ARTIFACTS_DIR/pr-body.md` or under `/tmp/` — NEVER inside the worktree. Files like `.pr-body.md` at the repo root will be picked up by later commits.
          - Link to issue: include `Fixes #...` or `Closes #...`
       7. Capture PR identifiers:
          ```bash
+         ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
          HEAD_BRANCH=$(git branch --show-current)
-         PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
+         PR_NUMBER=$(gh pr list --repo "$ORIGIN_REPO" --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
          if [ -z "$PR_NUMBER" ]; then
            echo "No open PR found for branch $HEAD_BRANCH — PR creation failed" >&2
            exit 1
          fi
          echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
-         PR_URL=$(gh pr view "$PR_NUMBER" --json url -q '.url')
+         PR_URL=$(gh pr view "$PR_NUMBER" --repo "$ORIGIN_REPO" --json url -q '.url')
          echo "$PR_URL" > "$ARTIFACTS_DIR/.pr-url"
          ```
     depends_on: [validate]
@@ -204,17 +255,19 @@ nodes:
   - id: verify-pr-base
     bash: |
       set -euo pipefail
+      # Pin to the origin remote — in a fork clone, gh otherwise queries the upstream parent
+      ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
       HEAD_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-      PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
+      PR_NUMBER=$(gh pr list --repo "$ORIGIN_REPO" --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
       if [ -z "$PR_NUMBER" ]; then
         echo "No open PR found for branch $HEAD_BRANCH" >&2
         exit 1
       fi
       EXPECTED="$BASE_BRANCH"
-      ACTUAL=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+      ACTUAL=$(gh pr view "$PR_NUMBER" --repo "$ORIGIN_REPO" --json baseRefName -q '.baseRefName')
       if [ "$ACTUAL" != "$EXPECTED" ]; then
         echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
-        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+        gh pr edit "$PR_NUMBER" --repo "$ORIGIN_REPO" --base "$EXPECTED"
       else
         echo "PR base verified: $EXPECTED"
       fi

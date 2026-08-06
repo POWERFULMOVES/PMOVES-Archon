@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { OriginBadge } from './OriginBadge';
 import type { Run } from '../primitives/run';
 import { shortRunId, formatElapsed, elapsedSince, formatCost } from '../lib/format';
-import { useIsDocker, openInIde } from '../lib/health';
+import { useIsDocker, useIdeEnv, openInIde } from '../lib/health';
 import { statusTextClass } from '../lib/run-status';
 
 interface RecentRunRowProps {
@@ -32,6 +32,7 @@ export function RecentRunRow({
 }: RecentRunRowProps): ReactElement {
   const navigate = useNavigate();
   const isDocker = useIsDocker();
+  const ideEnv = useIdeEnv();
   const elapsed = formatElapsed(elapsedSince(run.startedAt, run.finishedAt ?? undefined));
   const canOpen = run.projectId !== null && !run.id.startsWith('demo-');
   const canOpenIde =
@@ -99,6 +100,14 @@ export function RecentRunRow({
         <span className="shrink-0 truncate font-mono text-[13px] font-bold text-text-primary">
           {run.workflow}
         </span>
+        {run.parentRunId ? (
+          <span
+            className="shrink-0 rounded-[5px] border border-border/60 px-1.5 py-px font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-text-tertiary"
+            title={`Sub-run of ${shortRunId(run.parentRunId)}`}
+          >
+            ↳ child
+          </span>
+        ) : null}
         {run.userMessage !== '' ? (
           <span
             className="min-w-0 truncate text-[12.5px] text-text-tertiary"
@@ -153,7 +162,7 @@ export function RecentRunRow({
               type="button"
               onClick={e => {
                 e.stopPropagation();
-                if (run.workingPath !== null) openInIde(run.workingPath);
+                if (run.workingPath !== null) openInIde(run.workingPath, ideEnv);
               }}
               title={`Open ${run.workingPath} in IDE`}
               aria-label="Open in IDE"

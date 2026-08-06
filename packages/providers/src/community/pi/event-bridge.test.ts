@@ -179,6 +179,27 @@ describe('buildResultChunk', () => {
     }
   });
 
+  test('records responseModel rather than the requested model', () => {
+    const chunk = buildResultChunk([
+      {
+        role: 'assistant',
+        model: 'large',
+        responseModel: 'claude-opus-5',
+        usage,
+        stopReason: 'stop',
+        content: [],
+      },
+    ]);
+    expect(chunk).toMatchObject({ type: 'result', resolvedModel: { id: 'claude-opus-5' } });
+  });
+
+  test('omits resolvedModel when Pi does not report a responseModel', () => {
+    const chunk = buildResultChunk([
+      { role: 'assistant', model: 'large', usage, stopReason: 'stop', content: [] },
+    ]);
+    expect(chunk).not.toHaveProperty('resolvedModel');
+  });
+
   test('flags isError for stopReason=error and surfaces errorMessage', () => {
     const chunk = buildResultChunk([
       { role: 'assistant', usage, stopReason: 'error', errorMessage: 'auth', content: [] },
@@ -316,6 +337,7 @@ describe('mapPiEvent', () => {
         toolName: 'read',
         toolOutput: 'file contents',
         toolCallId: 'call-123',
+        toolOutcome: 'success',
       },
     ]);
   });
@@ -330,7 +352,7 @@ describe('mapPiEvent', () => {
     });
     expect(chunks).toHaveLength(2);
     expect(chunks[0].type).toBe('system');
-    expect(chunks[1].type).toBe('tool_result');
+    expect(chunks[1]).toMatchObject({ type: 'tool_result', toolOutcome: 'error' });
   });
 
   test('auto_retry_start → system chunk', () => {

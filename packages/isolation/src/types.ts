@@ -63,6 +63,17 @@ interface IsolationRequestBase {
    */
   baseBranch?: BranchName;
 
+  /**
+   * Per-dispatch base-branch override (from the CLI `--base <branch>` flag).
+   *
+   * The top precedence level for base resolution: it wins over both repo config
+   * (`worktree.baseBranch`) and the codebase-default `baseBranch` above, so
+   * parallel epic slices can each cut from — and target a PR at — a different
+   * base. Absent for ordinary dispatches (base then falls back to config →
+   * codebase default → git auto-detect).
+   */
+  baseOverride?: BranchName;
+
   description?: string;
 
   /**
@@ -166,6 +177,8 @@ export interface WorktreeDestroyOptions extends DestroyOptions {
   canonicalRepoPath?: RepoPath;
   /** Delete the remote branch (best-effort, e.g., after PR merge) */
   deleteRemoteBranch?: boolean;
+  /** Git remote name for remote branch deletion (default: 'origin') */
+  remote?: string;
 }
 
 /**
@@ -293,6 +306,23 @@ export interface WorktreeCreateConfig {
    * @example '.worktrees'
    */
   path?: string;
+  /**
+   * Git remote name to use for fetch/push operations.
+   *
+   * When set, all git operations (fetch, push, branch tracking) use this
+   * remote instead of 'origin'. Useful for repos with multiple remotes or
+   * non-standard naming conventions.
+   *
+   * When omitted, auto-detected via `getDefaultRemote()`:
+   *   1. 'origin' if it exists
+   *   2. The sole remote if only one is configured
+   *   3. null when ambiguous — worktree creation then fails with an
+   *      actionable error listing the available remotes
+   *
+   * Sourced from `.archon/config.yaml > worktree.remote` in the repo.
+   * @example 'upstream'
+   */
+  remote?: string;
 }
 
 export type RepoConfigLoader = (repoPath: string) => Promise<WorktreeCreateConfig | null>;

@@ -1,13 +1,15 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { homedir, tmpdir } from 'os';
 import { join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { mkdir, rm, writeFile, lstat, readlink, symlink as fsSymlink } from 'fs/promises';
 
 const isWindows = process.platform === 'win32';
 
 import {
   isDocker,
+  isWSL,
+  getWSLDistroName,
   getArchonHome,
   getArchonWorkspacesPath,
   ensureArchonWorkspacesPath,
@@ -37,6 +39,9 @@ import {
   getRunLogPath,
   sanitizeScopeSegment,
   getScopeArtifactsPath,
+  resolveProjectStorageKey,
+  getProjectStoragePaths,
+  getRunArtifactsDirForKey,
   slugifyFolderName,
   getFolderProjectRoot,
   getFolderProjectArtifactsPath,
@@ -49,7 +54,14 @@ import {
 } from './archon-paths';
 
 /** All env vars that path functions depend on */
-const ENV_VARS = ['WORKSPACE_PATH', 'WORKTREE_BASE', 'ARCHON_HOME', 'ARCHON_DOCKER', 'HOME'];
+const ENV_VARS = [
+  'WORKSPACE_PATH',
+  'WORKTREE_BASE',
+  'ARCHON_HOME',
+  'ARCHON_DOCKER',
+  'HOME',
+  'WSL_DISTRO_NAME',
+];
 
 /**
  * Save and restore environment variables around each test.
@@ -85,6 +97,47 @@ describe('archon-paths', () => {
 
     test('returns path unchanged if no tilde', () => {
       expect(expandTilde('/absolute/path')).toBe('/absolute/path');
+    });
+  });
+
+  describe('isWSL', () => {
+    test('returns true when WSL_DISTRO_NAME is set', () => {
+      process.env.WSL_DISTRO_NAME = 'Ubuntu';
+      expect(isWSL()).toBe(true);
+    });
+
+    test('falls back to /proc/sys/kernel/osrelease when WSL_DISTRO_NAME is unset', () => {
+      delete process.env.WSL_DISTRO_NAME;
+      // Derive the expectation from the same source as the implementation:
+      // real Linux CI → no "microsoft" → false; WSL2 host → "microsoft" → true.
+      let expected = false;
+      try {
+        expected = readFileSync('/proc/sys/kernel/osrelease', 'utf8')
+          .toLowerCase()
+          .includes('microsoft');
+      } catch {
+        expected = false;
+      }
+      expect(isWSL()).toBe(expected);
+    });
+  });
+
+  describe('getWSLDistroName', () => {
+    test('returns the WSL_DISTRO_NAME env var when set', () => {
+      process.env.WSL_DISTRO_NAME = 'Debian';
+      expect(getWSLDistroName()).toBe('Debian');
+    });
+
+    test('returns undefined when WSL_DISTRO_NAME is unset', () => {
+      delete process.env.WSL_DISTRO_NAME;
+      expect(getWSLDistroName()).toBeUndefined();
+    });
+
+    test('returns the empty string when WSL_DISTRO_NAME is set but empty', () => {
+      // Pins current behaviour: '' passes through (callers filter falsy values),
+      // so a future `|| undefined` refactor would change observable behaviour.
+      process.env.WSL_DISTRO_NAME = '';
+      expect(getWSLDistroName()).toBe('');
     });
   });
 
@@ -471,6 +524,160 @@ describe('archon-paths', () => {
     test('returns null for a dot or empty basename', () => {
       expect(resolveRepoProjectIdentity('workspace', '/home/u/.')).toBeNull();
       expect(resolveRepoProjectIdentity('workspace', '/')).toBeNull();
+    });
+  });
+
+  describe('resolveProjectStorageKey', () => {
+    test('folder-kind codebase resolves to a slugified _folder key', () => {
+      expect(
+        resolveProjectStorageKey(
+          { kind: 'folder', name: 'My Ops Folder', default_cwd: '/srv/ops' },
+          '/srv/ops'
+        )
+      ).toEqual({ kind: 'folder', slug: 'my-ops-folder' });
+    });
+
+    test('owner/repo name resolves to a repo key', () => {
+      expect(
+        resolveProjectStorageKey(
+          { kind: 'repo', name: 'acme/widget', default_cwd: '/repos/widget' },
+          '/repos/widget'
+        )
+      ).toEqual({ kind: 'repo', owner: 'acme', repo: 'widget' });
+    });
+
+    test('bare-basename name resolves to the _local pseudo-owner', () => {
+      expect(
+        resolveProjectStorageKey(
+          { kind: 'repo', name: 'workspace', default_cwd: '/home/u/workspace' },
+          '/home/u/workspace'
+        )
+      ).toEqual({ kind: 'repo', owner: '_local', repo: 'workspace' });
+    });
+
+    test('absent kind (pre-column rows) is treated as repo-kind', () => {
+      expect(
+        resolveProjectStorageKey({ name: 'acme/widget', default_cwd: '/repos/widget' }, '/repos/w')
+      ).toEqual({ kind: 'repo', owner: 'acme', repo: 'widget' });
+      expect(
+        resolveProjectStorageKey(
+          { kind: null, name: 'acme/widget', default_cwd: '/repos/widget' },
+          '/repos/w'
+        )
+      ).toEqual({ kind: 'repo', owner: 'acme', repo: 'widget' });
+    });
+
+    test('null / undefined codebase falls back to the cwd key', () => {
+      expect(resolveProjectStorageKey(null, '/tmp/scratch')).toEqual({
+        kind: 'cwd',
+        cwd: '/tmp/scratch',
+      });
+      expect(resolveProjectStorageKey(undefined, '/tmp/scratch')).toEqual({
+        kind: 'cwd',
+        cwd: '/tmp/scratch',
+      });
+    });
+
+    test('unresolvable repo identity falls back to the cwd key', () => {
+      // `default_cwd` basename is `..`, so resolveRepoProjectIdentity returns null.
+      expect(
+        resolveProjectStorageKey(
+          { kind: 'repo', name: 'workspace', default_cwd: '/home/u/..' },
+          '/tmp/scratch'
+        )
+      ).toEqual({ kind: 'cwd', cwd: '/tmp/scratch' });
+    });
+  });
+
+  describe('getProjectStoragePaths', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('repo key composes all four roots under owner/repo', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      expect(getProjectStoragePaths({ kind: 'repo', owner: 'acme', repo: 'widget' })).toEqual({
+        root,
+        artifactsRoot: join(root, 'artifacts'),
+        logsDir: join(root, 'logs'),
+        stateRoot: join(root, 'state'),
+      });
+    });
+
+    test('folder key composes all four roots under _folder/<slug>', () => {
+      const root = join('/custom/archon', 'workspaces', '_folder', 'my-ops-folder');
+      expect(getProjectStoragePaths({ kind: 'folder', slug: 'my-ops-folder' })).toEqual({
+        root,
+        artifactsRoot: join(root, 'artifacts'),
+        logsDir: join(root, 'logs'),
+        stateRoot: join(root, 'state'),
+      });
+    });
+
+    test('cwd key resolves UNDER ARCHON_HOME at _cwd/<basename>, never into the repo', () => {
+      const paths = getProjectStoragePaths({ kind: 'cwd', cwd: '/home/u/scratch-repo' });
+      const root = join('/custom/archon', 'workspaces', '_cwd', 'scratch-repo');
+      expect(paths).toEqual({
+        root,
+        artifactsRoot: join(root, 'artifacts'),
+        logsDir: join(root, 'logs'),
+        stateRoot: join(root, 'state'),
+      });
+      // Build both expectations with join() — on Windows the separators differ
+      // from the POSIX literals and a hard-coded '/custom/archon' never matches.
+      expect(paths.root.startsWith(join('/custom/archon', 'workspaces'))).toBe(true);
+      expect(paths.root).not.toContain(join('.archon', 'artifacts'));
+    });
+
+    test('cwd basename is sanitised to a single traversal-safe segment', () => {
+      expect(getProjectStoragePaths({ kind: 'cwd', cwd: '/home/u/my repo.v2' }).root).toBe(
+        join('/custom/archon', 'workspaces', '_cwd', 'my_repo_v2')
+      );
+      // basename('/') is '' → the `_` fallback, not an empty segment.
+      expect(getProjectStoragePaths({ kind: 'cwd', cwd: '/' }).root).toBe(
+        join('/custom/archon', 'workspaces', '_cwd', '_')
+      );
+    });
+
+    test('agrees with the per-kind helpers it replaces', () => {
+      expect(getProjectStoragePaths({ kind: 'repo', owner: 'acme', repo: 'widget' })).toMatchObject(
+        {
+          artifactsRoot: getProjectArtifactsPath('acme', 'widget'),
+          logsDir: getProjectLogsPath('acme', 'widget'),
+        }
+      );
+      expect(getProjectStoragePaths({ kind: 'folder', slug: 'ops' })).toMatchObject({
+        artifactsRoot: getFolderProjectArtifactsPath('ops'),
+        logsDir: getFolderProjectLogsPath('ops'),
+      });
+    });
+  });
+
+  describe('getRunArtifactsDirForKey', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('matches getRunArtifactsPath for a repo key', () => {
+      expect(
+        getRunArtifactsDirForKey({ kind: 'repo', owner: 'acme', repo: 'widget' }, 'run-1')
+      ).toBe(getRunArtifactsPath('acme', 'widget', 'run-1'));
+    });
+
+    test('matches getFolderRunArtifactsPath for a folder key', () => {
+      expect(getRunArtifactsDirForKey({ kind: 'folder', slug: 'ops' }, 'run-1')).toBe(
+        getFolderRunArtifactsPath('ops', 'run-1')
+      );
+    });
+
+    test('resolves a cwd key under _cwd, separated by run id', () => {
+      expect(getRunArtifactsDirForKey({ kind: 'cwd', cwd: '/home/u/scratch' }, 'run-1')).toBe(
+        join('/custom/archon', 'workspaces', '_cwd', 'scratch', 'artifacts', 'runs', 'run-1')
+      );
     });
   });
 

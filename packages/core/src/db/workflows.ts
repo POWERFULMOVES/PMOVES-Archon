@@ -74,6 +74,41 @@ function resumableStatusClause(dialect: SqlDialect, dayParamIndex: number): stri
 }
 
 /**
+ * `FOR UPDATE` on Postgres, empty on SQLite (which has no such syntax and does
+ * not need it — the adapter serializes transactions on one connection, and a
+ * cross-process writer that commits between our read and our write makes the
+ * deferred BEGIN's read→write upgrade fail with SQLITE_BUSY rather than let a
+ * stale snapshot through). Used by resumeWorkflowRun to pin the row across its
+ * read-then-CAS pair so the value it reads is the value the CAS acts on.
+ * Dialect-branched here rather than in SqlDialect: this is the only caller, and
+ * the branch mirrors unresolvedGateClause's local getDatabaseType() check.
+ */
+function rowLockClause(): string {
+  return getDatabaseType() === 'postgresql' ? ' FOR UPDATE' : '';
+}
+
+/**
+ * Extract a non-empty `metadata.error` string from a raw column value, or null
+ * when there is nothing worth preserving. SQLite stores metadata as JSON TEXT
+ * and Postgres returns a parsed object (same split normalizeWorkflowRun handles),
+ * so both shapes are accepted; absent / null / non-string / empty / unparseable
+ * all collapse to null.
+ */
+function readMetadataError(raw: unknown): string | null {
+  let metadata: unknown = raw;
+  if (typeof metadata === 'string') {
+    try {
+      metadata = JSON.parse(metadata);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof metadata !== 'object' || metadata === null) return null;
+  const error = (metadata as Record<string, unknown>).error;
+  return typeof error === 'string' && error !== '' ? error : null;
+}
+
+/**
  * SQL predicate matching a run whose approval gate is still OPEN: the row is
  * 'paused' AND metadata.approval.resolved is JSON null or absent. Dialect-aware
  * (Postgres `->>`, SQLite `json_extract`) and kept in ONE place so the two forms
@@ -228,6 +263,7 @@ export async function createWorkflowRun(data: {
   working_path?: string;
   parent_conversation_id?: string;
   user_id?: string;
+  parent_run_id?: string;
 }): Promise<WorkflowRun> {
   // Serialize metadata with validation to catch circular references early
   let metadataJson: string;
@@ -262,8 +298,8 @@ export async function createWorkflowRun(data: {
   try {
     const result = await pool.query<WorkflowRun>(
       `INSERT INTO remote_agent_workflow_runs
-       (workflow_name, conversation_id, codebase_id, user_message, metadata, working_path, parent_conversation_id, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (workflow_name, conversation_id, codebase_id, user_message, metadata, working_path, parent_conversation_id, user_id, parent_run_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         data.workflow_name,
@@ -274,6 +310,7 @@ export async function createWorkflowRun(data: {
         data.working_path ?? null,
         data.parent_conversation_id ?? null,
         data.user_id ?? null,
+        data.parent_run_id ?? null,
       ]
     );
     const row = result.rows[0];
@@ -419,12 +456,16 @@ export async function getPausedWorkflowRun(conversationId: string): Promise<Work
  * ignored — they're from crashed or resume-replaced dispatches).
  *
  * When called from a dispatch that already pre-created its own row, pass
- * `excludeId` and `selfStartedAt` so:
+ * `self` (`id` + `startedAt`) so:
  *   1. Self is never returned.
  *   2. If two dispatches both have rows, the deterministic older-wins
  *      tiebreaker `(started_at, id)` ensures both agree on which is "first."
  *      The newer dispatch sees the older row and aborts; the older dispatch
  *      sees nothing.
+ *
+ * `self.excludeRunIds` (#2121 Phase 2) additionally excludes the caller's
+ * ancestor run-id chain: a `workflow:` sub-run shares its parent's checkout, so
+ * the parent's own running/paused row must not count as a lock against the child.
  *
  * Returns the holding row, or null if the path is free.
  */
@@ -432,7 +473,7 @@ export const STALE_PENDING_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function getActiveWorkflowRunByPath(
   workingPath: string,
-  self?: { id: string; startedAt: Date }
+  self?: { id: string; startedAt: Date; excludeRunIds?: string[] }
 ): Promise<WorkflowRun | null> {
   const isPostgres = getDatabaseType() === 'postgresql';
   const stalePendingCutoff = isPostgres
@@ -446,9 +487,24 @@ export async function getActiveWorkflowRunByPath(
     'working_path = $1',
     `(status IN ('running', 'paused') OR (status = 'pending' AND started_at > ${stalePendingCutoff}))`,
   ];
+  let selfIdParam: string | undefined;
   if (self !== undefined) {
     params.push(self.id);
-    clauses.push(`id != $${String(params.length)}`);
+    // Captured at push time — the tiebreaker below must reference THIS
+    // placeholder, and excludeRunIds params may land in between.
+    selfIdParam = `$${String(params.length)}`;
+    clauses.push(`id != ${selfIdParam}`);
+  }
+  // Exclude the caller's ancestor chain (#2121 Phase 2): a `workflow:` sub-run
+  // shares the parent's checkout, so the parent's own running/paused row on this
+  // path must NOT count as a lock against the child. Each id is a separate
+  // placeholder so both dialects bind positionally (no array binding).
+  if (self?.excludeRunIds && self.excludeRunIds.length > 0) {
+    const placeholders = self.excludeRunIds.map(id => {
+      params.push(id);
+      return `$${String(params.length)}`;
+    });
+    clauses.push(`id NOT IN (${placeholders.join(', ')})`);
   }
   if (self !== undefined) {
     // Older-wins tiebreaker. (started_at, id) is a total order so both
@@ -469,7 +525,11 @@ export async function getActiveWorkflowRunByPath(
     //     comparison via SQLite's date/time functions.
     params.push(self.startedAt.toISOString());
     const startedAtParam = `$${String(params.length)}`;
-    const idParam = `$${String(params.length - 1)}`;
+    // NOT params.length - 1: excludeRunIds placeholders may sit between the self
+    // id and startedAt — a positional back-reference here once pointed the id
+    // tiebreak at an ancestor id instead of self (caught by the SQL-shape test).
+    // selfIdParam is always set when `self` is (same guard above).
+    const idParam = selfIdParam ?? '$2';
     const colExpr = isPostgres ? 'started_at' : 'datetime(started_at)';
     const paramExpr = isPostgres ? `${startedAtParam}::timestamptz` : `datetime(${startedAtParam})`;
     clauses.push(`(${colExpr} < ${paramExpr} OR (${colExpr} = ${paramExpr} AND id < ${idParam}))`);
@@ -489,6 +549,58 @@ export async function getActiveWorkflowRunByPath(
     getLog().error({ err, workingPath }, 'db.workflow_run_get_active_by_path_failed');
     throw new Error(`Failed to get active workflow run by path: ${err.message}`);
   }
+}
+
+/**
+ * Find every run spawned as a child of `parentRunId` (#2121 Phase 2), oldest
+ * first. Callers filter further by `metadata.parent_node_id` (a parent may have
+ * several `workflow:` nodes) or by status (the abandon cascade cancels
+ * non-terminal children).
+ */
+export async function findChildRuns(parentRunId: string): Promise<WorkflowRun[]> {
+  try {
+    const result = await pool.query<WorkflowRun>(
+      'SELECT * FROM remote_agent_workflow_runs WHERE parent_run_id = $1 ORDER BY started_at ASC',
+      [parentRunId]
+    );
+    return result.rows.map(row => normalizeWorkflowRun(row));
+  } catch (error) {
+    const err = error as Error;
+    getLog().error({ err, parentRunId }, 'db.workflow_run_find_children_failed');
+    throw new Error(`Failed to find child workflow runs: ${err.message}`);
+  }
+}
+
+/**
+ * Safety cap on the `parent_run_id` walk. The load-time and runtime cycle guards
+ * prevent creating a cyclic run tree, but a hand-edited DB must never hang the
+ * walk — deeper than the runtime depth cap (5) so a legitimately deep-but-bounded
+ * tree still resolves fully.
+ */
+const MAX_RUN_ANCESTRY_DEPTH = 32;
+
+/**
+ * Walk `parent_run_id` from `runId` up to the root, returning ancestors nearest
+ * first (the immediate parent at index 0). Depth-capped and cycle-safe (a
+ * repeated id stops the walk). Used by the runtime cycle guard and to build the
+ * path-lock exclusion set for a shared-checkout sub-run.
+ */
+export async function getRunAncestry(runId: string): Promise<WorkflowRun[]> {
+  const ancestors: WorkflowRun[] = [];
+  const seen = new Set<string>([runId]);
+  let current = await getWorkflowRun(runId);
+  let depth = 0;
+  while (current?.parent_run_id && depth < MAX_RUN_ANCESTRY_DEPTH) {
+    const parentId = current.parent_run_id;
+    if (seen.has(parentId)) break; // cyclic data — stop rather than loop forever
+    const parent = await getWorkflowRun(parentId);
+    if (!parent) break; // parent deleted (ON DELETE SET NULL orphan) — chain ends
+    ancestors.push(parent);
+    seen.add(parentId);
+    current = parent;
+    depth++;
+  }
+  return ancestors;
 }
 
 export async function findLatestRunByWorkingPath(workingPath: string): Promise<WorkflowRun | null> {
@@ -562,6 +674,15 @@ export async function findResumableRun(
  * Used by the orchestrator (all platforms) to detect approved runs that need foreground resume
  * on the prior run's worktree. Codebase scope prevents cross-project resume on persistent
  * chat conversation IDs (Telegram chat_id, Slack thread, etc.).
+ *
+ * Ordering is status-first, then recency WITHIN a status — not bare recency. The two statuses
+ * are not interchangeable candidates for the caller: a `paused` run is an open gate that is
+ * legitimately waiting and gets hydrated and resumed, while a `failed` one is deliberately gated
+ * behind an explicit user prompt first (#1549). Ordering purely by `started_at` therefore lets a
+ * newer failure shadow an older open gate, and approving that gate resumes nothing.
+ *
+ * Contrast with getActiveWorkflowRunByPath below, which sorts the opposite way (older-wins) —
+ * it answers "who took the path lock first", a different question.
  */
 export async function findResumableRunByParentConversation(
   workflowName: string,
@@ -575,7 +696,7 @@ export async function findResumableRunByParentConversation(
          AND parent_conversation_id = $2
          AND codebase_id = $3
          AND status IN ('failed', 'paused')
-       ORDER BY started_at DESC
+       ORDER BY CASE WHEN status = 'paused' THEN 0 ELSE 1 END, started_at DESC
        LIMIT 1`,
       [workflowName, parentConversationId, codebaseId]
     );
@@ -597,7 +718,7 @@ export async function resumeWorkflowRun(id: string): Promise<WorkflowRun> {
   // Split into UPDATE + SELECT to support both PostgreSQL and SQLite
   // (SQLite does not support RETURNING on UPDATE statements)
   // Each phase has its own try/catch to avoid string-sniffing own errors in a shared catch.
-  let updateResult: Awaited<ReturnType<typeof pool.query>>;
+  let updateResult: { rowCount: number };
   try {
     // Refresh started_at to NOW so the resumed row competes fairly with
     // currently-active rows in getActiveWorkflowRunByPath's older-wins
@@ -619,15 +740,49 @@ export async function resumeWorkflowRun(id: string): Promise<WorkflowRun> {
     // Resume + a chat re-dispatch, or the lock-less CLI path) could both flip
     // the same run to 'running' and double-claim the worktree. The day param is
     // bound at $2 (ORPHAN_RESUME_STALE_DAYS), matching findResumableRun's bind.
-    updateResult = await pool.query(
-      `UPDATE remote_agent_workflow_runs
-       SET status = 'running',
-           completed_at = NULL,
-           started_at = ${dialect.now()},
-           last_activity_at = ${dialect.now()}
-       WHERE id = $1 AND ${resumableStatusClause(dialect, 2)}`,
-      [id, ORPHAN_RESUME_STALE_DAYS]
-    );
+    //
+    // The CAS also clears `metadata.error` so a run that fails, is resumed, and
+    // then completes doesn't keep rendering its old failure (#2329). Because
+    // metadata is the ONLY place some failures are recorded — the CLI's SIGTERM
+    // handler calls failWorkflowRun and writes no event (#2348) — the error being
+    // cleared is first preserved as a `workflow_resumed` event, in the SAME
+    // transaction as the clear, so the audit trail can never lose it. The read,
+    // the CAS and the event INSERT are one transaction (mirroring
+    // resolveApprovalGate, #2146): the row is pinned by rowLockClause() so the
+    // value read is the value cleared, and the event is written ONLY by the
+    // caller whose CAS matched — a losing concurrent resumer writes nothing.
+    // Read-then-UPDATE rather than UPDATE…RETURNING because the SQLite adapter
+    // rejects RETURNING on UPDATE and points at exactly this pattern.
+    updateResult = await getDatabase().withTransaction(async query => {
+      const priorRows = await query<{ metadata: unknown }>(
+        `SELECT metadata FROM remote_agent_workflow_runs WHERE id = $1${rowLockClause()}`,
+        [id]
+      );
+      const clearedError = readMetadataError(priorRows.rows[0]?.metadata);
+
+      const result = await query(
+        `UPDATE remote_agent_workflow_runs
+         SET status = 'running',
+             completed_at = NULL,
+             started_at = ${dialect.now()},
+             last_activity_at = ${dialect.now()},
+             metadata = ${dialect.jsonMerge('metadata', 3)}
+         WHERE id = $1 AND ${resumableStatusClause(dialect, 2)}`,
+        [id, ORPHAN_RESUME_STALE_DAYS, JSON.stringify({ error: null })]
+      );
+
+      const rowCount = result.rowCount;
+      if (rowCount > 0 && clearedError !== null) {
+        // Same `{ error }` payload shape workflow_failed uses, so every consumer
+        // that already reads an error off a workflow_* event keeps working.
+        await insertWorkflowEvent(query, {
+          workflow_run_id: id,
+          event_type: 'workflow_resumed',
+          data: { error: clearedError },
+        });
+      }
+      return { rowCount };
+    });
   } catch (error) {
     const err = error as Error;
     getLog().error({ err, workflowRunId: id }, 'db.workflow_run_resume_failed');
@@ -713,7 +868,7 @@ export async function getWorkflowRunByWorkerPlatformId(
  */
 export async function updateWorkflowRun(
   id: string,
-  updates: Partial<Pick<WorkflowRun, 'status' | 'metadata'>>
+  updates: Partial<Pick<WorkflowRun, 'status' | 'metadata' | 'output_root'>>
 ): Promise<void> {
   const dialect = getDialect();
   const setClauses: string[] = [];
@@ -739,6 +894,16 @@ export async function updateWorkflowRun(
     const paramIndex = values.length + 1;
     values.push(JSON.stringify(updates.metadata));
     setClauses.push(`metadata = ${dialect.jsonMerge('metadata', paramIndex)}`);
+  }
+  if (updates.output_root !== undefined) {
+    values.push(updates.output_root);
+    // COALESCE makes write-once structural rather than doc-only (#2200): the
+    // first non-null write sticks and every later one is a no-op, so a resume
+    // that re-derived a different root (renamed codebase, #1192) can never
+    // orphan the artifacts this run actually wrote. No behaviour change for the
+    // executor, which already guards on a null pointer — this is the backstop
+    // for any future caller that forgets to.
+    setClauses.push(`output_root = COALESCE(output_root, $${values.length})`);
   }
 
   if (setClauses.length === 0) return;
@@ -888,6 +1053,7 @@ export async function pauseWorkflowRun(
             // null as absent (`!= null`).
             completionSignaled: approvalContext.completionSignaled ?? null,
             signaledOutput: approvalContext.signaledOutput ?? null,
+            signaledTokens: approvalContext.signaledTokens ?? null,
             onRejectPrompt: approvalContext.onRejectPrompt ?? null,
             onRejectMaxAttempts: approvalContext.onRejectMaxAttempts ?? null,
             captureResponse: approvalContext.captureResponse ?? null,
@@ -895,6 +1061,10 @@ export async function pauseWorkflowRun(
             sessionId: approvalContext.sessionId ?? null,
             sessionProvider: approvalContext.sessionProvider ?? null,
             commandSnapshot: approvalContext.commandSnapshot ?? null,
+            // #2121 Phase 2: the child_workflow gate's target child. Reset explicitly
+            // like every other optional sub-field so a prior gate's childRunId can't
+            // leak into a later non-child gate via SQLite json_patch deep-merge.
+            childRunId: approvalContext.childRunId ?? null,
           },
           // Fold caller-supplied run-level metadata (e.g. `pending_writeback`) into the
           // SAME atomic write so there is no window where the run is paused without it (M3).

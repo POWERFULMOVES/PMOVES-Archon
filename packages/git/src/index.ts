@@ -17,7 +17,6 @@ export { execFileAsync, mkdirAsync, resolveBashPath } from './exec';
 
 // Worktree operations
 export {
-  extractOwnerRepo,
   getWorktreeBase,
   isProjectScopedWorktreeBase,
   worktreeExists,
@@ -33,6 +32,7 @@ export type { WorktreeLayout, WorktreeBaseOverride } from './worktree';
 // Branch operations
 export {
   getDefaultBranch,
+  getUniqueCommitCount,
   getCurrentBranch,
   countCommitsAhead,
   checkout,
@@ -44,9 +44,14 @@ export {
   getLastCommitDate,
 } from './branch';
 
+// Forge detection
+export { detectForge } from './forge';
+export type { ForgeType, ForgeInfo } from './forge';
+
 // Repository operations
 export {
   findRepoRoot,
+  getDefaultRemote,
   getRemoteUrl,
   listChildRepos,
   syncWorkspace,

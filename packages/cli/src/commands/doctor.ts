@@ -14,7 +14,11 @@ import {
   resolveCodexBinaryWithSource,
   type CodexBinarySource,
 } from '@archon/providers/codex/binary-resolver';
-import type { Codebase } from '@archon/core';
+import {
+  resolveClaudeBinaryWithSource,
+  type ClaudeBinaryResolution,
+} from '@archon/providers/claude/binary-resolver';
+import type { Codebase, MergedConfig, SchemaVersionInfo } from '@archon/core';
 
 // Vendor-canonical credential id for Codex (since #1955 credentials are keyed
 // by vendor, not agent). A connected `openai` key signals Codex intent even
@@ -47,34 +51,94 @@ export interface CheckResult {
   message: string;
 }
 
+export interface ClaudeBinaryDeps {
+  /** `assistants.claude.claudeBinaryPath` from the merged config, if configured. */
+  configBinaryPath?: string;
+}
+
+/**
+ * Verify the Claude Code binary resolves and spawns.
+ *
+ * Delegates to the SAME resolver the runtime uses
+ * (`resolveClaudeBinaryWithSource`) instead of reading `CLAUDE_BIN_PATH`
+ * directly, and reports which tier produced the path (env / config /
+ * autodetect). Reading only the env var made doctor report a hard FAIL on
+ * setups that run fine, because `assistants.claude.claudeBinaryPath` is the
+ * documented way to configure compiled builds — training users to ignore the
+ * one tool meant to catch real environment breakage (#2263).
+ */
 export async function checkClaudeBinary(
-  env: NodeJS.ProcessEnv,
   // Injected so tests can drive the binary-mode branch — `BUNDLED_IS_BINARY`
-  // is a static const re-export and cannot be spied at runtime.
-  isBinary: boolean = BUNDLED_IS_BINARY
+  // is a static const re-export and cannot be spied at runtime. Kept (rather
+  // than inferred from a nullish resolve result like `checkCodexBinary` does)
+  // because Claude's resolver honors CLAUDE_BIN_PATH in dev mode too, so a
+  // truthy result is NOT proof of binary mode.
+  isBinary: boolean = BUNDLED_IS_BINARY,
+  loadDeps: () => Promise<ClaudeBinaryDeps> = defaultLoadClaudeBinaryDeps,
+  resolve: (
+    configPath?: string
+  ) => Promise<ClaudeBinaryResolution | undefined> = resolveClaudeBinaryWithSource
 ): Promise<CheckResult> {
   const label = 'Claude binary';
   if (!isBinary) {
     return { label, status: 'skip', message: 'dev mode (SDK resolves via node_modules)' };
   }
-  const path = env.CLAUDE_BIN_PATH;
-  if (!path) {
+
+  let deps: ClaudeBinaryDeps;
+  try {
+    deps = await loadDeps();
+  } catch (err) {
+    // Config load can throw (e.g. malformed YAML) — degrade to env/autodetect
+    // rather than failing the whole check. Mirrors checkCodexBinary.
+    getLog().debug({ err }, 'doctor.claude_deps_load_failed');
+    deps = {};
+  }
+
+  let resolved: ClaudeBinaryResolution | undefined;
+  try {
+    resolved = await resolve(deps.configBinaryPath);
+  } catch (err) {
+    // Binary mode + whole chain empty → the resolver throws with install
+    // instructions. That message is the actionable one, so surface it verbatim.
+    return { label, status: 'fail', message: (err as Error).message };
+  }
+
+  // Defensive: the resolver only returns undefined outside binary mode, which
+  // the isBinary guard above already handled.
+  if (!resolved) {
+    return { label, status: 'skip', message: 'dev mode (SDK resolves via node_modules)' };
+  }
+
+  try {
+    await execFileAsync(resolved.path, ['--version'], { timeout: 5000 });
     return {
       label,
-      status: 'fail',
-      message: 'CLAUDE_BIN_PATH is not set. Run `archon setup` to configure.',
+      status: 'pass',
+      message: `${resolved.path} (via ${resolved.source}, spawns OK)`,
     };
-  }
-  try {
-    await execFileAsync(path, ['--version'], { timeout: 5000 });
-    return { label, status: 'pass', message: `${path} (spawns OK)` };
   } catch (err) {
     return {
       label,
       status: 'fail',
-      message: `${path} did not spawn: ${(err as Error).message}`,
+      message: `${resolved.path} did not spawn: ${(err as Error).message}`,
     };
   }
+}
+
+export async function defaultLoadClaudeBinaryDeps(
+  // Injected so the config-key mapping — the tier #2263 was actually about —
+  // can be asserted without mock.module(), which is process-global and would
+  // leak into every other test in this file's batch. Defaults to the real
+  // lazy import so the production path is the zero-argument call.
+  loadMergedConfig: (cwd: string) => Promise<Pick<MergedConfig, 'assistants'>> = async cwd => {
+    // Lazy import so doctor doesn't pull the full @archon/core graph for an
+    // unrelated check (matches defaultLoadCodexBinaryDeps).
+    const { loadConfig } = await import('@archon/core');
+    return loadConfig(cwd);
+  }
+): Promise<ClaudeBinaryDeps> {
+  const config = await loadMergedConfig(process.cwd());
+  return { configBinaryPath: config.assistants.claude.claudeBinaryPath };
 }
 
 export interface CodexBinaryDeps {
@@ -339,6 +403,18 @@ export async function checkPi(env: NodeJS.ProcessEnv): Promise<CheckResult> {
 export interface DatabaseDeps {
   pool: { query: (sql: string) => Promise<unknown> };
   getDatabaseType: () => string;
+  getSchemaVersion: () => Promise<SchemaVersionInfo | null>;
+}
+
+/**
+ * Render the schema vintage (#2316) for the Database check. A bug report that can
+ * state which build created the database — and which last wrote to it — is the whole
+ * point, so an unknown or unrecorded vintage is reported as such rather than hidden.
+ */
+function describeSchemaVersion(info: SchemaVersionInfo | null): string {
+  if (!info) return 'schema vintage not recorded';
+  const created = info.createdAppVersion ?? '<unknown — predates version tracking>';
+  return `schema created by ${created}, last applied by ${info.appVersion}`;
 }
 
 export async function checkDatabase(
@@ -364,7 +440,21 @@ export async function checkDatabase(
   try {
     const dbType = deps.getDatabaseType();
     await deps.pool.query('SELECT 1');
-    return { label, status: 'pass', message: `reachable (${dbType})` };
+
+    // The vintage is diagnostic metadata: a failure to read it must not turn a
+    // reachable database into a failed check. Degrade the message instead.
+    let schemaInfo: SchemaVersionInfo | null = null;
+    try {
+      schemaInfo = await deps.getSchemaVersion();
+    } catch (err) {
+      getLog().warn({ err }, 'doctor.schema_version_read_failed');
+    }
+
+    return {
+      label,
+      status: 'pass',
+      message: `reachable (${dbType}); ${describeSchemaVersion(schemaInfo)}`,
+    };
   } catch (err) {
     getLog().error({ err }, 'doctor.db_query_failed');
     return { label, status: 'fail', message: `not reachable: ${(err as Error).message}` };
@@ -374,8 +464,8 @@ export async function checkDatabase(
 async function defaultLoadDatabaseDeps(): Promise<DatabaseDeps> {
   // Lazy import so doctor doesn't pull in the full @archon/core graph just to
   // print --help or run a different check.
-  const { pool, getDatabaseType } = await import('@archon/core');
-  return { pool, getDatabaseType };
+  const { pool, getDatabaseType, getSchemaVersion } = await import('@archon/core');
+  return { pool, getDatabaseType, getSchemaVersion };
 }
 
 type FolderCodebase = Pick<Codebase, 'name' | 'default_cwd' | 'kind'>;
@@ -644,7 +734,7 @@ export async function doctorCommand(
   const promises = checks
     ? checks.map(fn => fn())
     : [
-        checkClaudeBinary(env),
+        checkClaudeBinary(),
         checkCodexBinary(env),
         checkGhAuth(env),
         checkPi(env),

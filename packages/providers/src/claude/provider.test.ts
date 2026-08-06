@@ -132,6 +132,7 @@ describe('ClaudeProvider', () => {
         thinkingControl: true,
         fallbackModel: true,
         sandbox: true,
+        settingSources: true,
         nativeTools: true,
       });
     });
@@ -235,7 +236,7 @@ describe('ClaudeProvider', () => {
       });
     });
 
-    test('yields result with cost, stopReason, numTurns, modelUsage when SDK provides them', async () => {
+    test('yields result with cost, stopReason, numTurns, and a resolved model when SDK provides them', async () => {
       mockQuery.mockImplementation(async function* () {
         yield {
           type: 'result',
@@ -243,11 +244,11 @@ describe('ClaudeProvider', () => {
           total_cost_usd: 0.0042,
           stop_reason: 'end_turn',
           num_turns: 3,
-          model_usage: {
+          modelUsage: {
             'claude-sonnet-4-6': {
-              input_tokens: 100,
-              output_tokens: 50,
-              cache_read_input_tokens: 10,
+              inputTokens: 100,
+              outputTokens: 50,
+              cacheReadInputTokens: 10,
             },
           },
         };
@@ -265,17 +266,65 @@ describe('ClaudeProvider', () => {
         cost: 0.0042,
         stopReason: 'end_turn',
         numTurns: 3,
-        modelUsage: {
-          'claude-sonnet-4-6': {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_read_input_tokens: 10,
-          },
-        },
+        resolvedModel: { id: 'claude-sonnet-4-6' },
       });
+      // Single-model usage is unambiguous — no ambiguity warning.
+      expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
-    test('omits cost, stopReason, numTurns, modelUsage when SDK result has none', async () => {
+    test('picks the greatest-output-token model and warns when modelUsage has multiple keys', async () => {
+      // A subagent pinned via `agents:` (or a fallbackModel takeover) puts more
+      // than one model in the record, and key order carries no guarantee — the
+      // main model here is deliberately NOT first.
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'result',
+          session_id: 'sid-multi-model',
+          modelUsage: {
+            'claude-haiku-4-5-20251001': {
+              inputTokens: 400,
+              outputTokens: 20,
+              cacheReadInputTokens: 0,
+            },
+            'claude-sonnet-5': {
+              inputTokens: 120,
+              outputTokens: 900,
+              cacheReadInputTokens: 10,
+            },
+          },
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks[0]).toMatchObject({ resolvedModel: { id: 'claude-sonnet-5' } });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        {
+          models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'],
+          selected: 'claude-sonnet-5',
+        },
+        'claude.resolved_model_ambiguous'
+      );
+    });
+
+    test('omits resolvedModel when modelUsage is an empty record', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid-empty-usage', modelUsage: {} };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks[0]).not.toHaveProperty('resolvedModel');
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+
+    test('omits cost, stopReason, numTurns, and resolvedModel when SDK result has none', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid-bare' };
       });
@@ -288,7 +337,7 @@ describe('ClaudeProvider', () => {
       expect(chunks[0]).not.toHaveProperty('cost');
       expect(chunks[0]).not.toHaveProperty('stopReason');
       expect(chunks[0]).not.toHaveProperty('numTurns');
-      expect(chunks[0]).not.toHaveProperty('modelUsage');
+      expect(chunks[0]).not.toHaveProperty('resolvedModel');
     });
 
     test('omits stopReason when stop_reason is null', async () => {
@@ -1208,6 +1257,41 @@ describe('ClaudeProvider', () => {
       expect(callArgs.options.settingSources).toEqual(['project']);
     });
 
+    test('per-node settingSources override wins over the assistant default', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'test-session' };
+      });
+
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { settingSources: ['project'] },
+        assistantConfig: { settingSources: ['project', 'user'] },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      expect(callArgs.options.settingSources).toEqual(['project']);
+    });
+
+    test('per-node settingSources applies when no assistant default is set', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'test-session' };
+      });
+
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { settingSources: [] },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      // An explicit empty array is a valid opt-out of ALL setting sources —
+      // it must not fall through to the ['project', 'user'] default.
+      expect(callArgs.options.settingSources).toEqual([]);
+    });
+
     test('passes env from requestOptions into SDK options', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
@@ -1792,6 +1876,81 @@ describe('sendQuery decomposition behaviors', () => {
     expect(err.message).toContain('stderr:');
     expect(err.message).toContain('diagnostic: something broke');
   }, 5_000);
+
+  test('PostToolUse hooks preserve success, failure, and interruption outcomes', async () => {
+    mockQuery.mockImplementation(async function* (args: {
+      options: {
+        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
+      };
+    }) {
+      const successHook = args.options.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      const failureHook = args.options.hooks?.PostToolUseFailure?.[0]?.hooks?.[0];
+      await successHook?.({ tool_name: 'Read', tool_use_id: 'success-id', tool_response: 'ok' });
+      await failureHook?.({
+        tool_name: 'Bash',
+        tool_use_id: 'error-id',
+        error: 'exit 1',
+        is_interrupt: false,
+      });
+      await failureHook?.({
+        tool_name: 'Task',
+        tool_use_id: 'interrupt-id',
+        error: 'stopped',
+        is_interrupt: true,
+      });
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } };
+    });
+
+    const chunks = [];
+    for await (const chunk of client.sendQuery('test', '/workspace')) chunks.push(chunk);
+
+    expect(chunks.slice(0, 3)).toEqual([
+      {
+        type: 'tool_result',
+        toolName: 'Read',
+        toolOutput: 'ok',
+        toolCallId: 'success-id',
+        toolOutcome: 'success',
+      },
+      {
+        type: 'tool_result',
+        toolName: 'Bash',
+        toolOutput: '❌ Error: exit 1',
+        toolCallId: 'error-id',
+        toolOutcome: 'error',
+      },
+      {
+        type: 'tool_result',
+        toolName: 'Task',
+        toolOutput: '⚠️ Interrupted: stopped',
+        toolCallId: 'interrupt-id',
+        toolOutcome: 'interrupted',
+      },
+    ]);
+  });
+
+  test('terminal tool result queue drain preserves hook outcome', async () => {
+    mockQuery.mockImplementation(async function* (args: {
+      options: {
+        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
+      };
+    }) {
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } };
+      const successHook = args.options.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      await successHook?.({ tool_name: 'Read', tool_use_id: 'late-id', tool_response: 'ok' });
+    });
+
+    const chunks = [];
+    for await (const chunk of client.sendQuery('test', '/workspace')) chunks.push(chunk);
+
+    expect(chunks).toContainEqual({
+      type: 'tool_result',
+      toolName: 'Read',
+      toolOutput: 'ok',
+      toolCallId: 'late-id',
+      toolOutcome: 'success',
+    });
+  });
 
   test('PostToolUse hook handles circular reference without crashing', async () => {
     mockQuery.mockImplementation(async function* (args: {

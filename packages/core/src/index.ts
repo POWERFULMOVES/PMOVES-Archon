@@ -39,10 +39,12 @@ export {
   getDialect,
   getDatabaseType,
   getDbNotificationListener,
+  getSchemaVersion,
   closeDatabase,
   resetDatabase,
 } from './db/connection';
 export type { IDatabase, SqlDialect, DbNotificationListener } from './db/adapters/types';
+export type { SchemaVersionInfo } from './db/schema-version';
 
 // Namespaced db modules for explicit access
 export * as conversationDb from './db/conversations';
@@ -66,6 +68,10 @@ export {
   createWorkflowDeps,
   registerGitHubAppAuthProvider,
 } from './workflows/store-adapter';
+
+// Per-child isolation resolver factory (#2121 slice 2, PR-A)
+export { createChildWorktreeResolver } from './workflows/child-isolation-resolver';
+export type { ChildWorktreeResolverConfig } from './workflows/child-isolation-resolver';
 
 // Workflow Events DB
 export * as workflowEventDb from './db/workflow-events';

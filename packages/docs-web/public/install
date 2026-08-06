@@ -15,10 +15,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/coleam00/Archon/main/scripts/install.sh | bash
 #
 #   # Install specific version
-#   VERSION=v0.2.0 curl -fsSL ... | bash
+#   curl -fsSL ... | VERSION=v0.2.0 bash
 #
 #   # Install to custom directory
-#   INSTALL_DIR=~/.local/bin curl -fsSL ... | bash
+#   curl -fsSL ... | INSTALL_DIR=~/.local/bin bash
+#
+# NOTE: the variable must prefix `bash`, not `curl`. In `VAR=x cmd1 | cmd2` the
+# assignment applies only to cmd1, so `VERSION=... curl ... | bash` sets it on the
+# download and the installer never sees it — it silently uses the defaults below.
 
 set -euo pipefail
 
@@ -64,6 +68,14 @@ detect_platform() {
       ;;
   esac
 
+  # Rosetta reports x86_64 even on Apple Silicon. Ask macOS for the physical
+  # architecture before selecting a release asset.
+  if [ "$os" = "darwin" ] \
+    && { [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ]; } \
+    && [ "$(sysctl -in sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
+    arch="arm64"
+  fi
+
   case "$arch" in
     x86_64|amd64)
       arch="x64"
@@ -78,6 +90,34 @@ detect_platform() {
   esac
 
   echo "${os}-${arch}"
+}
+
+# Verify that the host can run the compiled x64 release. Return 1 when AVX2 is
+# definitely absent and 2 when CPU features cannot be determined.
+check_cpu_compatibility() {
+  local platform="$1"
+  local cpu_features
+
+  case "$platform" in
+    linux-x64)
+      local cpuinfo_path="${ARCHON_CPUINFO_PATH:-/proc/cpuinfo}"
+      if [ ! -r "$cpuinfo_path" ]; then
+        return 2
+      fi
+      cpu_features=$(grep -Ei '^[[:space:]]*(flags|features)[[:space:]]*:' "$cpuinfo_path") || return 2
+      ;;
+    darwin-x64)
+      cpu_features=$(sysctl -n machdep.cpu.leaf7_features 2>/dev/null) || return 2
+      if [ -z "$cpu_features" ]; then
+        return 2
+      fi
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  printf '%s\n' "$cpu_features" | grep -Eiq '(^|[[:space:]])avx2([[:space:]]|$)'
 }
 
 # Get download URL for the binary
@@ -173,6 +213,33 @@ main() {
   platform=$(detect_platform)
   success "Platform: $platform"
 
+  local cpu_compatibility_status=0
+  check_cpu_compatibility "$platform" || cpu_compatibility_status=$?
+  if [ "$cpu_compatibility_status" -eq 1 ]; then
+    error "The compiled Archon x64 binary requires a CPU with AVX2 support."
+    error "No binary was downloaded, installed, or replaced."
+    error "Install Archon from source instead: https://archon.diy/getting-started/installation/#from-source"
+    exit 1
+  elif [ "$cpu_compatibility_status" -ne 0 ]; then
+    # Indeterminate is NOT the same as unsupported: the CPU may well have AVX2,
+    # we just could not read its feature flags (restricted /proc, missing sysctl —
+    # e.g. gVisor, hardened container runtimes). Refusing is still the right
+    # default, but this case gets an override because the user may know something
+    # the installer cannot see. The definitely-absent branch above deliberately
+    # has NO override — forcing a binary that cannot execute is the original bug.
+    if [ "${ARCHON_SKIP_CPU_CHECK:-}" = "1" ]; then
+      warn "Could not determine whether this x64 CPU supports AVX2."
+      warn "Continuing because ARCHON_SKIP_CPU_CHECK=1 is set."
+      warn "If the CPU lacks AVX2, the installed binary will fail with 'Illegal instruction'."
+    else
+      error "Could not determine whether this x64 CPU supports AVX2."
+      error "No binary was downloaded, installed, or replaced."
+      error "If you know it does, re-run with ARCHON_SKIP_CPU_CHECK=1."
+      error "Otherwise install Archon from source: https://archon.diy/getting-started/installation/#from-source"
+      exit 1
+    fi
+  fi
+
   # Get download URL
   local download_url checksums_url
   download_url=$(get_download_url "$platform" "$VERSION")
@@ -202,6 +269,16 @@ main() {
   # Make executable
   chmod +x "$binary_path"
 
+  # Confirm the release can execute before replacing an existing installation.
+  info "Verifying downloaded binary..."
+  local version_output
+  if ! version_output=$("$binary_path" version 2>&1); then
+    error "Downloaded binary failed its version check:"
+    echo "$version_output" >&2
+    error "Existing installation was left unchanged."
+    exit 1
+  fi
+
   # Install
   info "Installing to $INSTALL_DIR/$BINARY_NAME..."
 
@@ -221,18 +298,19 @@ main() {
 
   success "Installed to $INSTALL_DIR/$BINARY_NAME"
 
-  # Verify installation
-  echo ""
-  info "Verifying installation..."
-  local version_output
-  if version_output=$("$INSTALL_DIR/$BINARY_NAME" version 2>&1); then
-    echo "$version_output"
-    success "Installation complete!"
-  else
-    warn "Binary installed but version check failed:"
-    echo "$version_output"
-    warn "The binary may not work correctly. Please verify manually with: $INSTALL_DIR/$BINARY_NAME version"
+  # Re-run the version check against the INSTALLED path. The probe above ran on the
+  # temp download and its output was cached; printing that after `mv` would report
+  # success without ever executing the file the user will actually invoke — which is
+  # exactly the "installed fine but won't run" failure #2295 reported. See #2338.
+  local installed_output
+  if ! installed_output=$("$INSTALL_DIR/$BINARY_NAME" version 2>&1); then
+    error "Installed binary failed its version check at $INSTALL_DIR/$BINARY_NAME:"
+    echo "$installed_output" >&2
+    exit 1
   fi
+
+  echo "$installed_output"
+  success "Installation complete!"
 
   # Check if in PATH
   if ! command -v "$BINARY_NAME" >/dev/null 2>&1; then
@@ -251,4 +329,10 @@ main() {
   echo ""
 }
 
-main "$@"
+# `${BASH_SOURCE[0]:-$0}` — NOT bare `${BASH_SOURCE[0]}`. Under `curl … | bash` the
+# script arrives on stdin, where BASH_SOURCE[0] is unbound; with `set -u` (above)
+# a bare reference aborts before main() ever runs, so the documented install path
+# fails for every user on every platform. See #2338.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+  main "$@"
+fi

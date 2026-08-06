@@ -14,6 +14,14 @@ import type {
 
 export type { WorkflowNodeSession } from './schemas';
 
+export interface DagResumeSnapshot {
+  completedNodeOutputs: Map<string, string>;
+  tokens: {
+    input: number;
+    output: number;
+  };
+}
+
 /** Composite primary key identifying a single persisted node session row. */
 export interface WorkflowNodeSessionKey {
   workflow_name: string;
@@ -26,6 +34,12 @@ export const WORKFLOW_EVENT_TYPES = [
   'workflow_started',
   'workflow_completed',
   'workflow_failed',
+  // #2348 — written by the resume CAS ONLY when it clears a non-empty
+  // `metadata.error`, carrying that error in `data.error`. It is the audit
+  // record for a failure that resume would otherwise erase (the CLI's SIGTERM
+  // handler records a failure in metadata and nowhere else), NOT a general
+  // "a resume happened" marker: its absence never means the run wasn't resumed.
+  'workflow_resumed',
   'node_started',
   'node_completed',
   'node_failed',
@@ -62,11 +76,43 @@ export const WORKFLOW_EVENT_TYPES = [
   'writeback_requested',
   'writeback_applied',
   'writeback_discarded',
+  // Evidence gate (#2230): `evidence_policy.required` was set but
+  // `$ARTIFACTS_DIR/evidence.json` was absent at completion time — the run was
+  // refused terminal `completed` and marked failed. Data carries the expected path.
+  'evidence_validation_failed',
+  // #2213 — keys the engine dropped from this run's workflow YAML. Written by the
+  // executor at run start for EVERY run that has them, whatever surface started
+  // it, so the record does not depend on a chat/console notification being
+  // deliverable. `data.warnings` is the message list. Absence means the YAML was
+  // clean OR the run predates this event type — never that delivery failed.
+  'workflow_parse_warnings',
 ] as const;
 
 export type WorkflowEventType = (typeof WORKFLOW_EVENT_TYPES)[number];
 
-export interface IWorkflowStore {
+/**
+ * Run-tree navigation (#2121 Phase 2) — a narrow, distinct concern (walking the
+ * `parent_run_id` graph) kept out of the fat `IWorkflowStore` per the project's ISP
+ * rule. `IWorkflowStore` extends it so existing consumers don't churn, but a caller
+ * that only needs run-tree reads can depend on this alone.
+ */
+export interface IRunTreeStore {
+  /**
+   * Find every run whose `parent_run_id` is `parentRunId`. Used by a `workflow:`
+   * node's re-entry logic to locate its child (filtered further by
+   * `metadata.parent_node_id`) and by the abandon cascade to cancel children.
+   */
+  findChildRuns(parentRunId: string): Promise<WorkflowRun[]>;
+  /**
+   * Walk the `parent_run_id` chain from `runId` UP to the root, returning the
+   * ancestors (nearest parent first), depth-capped. Used by the runtime cycle
+   * guard (reject a child whose target name is already an ancestor) and to build
+   * the path-lock exclusion set.
+   */
+  getRunAncestry(runId: string): Promise<WorkflowRun[]>;
+}
+
+export interface IWorkflowStore extends IRunTreeStore {
   // Run lifecycle
   createWorkflowRun(data: {
     workflow_name: string;
@@ -78,6 +124,11 @@ export interface IWorkflowStore {
     parent_conversation_id?: string;
     /** Archon user UUID; populated via ExecuteWorkflowOptions.userId. */
     user_id?: string;
+    /**
+     * Run-tree parent (#2121 Phase 2). Set for a `workflow:` sub-run so its row
+     * links back to the spawning parent run; omitted for top-level runs.
+     */
+    parent_run_id?: string;
   }): Promise<WorkflowRun>;
   getWorkflowRun(id: string): Promise<WorkflowRun | null>;
   /**
@@ -95,17 +146,28 @@ export interface IWorkflowStore {
    * Stale `pending` rows (older than ~5 minutes) are treated as orphaned
    * and ignored, so leaks from crashed dispatches don't permanently block
    * a path.
+   *
+   * `excludeRunIds` additionally drops those run ids from the active set. A
+   * `workflow:` sub-run shares its parent's checkout (#2121 Phase 2), so the
+   * child's path-lock must exclude its ancestor chain — otherwise the child
+   * self-blocks against the parent's own `running`/`paused` row on that path.
    */
   getActiveWorkflowRunByPath(
     workingPath: string,
-    self?: { id: string; startedAt: Date }
+    self?: { id: string; startedAt: Date; excludeRunIds?: string[] }
   ): Promise<WorkflowRun | null>;
   findResumableRun(workflowName: string, workingPath: string): Promise<WorkflowRun | null>;
   failOrphanedRuns(): Promise<{ count: number }>;
   resumeWorkflowRun(id: string): Promise<WorkflowRun>;
+  /**
+   * `output_root` (#2200) is write-once: the executor sets it at run start only
+   * when the persisted value is null. Re-writing it on resume would re-derive
+   * the path from a possibly-renamed codebase and orphan the run's artifacts,
+   * defeating the whole point of persisting it.
+   */
   updateWorkflowRun(
     id: string,
-    updates: Partial<Pick<WorkflowRun, 'status' | 'metadata'>>
+    updates: Partial<Pick<WorkflowRun, 'status' | 'metadata' | 'output_root'>>
   ): Promise<void>;
   updateWorkflowActivity(id: string): Promise<void>;
   getWorkflowRunStatus(id: string): Promise<WorkflowRunStatus | null>;
@@ -151,14 +213,13 @@ export interface IWorkflowStore {
   }): Promise<void>;
 
   /**
-   * Return a map of nodeId → output for all node_completed events
-   * from a prior DAG workflow run. Used for DAG resume: the executor
-   * pre-populates nodeOutputs so completed nodes are skipped on re-run.
+   * Return completed node outputs and cumulative token usage from a prior DAG
+   * workflow run. Used for resume hydration so completed nodes are skipped and
+   * the run-level token tally includes every execution of the run.
    *
-   * Returns an empty map when no completed nodes exist.
    * Throws on DB error — caller (executor.ts) owns the degradation policy.
    */
-  getCompletedDagNodeOutputs(workflowRunId: string): Promise<Map<string, string>>;
+  getDagResumeSnapshot(workflowRunId: string): Promise<DagResumeSnapshot>;
 
   // Per-codebase env vars for workflow node injection
   getCodebaseEnvVars(codebaseId: string): Promise<Record<string, string>>;

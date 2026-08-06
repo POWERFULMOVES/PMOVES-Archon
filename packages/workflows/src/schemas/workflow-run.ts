@@ -121,9 +121,63 @@ export const workflowRunSchema = z.object({
   last_activity_at: z.date().nullable(),
   working_path: z.string().nullable(),
   user_id: z.string().nullable(),
+  /**
+   * Run-tree parent (#2121 Phase 2). Set when this run is a `workflow:` sub-run
+   * spawned as one node of a parent run; null for top-level runs. Self-referential
+   * FK with ON DELETE SET NULL (a deleted parent orphans, never cascades). Paired
+   * with `metadata.parent_node_id` so the parent can re-find WHICH node's child on
+   * resume.
+   */
+  parent_run_id: z.string().nullable(),
+  /**
+   * Durable pointer to this run's storage tree (#2200) — the resolved
+   * `~/.archon/workspaces/<project>/` root its artifacts, logs, and state live
+   * under. Written ONCE at run start and never rewritten (a resume must not
+   * re-derive it). Readers prefer it and only fall back to deriving identity
+   * from the codebase row when it is null, which is what keeps historical
+   * artifacts addressable across a codebase rename (#1192). Null on rows
+   * created before the column existed.
+   */
+  output_root: z.string().nullable(),
 });
 
 export type WorkflowRun = z.infer<typeof workflowRunSchema>;
+
+/**
+ * Keys the sub-run machinery writes into a child run's untyped `metadata` JSONB, and the
+ * shape of each value. `metadata` is `Record<string, unknown>`, so a typo in a string
+ * literal at either end silently no-ops — the write lands under a key nobody reads, or the
+ * read returns undefined and the child looks like it was never stamped. Naming them once
+ * gives the compiler the only handle it can have on an untyped column: writer and reader
+ * now share a symbol instead of agreeing by luck.
+ *
+ * `parent_node_id` — which node of the parent spawned this child (both 1:1 and fan-out).
+ * `child_index`    — the fan-out instance's position in the item list; ABSENT on a 1:1
+ *                    child, which is what distinguishes the two on re-entry.
+ * `fan_out_item_hash` — hash of the item the child was spawned with, so a resume can warn
+ *                    when a non-deterministic producer changed it under the same index.
+ */
+export const SUBRUN_METADATA_KEYS = {
+  parentNodeId: 'parent_node_id',
+  childIndex: 'child_index',
+  fanOutItemHash: 'fan_out_item_hash',
+} as const;
+
+/** Typed view of the sub-run keys on a run's metadata; each is undefined when unset. */
+export function readSubrunMetadata(metadata: Record<string, unknown> | undefined): {
+  parentNodeId: string | undefined;
+  childIndex: number | undefined;
+  fanOutItemHash: string | undefined;
+} {
+  const parentNodeId = metadata?.[SUBRUN_METADATA_KEYS.parentNodeId];
+  const childIndex = metadata?.[SUBRUN_METADATA_KEYS.childIndex];
+  const fanOutItemHash = metadata?.[SUBRUN_METADATA_KEYS.fanOutItemHash];
+  return {
+    parentNodeId: typeof parentNodeId === 'string' ? parentNodeId : undefined,
+    childIndex: typeof childIndex === 'number' ? childIndex : undefined,
+    fanOutItemHash: typeof fanOutItemHash === 'string' ? fanOutItemHash : undefined,
+  };
+}
 
 /** Approval context stored in workflow run metadata when paused for human review. */
 export interface ApprovalContext {
@@ -138,8 +192,21 @@ export interface ApprovalContext {
    *    overlay diff of a finished container run awaiting approve→apply / reject→
    *    discard. Reuses the approve/reject CAS machinery; the executor's resume
    *    path branches on the persisted `pending_writeback` marker, not this node.
+   *  - `child_workflow`   — a `workflow:` sub-run node (#2121 Phase 2) whose CHILD
+   *    run paused at its own gate. The parent pauses "blocked on child"; `nodeId`
+   *    is the parent's workflow node, `childRunId` the paused child. The reviewer
+   *    approves the CHILD by run id; when the child terminates, the parent_run_id
+   *    auto-resume hook re-enters the parent (executor.ts), which re-runs the
+   *    workflow node, finds the child terminal, and threads its output. NO
+   *    node_completed is written for the parent's node on this pause.
    */
-  type?: 'approval' | 'interactive_loop' | 'writeback';
+  type?: 'approval' | 'interactive_loop' | 'writeback' | 'child_workflow';
+  /**
+   * Child run id when `type === 'child_workflow'` — the specific paused sub-run
+   * the parent is blocked on. Read by the parent auto-resume guard so a DIFFERENT
+   * child of the same parent can't trigger the wrong re-entry.
+   */
+  childRunId?: string;
   /** Current loop iteration when paused (interactive loops only). */
   iteration?: number;
   /**
@@ -195,6 +262,27 @@ export interface ApprovalContext {
    */
   signaledOutput?: string | null;
   /**
+   * Interactive-loop only, and written by the single-node `loop` gate ONLY. Token usage
+   * accumulated by the invocation that produced the signal-bearing paused iteration,
+   * persisted so the finalize-on-approve path can write a node_completed carrying the
+   * usage it really consumed instead of a silent zero (#2333). Only set when
+   * completionSignaled is true; null otherwise. A `loop_group` gate deliberately does
+   * NOT write this: its body nodes persist their own `<groupId>.<nodeId>` rows (with
+   * tokens) before the pause, so a finalize row repeating the total would double-count.
+   *
+   * Scope note: this is the PAUSING invocation's total, matching what the normal
+   * (re-run) completion path reports — a loop that gates more than once attributes each
+   * invocation's usage to that invocation, and EARLIER invocations' usage is reported
+   * nowhere: a pausing invocation never reaches completeWorkflowRun (the status is
+   * `paused`, so the pre-complete status check bails), and `total_tokens_*` are written
+   * only there. So on a twice-gated loop the surviving node row and the run row both
+   * report only the final invocation. That under-report predates this field (before
+   * #2333 nothing was persisted at all) and belongs to the "preserve terminal provider
+   * stats across a gate" fix tracked by #2345, which also covers the `cost_usd` and
+   * resolved-model loss at the same gate.
+   */
+  signaledTokens?: { input: number; output: number } | null;
+  /**
    * Interactive-loop only. Read-once snapshot of a command-backed loop's
    * (`loop.command`) loaded prompt body, persisted at gate pause so the resumed
    * invocation reuses the exact text the run started with — a command file
@@ -245,6 +333,28 @@ export function isApprovalContext(val: unknown): val is ApprovalContext {
     val !== null &&
     typeof (val as Record<string, unknown>).nodeId === 'string' &&
     typeof (val as Record<string, unknown>).message === 'string'
+  );
+}
+
+/**
+ * True when `run` is currently paused blocked on the child sub-run `childRunId`
+ * (#2121 Phase 2) — i.e. a `paused` run whose `metadata.approval` is a
+ * `child_workflow` gate pointing at that child. This is the single source of the
+ * "parent blocked on this child" invariant, shared by the abandon-strand detector
+ * (`findParentBlockedOn`, @archon/core) and the auto-resume hook
+ * (`maybeResumeParentRun`, @archon/workflows) so the two cannot drift if the gate
+ * shape changes. Reads defensively from possibly-malformed metadata.
+ */
+export function isRunBlockedOnChild(
+  run: { status: WorkflowRunStatus; metadata?: Record<string, unknown> },
+  childRunId: string
+): boolean {
+  if (run.status !== 'paused') return false;
+  const approval = run.metadata?.approval;
+  return (
+    isApprovalContext(approval) &&
+    approval.type === 'child_workflow' &&
+    approval.childRunId === childRunId
   );
 }
 

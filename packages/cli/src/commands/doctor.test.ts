@@ -26,13 +26,16 @@ import {
   checkTelegram,
   checkTelemetry,
   checkFolderProject,
+  defaultLoadClaudeBinaryDeps,
   doctorCommand,
+  type ClaudeBinaryDeps,
   type CodexBinaryDeps,
   type DatabaseDeps,
   type FolderProjectDeps,
   type OpenCodeDeps,
 } from './doctor';
 import * as doctorModule from './doctor';
+import type { MergedConfig } from '@archon/core';
 
 describe('checkClaudeBinary', () => {
   let execSpy: ReturnType<typeof spyOn<typeof git, 'execFileAsync'>>;
@@ -45,23 +48,32 @@ describe('checkClaudeBinary', () => {
     execSpy.mockRestore();
   });
 
+  const noDeps = async (): Promise<ClaudeBinaryDeps> => ({});
+
   it('returns skip when not in binary mode', async () => {
-    const result = await checkClaudeBinary({}, false);
+    const result = await checkClaudeBinary(false);
     expect(result.status).toBe('skip');
     expect(result.label).toBe('Claude binary');
     expect(execSpy).not.toHaveBeenCalled();
   });
 
-  it('returns fail in binary mode when CLAUDE_BIN_PATH is unset', async () => {
-    const result = await checkClaudeBinary({}, true);
+  it('returns fail in binary mode when the whole resolution chain is empty', async () => {
+    const result = await checkClaudeBinary(true, noDeps, async () => {
+      throw new Error('Claude Code not found. Archon requires the Claude Code executable');
+    });
     expect(result.status).toBe('fail');
-    expect(result.message).toContain('CLAUDE_BIN_PATH');
+    // The resolver's install instructions are surfaced verbatim — they are the
+    // actionable message, unlike the old "CLAUDE_BIN_PATH is not set".
+    expect(result.message).toContain('Claude Code not found');
     expect(execSpy).not.toHaveBeenCalled();
   });
 
   it('returns pass in binary mode when binary spawns successfully', async () => {
     execSpy.mockResolvedValue({ stdout: '1.0.0', stderr: '' });
-    const result = await checkClaudeBinary({ CLAUDE_BIN_PATH: '/opt/claude' }, true);
+    const result = await checkClaudeBinary(true, noDeps, async () => ({
+      path: '/opt/claude',
+      source: 'env',
+    }));
     expect(result.status).toBe('pass');
     expect(result.message).toContain('/opt/claude');
     expect(execSpy).toHaveBeenCalledWith('/opt/claude', ['--version'], expect.any(Object));
@@ -69,10 +81,101 @@ describe('checkClaudeBinary', () => {
 
   it('returns fail in binary mode when spawn throws', async () => {
     execSpy.mockRejectedValue(new Error('ENOENT'));
-    const result = await checkClaudeBinary({ CLAUDE_BIN_PATH: '/opt/claude' }, true);
+    const result = await checkClaudeBinary(true, noDeps, async () => ({
+      path: '/opt/claude',
+      source: 'env',
+    }));
     expect(result.status).toBe('fail');
     expect(result.message).toContain('did not spawn');
     expect(result.message).toContain('ENOENT');
+  });
+
+  // #2263: doctor previously read only CLAUDE_BIN_PATH and hard-FAILed setups
+  // configured via assistants.claude.claudeBinaryPath — the documented fix for
+  // compiled builds — even though those setups run workflows fine.
+  it('passes when the binary comes from config rather than CLAUDE_BIN_PATH (#2263)', async () => {
+    execSpy.mockResolvedValue({ stdout: '1.0.0', stderr: '' });
+    let sawConfigPath: string | undefined;
+    const result = await checkClaudeBinary(
+      true,
+      async () => ({ configBinaryPath: '/Users/me/bin/claude' }),
+      async configPath => {
+        sawConfigPath = configPath;
+        return { path: configPath as string, source: 'config' };
+      }
+    );
+
+    // The config path must actually reach the resolver, not be ignored.
+    expect(sawConfigPath).toBe('/Users/me/bin/claude');
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('/Users/me/bin/claude');
+    // Which tier resolved it is surfaced so users can see what the runtime does.
+    expect(result.message).toContain('via config');
+    expect(result.message).not.toContain('CLAUDE_BIN_PATH is not set');
+  });
+
+  it('reports the autodetect tier when the native installer path resolves', async () => {
+    execSpy.mockResolvedValue({ stdout: '1.0.0', stderr: '' });
+    const result = await checkClaudeBinary(true, noDeps, async () => ({
+      path: '/home/me/.local/bin/claude',
+      source: 'autodetect',
+    }));
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('via autodetect');
+  });
+
+  it('degrades to env/autodetect when config loading throws', async () => {
+    execSpy.mockResolvedValue({ stdout: '1.0.0', stderr: '' });
+    const result = await checkClaudeBinary(
+      true,
+      async () => {
+        throw new Error('malformed config.yaml');
+      },
+      async configPath => {
+        expect(configPath).toBeUndefined();
+        return { path: '/opt/claude', source: 'env' };
+      }
+    );
+    // A broken config must not fail the binary check outright.
+    expect(result.status).toBe('pass');
+  });
+
+  // The tests above inject BOTH seams, so they only prove parameter plumbing
+  // inside checkClaudeBinary. The two below exercise the real
+  // defaultLoadClaudeBinaryDeps, which is where #2263 actually lived: reading
+  // the wrong config key type-checks and would otherwise ship green.
+  // The stub config deliberately carries a DIFFERENT value under
+  // assistants.codex.codexBinaryPath so a key mix-up fails loudly rather than
+  // resolving to the same string by accident.
+  const stubConfig = async (): Promise<Pick<MergedConfig, 'assistants'>> => ({
+    assistants: {
+      claude: { claudeBinaryPath: '/from/claude/config' },
+      codex: { codexBinaryPath: '/from/codex/config' },
+    },
+  });
+
+  it('reads assistants.claude.claudeBinaryPath, not another assistant key (#2263)', async () => {
+    const deps = await defaultLoadClaudeBinaryDeps(stubConfig);
+    expect(deps.configBinaryPath).toBe('/from/claude/config');
+  });
+
+  it('routes the real deps loader through to the resolver (#2263 wiring guard)', async () => {
+    execSpy.mockResolvedValue({ stdout: '1.0.0', stderr: '' });
+    let sawConfigPath: string | undefined;
+
+    const result = await checkClaudeBinary(
+      true,
+      // The real loader, not a fake — this is the link the bug broke.
+      () => defaultLoadClaudeBinaryDeps(stubConfig),
+      async configPath => {
+        sawConfigPath = configPath;
+        return { path: configPath as string, source: 'config' };
+      }
+    );
+
+    expect(sawConfigPath).toBe('/from/claude/config');
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('via config');
   });
 });
 
@@ -380,36 +483,85 @@ describe('checkPi', () => {
 });
 
 describe('checkDatabase', () => {
-  it('returns pass when query succeeds', async () => {
-    const deps: DatabaseDeps = {
+  const schemaVersion = {
+    createdAppVersion: '0.5.3',
+    appVersion: '0.6.0',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    appliedAt: '2026-07-01T00:00:00.000Z',
+  };
+
+  // Mirrors the makeDeps() helper in the checkFolderProject block below, so each
+  // test states only the field it varies.
+  function makeDeps(over: Partial<DatabaseDeps> = {}): DatabaseDeps {
+    return {
       pool: { query: async () => undefined },
       getDatabaseType: () => 'sqlite',
+      getSchemaVersion: async () => schemaVersion,
+      ...over,
     };
-    const result = await checkDatabase(async () => deps);
+  }
+
+  it('returns pass when query succeeds', async () => {
+    const result = await checkDatabase(async () => makeDeps());
     expect(result.status).toBe('pass');
     expect(result.message).toContain('sqlite');
   });
 
   it('reports postgres dbType when configured', async () => {
-    const deps: DatabaseDeps = {
-      pool: { query: async () => undefined },
-      getDatabaseType: () => 'postgres',
-    };
-    const result = await checkDatabase(async () => deps);
+    const result = await checkDatabase(async () => makeDeps({ getDatabaseType: () => 'postgres' }));
     expect(result.status).toBe('pass');
     expect(result.message).toContain('postgres');
   });
 
-  it('returns fail with "not reachable" when query throws', async () => {
-    const deps: DatabaseDeps = {
-      pool: {
-        query: async () => {
-          throw new Error('connection refused');
+  // Schema vintage (#2316): a bug report has to be able to state which build
+  // created the database and which last wrote to it.
+  it('reports both schema vintages when recorded', async () => {
+    const result = await checkDatabase(async () => makeDeps());
+    expect(result.message).toContain('schema created by 0.5.3');
+    expect(result.message).toContain('last applied by 0.6.0');
+  });
+
+  it('says the creation vintage is unknown rather than inventing one', async () => {
+    const result = await checkDatabase(async () =>
+      makeDeps({ getSchemaVersion: async () => ({ ...schemaVersion, createdAppVersion: null }) })
+    );
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('predates version tracking');
+    expect(result.message).toContain('last applied by 0.6.0');
+  });
+
+  it('reports an unrecorded vintage without failing the check', async () => {
+    const result = await checkDatabase(async () =>
+      makeDeps({ getSchemaVersion: async () => null })
+    );
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('schema vintage not recorded');
+  });
+
+  it('stays "pass" when the vintage read throws — the database is still reachable', async () => {
+    const result = await checkDatabase(async () =>
+      makeDeps({
+        getSchemaVersion: async () => {
+          throw new Error('no such table: remote_agent_schema_version');
         },
-      },
-      getDatabaseType: () => 'postgres',
-    };
-    const result = await checkDatabase(async () => deps);
+      })
+    );
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('reachable (sqlite)');
+    expect(result.message).toContain('schema vintage not recorded');
+  });
+
+  it('returns fail with "not reachable" when query throws', async () => {
+    const result = await checkDatabase(async () =>
+      makeDeps({
+        pool: {
+          query: async () => {
+            throw new Error('connection refused');
+          },
+        },
+        getDatabaseType: () => 'postgres',
+      })
+    );
     expect(result.status).toBe('fail');
     expect(result.message).toContain('not reachable');
     expect(result.message).toContain('connection refused');

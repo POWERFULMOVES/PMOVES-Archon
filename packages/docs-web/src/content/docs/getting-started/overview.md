@@ -227,15 +227,21 @@ The AI router automatically picks the right workflow based on your message.
 
 ---
 
-### Path B: CLI (No Server)
+### Path B: CLI from source (No Server)
 
-**Step 4: Install the CLI globally**
+**Step 4: Link the source CLI for terminal development**
 
 ```bash
 cd packages/cli && bun link && cd ../..
 ```
 
-This registers the `archon` command globally so you can run it from any repository.
+This makes the Bun-based source `archon` command available in interactive
+terminals. It requires Bun on `PATH`, and the `~/.bun/bin` setup below applies
+only to shell-launched use.
+
+For a GUI app, service, or other non-shell caller, install the native release
+executable and configure its absolute path instead. See [Using Archon from a GUI
+or service](/getting-started/installation/#using-archon-from-a-gui-or-service).
 
 You'll see output like `Success! Registered "@archon/cli"` followed by a message about `bun link @archon/cli` — **ignore that second part**, it's for adding Archon as a dependency in another project.
 
@@ -310,7 +316,7 @@ archon workflow run <name> --cwd /path/to/repo "<message>"
 | `archon workflow status` | Show active runs (running + paused) |
 | `archon workflow runs` | List recent runs of every status for this project |
 | `archon workflow get <id>` | Show detail for a single run (any status) |
-| `archon workflow resume <id>` | Resume a failed workflow |
+| `archon workflow resume <id>` | Resume a failed or paused workflow |
 | `archon workflow abandon <id>` | Abandon a run (running, paused, or failed) |
 | `archon workflow approve <id> [comment]` | Approve an interactive loop gate (no comment on a signal-bearing gate = accept & complete; a comment runs another iteration) |
 | `archon workflow reject <id> [--reason "..."]` | Reject an approval gate |

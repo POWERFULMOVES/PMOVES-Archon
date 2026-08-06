@@ -347,7 +347,9 @@ export type MessageChunk =
       cost?: number;
       stopReason?: string;
       numTurns?: number;
-      modelUsage?: Record<string, unknown>;
+      // Concrete provider-reported model. Omitted for providers such as Codex
+      // whose SDK completion events do not expose the resolved model.
+      resolvedModel?: ResolvedModel;
       // Session-resume outcome: true = restored, false = requested but fell back
       // to a fresh session, omitted = no resume requested. Set only when
       // resumeSessionId was passed (stamp it via withResumedOutcome).
@@ -1111,6 +1113,7 @@ remote_agent_workflow_runs
 ├── workflow_name (VARCHAR)
 ├── status (VARCHAR) -- 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 ├── parent_conversation_id (UUID) -- Parent chat that dispatched this run
+├── parent_run_id (UUID -> remote_agent_workflow_runs.id, ON DELETE SET NULL) -- Run-tree parent for a workflow: sub-run (#2121); null for top-level
 ├── user_id (UUID -> remote_agent_users.id, ON DELETE SET NULL) -- User who triggered the run
 └── metadata (JSONB)
 

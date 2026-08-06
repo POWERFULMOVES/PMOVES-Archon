@@ -188,7 +188,7 @@ function Confirm-Checksum {
 function Add-ToUserPath {
     param([string]$Dir)
     $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $pathParts   = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    $pathParts   = @($currentPath -split ';' | Where-Object { $_ -ne '' })
 
     if ($Dir -notin $pathParts) {
         $pathParts += $Dir
@@ -284,6 +284,11 @@ function Main {
         Write-Info "Verifying installation..."
         try {
             $versionOutput = & $destBinary version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "Installed binary failed its version check (exit $LASTEXITCODE):"
+                Write-Host $versionOutput
+                exit 1
+            }
             Write-Host $versionOutput
             Write-Ok "Installation complete!"
         } catch {

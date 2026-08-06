@@ -23,18 +23,20 @@ mock.module('./connection', () => ({
     query: mockQuery,
   },
   getDialect: () => mockPostgresDialect,
+  getDatabaseType: () => 'postgresql',
 }));
 
 import {
   createWorkflowEvent,
   listWorkflowEvents,
   listRecentEvents,
-  getCompletedDagNodeOutputs,
+  getDagResumeSnapshot,
 } from './workflow-events';
 
 describe('workflow-events', () => {
   beforeEach(() => {
     mockQuery.mockClear();
+    mockLogger.warn.mockClear();
   });
 
   const mockEvent: WorkflowEventRow = {
@@ -116,7 +118,7 @@ describe('workflow-events', () => {
       expect(mockQuery).toHaveBeenCalledWith(
         `SELECT * FROM remote_agent_workflow_events
        WHERE workflow_run_id = $1
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC, COALESCE(event_order, 0) ASC, id ASC`,
         ['run-456']
       );
     });
@@ -150,7 +152,7 @@ describe('workflow-events', () => {
       expect(mockQuery).toHaveBeenCalledWith(
         `SELECT * FROM remote_agent_workflow_events
          WHERE workflow_run_id = $1 AND created_at > $2
-         ORDER BY created_at ASC`,
+         ORDER BY created_at ASC, COALESCE(event_order, 0) ASC, id ASC`,
         ['run-456', since.toISOString()]
       );
     });
@@ -166,7 +168,7 @@ describe('workflow-events', () => {
       expect(mockQuery).toHaveBeenCalledWith(
         `SELECT * FROM remote_agent_workflow_events
        WHERE workflow_run_id = $1
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC, COALESCE(event_order, 0) ASC, id ASC`,
         ['run-456']
       );
     });
@@ -189,20 +191,32 @@ describe('workflow-events', () => {
     });
   });
 
-  describe('getCompletedDagNodeOutputs', () => {
-    test('returns map of nodeId → output from node_completed events', async () => {
+  describe('getDagResumeSnapshot', () => {
+    test('returns outputs and summed tokens from node_completed events', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: 'node-a', data: { node_output: 'output A' } },
-          { step_name: 'node-b', data: { node_output: 'output B' } },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 'output A', tokens: { input: 40, output: 4 } },
+          },
+          {
+            step_name: 'node-b',
+            event_type: 'node_completed',
+            data: { node_output: 'output B', tokens: { input: 60, output: 6 } },
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-123');
+      const result = await getDagResumeSnapshot('run-123');
 
-      expect(result.size).toBe(2);
-      expect(result.get('node-a')).toBe('output A');
-      expect(result.get('node-b')).toBe('output B');
+      expect(result.completedNodeOutputs).toEqual(
+        new Map([
+          ['node-a', 'output A'],
+          ['node-b', 'output B'],
+        ])
+      );
+      expect(result.tokens).toEqual({ input: 100, output: 10 });
       expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('node_completed'), [
         'run-123',
       ]);
@@ -211,16 +225,29 @@ describe('workflow-events', () => {
     test('returns outputs from node_skipped_prior_success events (multi-resume)', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: 'node-a', data: { node_output: 'output A' } },
-          { step_name: 'node-b', data: { reason: 'prior_success', node_output: 'output B' } },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 'output A', tokens: { input: 40, output: 4 } },
+          },
+          {
+            step_name: 'node-b',
+            event_type: 'node_skipped_prior_success',
+            data: {
+              reason: 'prior_success',
+              node_output: 'output B',
+              tokens: { input: 999, output: 999 },
+            },
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-resume');
+      const result = await getDagResumeSnapshot('run-resume');
 
-      expect(result.size).toBe(2);
-      expect(result.get('node-a')).toBe('output A');
-      expect(result.get('node-b')).toBe('output B');
+      expect(result.completedNodeOutputs.size).toBe(2);
+      expect(result.completedNodeOutputs.get('node-a')).toBe('output A');
+      expect(result.completedNodeOutputs.get('node-b')).toBe('output B');
+      expect(result.tokens).toEqual({ input: 40, output: 4 });
       expect(mockQuery).toHaveBeenCalledWith(
         expect.stringContaining('node_skipped_prior_success'),
         ['run-resume']
@@ -232,92 +259,161 @@ describe('workflow-events', () => {
         createQueryResult([
           {
             step_name: 'node-x',
+            event_type: 'node_skipped_prior_success',
             data: { reason: 'prior_success', node_output: 'skipped output X' },
           },
           {
             step_name: 'node-y',
+            event_type: 'node_skipped_prior_success',
             data: { reason: 'prior_success', node_output: 'skipped output Y' },
           },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-all-skipped');
+      const result = await getDagResumeSnapshot('run-all-skipped');
 
-      expect(result.size).toBe(2);
-      expect(result.get('node-x')).toBe('skipped output X');
-      expect(result.get('node-y')).toBe('skipped output Y');
+      expect(result.completedNodeOutputs.size).toBe(2);
+      expect(result.completedNodeOutputs.get('node-x')).toBe('skipped output X');
+      expect(result.completedNodeOutputs.get('node-y')).toBe('skipped output Y');
+      expect(result.tokens).toEqual({ input: 0, output: 0 });
     });
 
     test('parses JSON string data (SQLite path)', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: 'node-a', data: JSON.stringify({ node_output: 'parsed output' }) },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: JSON.stringify({
+              node_output: 'parsed output',
+              tokens: { input: 8, output: 2 },
+            }),
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-456');
+      const result = await getDagResumeSnapshot('run-456');
 
-      expect(result.size).toBe(1);
-      expect(result.get('node-a')).toBe('parsed output');
+      expect(result.completedNodeOutputs.get('node-a')).toBe('parsed output');
+      expect(result.tokens).toEqual({ input: 8, output: 2 });
     });
 
     test('skips rows with null step_name', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: null, data: { node_output: 'should be skipped' } },
-          { step_name: 'node-a', data: { node_output: 'kept' } },
+          {
+            step_name: null,
+            event_type: 'node_completed',
+            data: { node_output: 'should be skipped', tokens: { input: 99, output: 99 } },
+          },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 'kept', tokens: { input: 1, output: 2 } },
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-789');
+      const result = await getDagResumeSnapshot('run-789');
 
-      expect(result.size).toBe(1);
-      expect(result.get('node-a')).toBe('kept');
+      expect(result.completedNodeOutputs).toEqual(new Map([['node-a', 'kept']]));
+      expect(result.tokens).toEqual({ input: 1, output: 2 });
     });
 
-    test('skips rows where node_output is not a string', async () => {
+    test('preserves valid outputs while ignoring malformed and non-finite tokens', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: 'node-a', data: { node_output: 123 } },
-          { step_name: 'node-b', data: { duration_ms: 500 } },
-          { step_name: 'node-c', data: { node_output: 'valid' } },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 123, tokens: { input: 10, output: 1 } },
+          },
+          {
+            step_name: 'node-b',
+            event_type: 'node_completed',
+            data: { duration_ms: 500, tokens: { input: 'bad', output: 2 } },
+          },
+          {
+            step_name: 'node-c',
+            event_type: 'node_completed',
+            data: { node_output: 'valid', tokens: { input: Number.NaN, output: Infinity } },
+          },
+          {
+            step_name: 'node-d',
+            event_type: 'node_completed',
+            data: { node_output: 'also valid' },
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-filter');
+      const result = await getDagResumeSnapshot('run-filter');
 
-      expect(result.size).toBe(1);
-      expect(result.get('node-c')).toBe('valid');
+      expect(result.completedNodeOutputs).toEqual(
+        new Map([
+          ['node-c', 'valid'],
+          ['node-d', 'also valid'],
+        ])
+      );
+      expect(result.tokens).toEqual({ input: 10, output: 1 });
+      expect(mockLogger.warn).toHaveBeenCalledTimes(2);
+    });
+
+    test('does not warn when completed events omit optional token usage', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 'output without usage' },
+          },
+        ])
+      );
+
+      const result = await getDagResumeSnapshot('run-without-tokens');
+
+      expect(result.completedNodeOutputs).toEqual(new Map([['node-a', 'output without usage']]));
+      expect(result.tokens).toEqual({ input: 0, output: 0 });
+      expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
     test('skips corrupt JSON rows without losing other rows', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
-          { step_name: 'node-a', data: { node_output: 'good first' } },
-          { step_name: 'node-b', data: '{bad json' },
-          { step_name: 'node-c', data: { node_output: 'good last' } },
+          {
+            step_name: 'node-a',
+            event_type: 'node_completed',
+            data: { node_output: 'good first', tokens: { input: 3, output: 1 } },
+          },
+          { step_name: 'node-b', event_type: 'node_completed', data: '{bad json' },
+          {
+            step_name: 'node-c',
+            event_type: 'node_completed',
+            data: { node_output: 'good last', tokens: { input: 7, output: 2 } },
+          },
         ])
       );
 
-      const result = await getCompletedDagNodeOutputs('run-corrupt');
+      const result = await getDagResumeSnapshot('run-corrupt');
 
-      expect(result.size).toBe(2);
-      expect(result.get('node-a')).toBe('good first');
-      expect(result.get('node-c')).toBe('good last');
+      expect(result.completedNodeOutputs.size).toBe(2);
+      expect(result.completedNodeOutputs.get('node-a')).toBe('good first');
+      expect(result.completedNodeOutputs.get('node-c')).toBe('good last');
+      expect(result.tokens).toEqual({ input: 10, output: 3 });
     });
 
-    test('returns empty map when no events exist', async () => {
+    test('returns an empty snapshot when no events exist', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([]));
 
-      const result = await getCompletedDagNodeOutputs('run-empty');
+      const result = await getDagResumeSnapshot('run-empty');
 
-      expect(result.size).toBe(0);
+      expect(result.completedNodeOutputs.size).toBe(0);
+      expect(result.tokens).toEqual({ input: 0, output: 0 });
     });
 
     test('throws on DB query error', async () => {
       mockQuery.mockRejectedValueOnce(new Error('connection refused'));
 
-      await expect(getCompletedDagNodeOutputs('run-error')).rejects.toThrow('connection refused');
+      await expect(getDagResumeSnapshot('run-error')).rejects.toThrow('connection refused');
     });
   });
 });

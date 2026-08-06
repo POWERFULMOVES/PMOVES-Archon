@@ -403,6 +403,44 @@ describe('dagNodeSchema — new Claude SDK options', () => {
       expect((result.data as PromptNode).fallbackModel).toBe('claude-haiku-4-5-20251001');
   });
 
+  test('parses settingSources array of valid sources', () => {
+    const result = dagNodeSchema.safeParse({
+      id: 'n',
+      prompt: 'do it',
+      settingSources: ['project'],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect((result.data as PromptNode).settingSources).toEqual(['project']);
+  });
+
+  test('rejects settingSources with invalid source value', () => {
+    const result = dagNodeSchema.safeParse({
+      id: 'n',
+      prompt: 'do it',
+      settingSources: ['project', 'global'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test('rejects non-array settingSources', () => {
+    const result = dagNodeSchema.safeParse({
+      id: 'n',
+      prompt: 'do it',
+      settingSources: 'project',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test('strips settingSources from bash nodes', () => {
+    const result = dagNodeSchema.safeParse({
+      id: 'b',
+      bash: 'echo hi',
+      settingSources: ['project'],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect('settingSources' in result.data).toBe(false);
+  });
+
   test('strips AI-only fields from bash nodes', () => {
     const result = dagNodeSchema.safeParse({
       id: 'b',
@@ -941,18 +979,45 @@ describe('dagNodeSchema — include', () => {
     expect(result.success).toBe(false);
   });
 
-  test("include with 'with:' is rejected (not yet supported)", () => {
+  test("include accepts and retains a string-valued 'with:' mapping", () => {
     const result = dagNodeSchema.safeParse({
       id: 'r',
       include: 'archon-review-block',
-      with: { pr: '$create.output' },
+      with: { pr: '$create.output', base_branch: 'main', empty: '' },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data as IncludeNode).with).toEqual({
+        pr: '$create.output',
+        base_branch: 'main',
+        empty: '',
+      });
+    }
+  });
+
+  test.each([
+    ['null', null],
+    ['an array', ['main']],
+    ['a non-string value', { branch: 42 }],
+    ['an invalid key', { 'bad.key': 'main' }],
+  ])("include rejects 'with:' when it is %s", (_description, withValue) => {
+    const result = dagNodeSchema.safeParse({
+      id: 'r',
+      include: 'archon-review-block',
+      with: withValue,
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      const withIssue = result.error.issues.find(i => i.message.includes('with:'));
-      expect(withIssue).toBeDefined();
-      expect(withIssue?.message).toContain('not yet supported');
-      expect(withIssue?.path).toEqual(['with']);
+      expect(result.error.issues.some(issue => issue.path[0] === 'with')).toBe(true);
+    }
+  });
+
+  test("rejects the reserved node id 'INPUTS'", () => {
+    const result = dagNodeSchema.safeParse({ id: 'INPUTS', prompt: 'work' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const idIssue = result.error.issues.find(issue => issue.path[0] === 'id');
+      expect(idIssue?.message).toContain('$INPUTS.<name>');
     }
   });
 

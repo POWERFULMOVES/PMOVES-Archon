@@ -236,10 +236,12 @@ CREATE TABLE IF NOT EXISTS remote_agent_workflow_runs (
   user_message TEXT NOT NULL,
   metadata JSONB DEFAULT '{}',
   parent_conversation_id UUID REFERENCES remote_agent_conversations(id) ON DELETE SET NULL,
+  parent_run_id UUID REFERENCES remote_agent_workflow_runs(id) ON DELETE SET NULL,
   started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   completed_at TIMESTAMP WITH TIME ZONE,
   last_activity_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  working_path TEXT
+  working_path TEXT,
+  output_root TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_conversation
@@ -264,6 +266,7 @@ COMMENT ON TABLE remote_agent_workflow_runs IS
 CREATE TABLE IF NOT EXISTS remote_agent_workflow_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow_run_id UUID NOT NULL REFERENCES remote_agent_workflow_runs(id) ON DELETE CASCADE,
+  event_order BIGINT,
   event_type VARCHAR(50) NOT NULL,
   step_index INTEGER,
   step_name VARCHAR(255),
@@ -279,6 +282,9 @@ CREATE INDEX IF NOT EXISTS idx_workflow_events_type
 -- (WHERE created_at >= $1 ORDER BY created_at ASC).
 CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at
   ON remote_agent_workflow_events(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_run_order
+  ON remote_agent_workflow_events(workflow_run_id, event_order)
+  WHERE event_order IS NOT NULL;
 
 COMMENT ON TABLE remote_agent_workflow_events IS
   'Lean UI-relevant workflow events for observability (step transitions, artifacts, errors)';
@@ -414,6 +420,24 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user_id
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_id
   ON remote_agent_workflow_runs(user_id) WHERE user_id IS NOT NULL;
 
+-- Run-tree parent (#2121 Phase 2): a `workflow:` sub-run links back to the run
+-- that spawned it. Self-referential FK, ON DELETE SET NULL so deleting a parent
+-- orphans children rather than cascade-deleting their audit trail. First
+-- self-referential FK on this table — declared identically on SQLite (sqlite.ts).
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS parent_run_id UUID
+    REFERENCES remote_agent_workflow_runs(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_run
+  ON remote_agent_workflow_runs(parent_run_id) WHERE parent_run_id IS NOT NULL;
+
+-- Durable output root (#2200): the resolved `~/.archon/workspaces/<project>/`
+-- directory this run's artifacts, logs, and state live under, written once at
+-- run start. Readers prefer it and only re-derive from codebase identity when
+-- it is NULL (pre-existing rows), so historical artifacts stay addressable
+-- across a codebase rename (#1192). Declared identically on SQLite (sqlite.ts).
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS output_root TEXT;
+
 -- From PR-C: per-user GitHub user-to-server tokens (device flow), encrypted at rest.
 -- One row per Archon user; cascades on user deletion. github_user_id is the
 -- numeric anchor for the commit no-reply email (survives username changes).
@@ -505,6 +529,53 @@ ALTER TABLE remote_agent_user_ai_prefs
 -- 'member' is reserved for future per-resource scoping. Visibility stays open.
 ALTER TABLE remote_agent_users
   ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'admin';
+
+-- Lifecycle ordering (#2359 follow-up): timestamps can tie, especially on
+-- SQLite (one-second precision), so a database-assigned order breaks the tie and
+-- preserves event chronology. `id` cannot serve this role — it is a random UUID,
+-- not monotonic.
+--
+-- Deliberately a plain column plus a sequence DEFAULT, NOT `GENERATED ... AS
+-- IDENTITY`. Adding an identity column REWRITES the whole table under ACCESS
+-- EXCLUSIVE (verified on postgres:18: relfilenode changes), and this is the
+-- largest table in the schema while the schema auto-applies on startup — that is
+-- a boot-time stall proportional to event history. ADD COLUMN with no default is
+-- metadata-only, and SET DEFAULT afterwards applies to future inserts only.
+--
+-- It also keeps both databases honest: existing rows stay NULL on Postgres AND
+-- SQLite, so the COALESCE(event_order, 0) fallback in read queries behaves
+-- identically. An identity column would have back-filled Postgres rows (1, 2,
+-- 3...) while SQLite left them NULL.
+ALTER TABLE remote_agent_workflow_events
+  ADD COLUMN IF NOT EXISTS event_order BIGINT;
+CREATE SEQUENCE IF NOT EXISTS remote_agent_workflow_events_event_order_seq
+  OWNED BY remote_agent_workflow_events.event_order;
+ALTER TABLE remote_agent_workflow_events
+  ALTER COLUMN event_order SET DEFAULT nextval('remote_agent_workflow_events_event_order_seq');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_run_order
+  ON remote_agent_workflow_events(workflow_run_id, event_order)
+  WHERE event_order IS NOT NULL;
+
+-- ============================================================================
+-- Schema vintage (#2316)
+-- ============================================================================
+--
+-- Which Archon build created this database, and which last applied schema to it.
+-- Diagnostic only — nothing gates, refuses, or warns on these values. Single row
+-- (id = 1); the row's VALUES are written by the adapters from APP_VERSION
+-- (packages/core/src/db/schema-version.ts) so the version string has exactly one
+-- source of truth. created_app_version is NULL for databases that predate this
+-- table and is never back-filled with a guess.
+CREATE TABLE IF NOT EXISTS remote_agent_schema_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  created_app_version VARCHAR(64),
+  app_version VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE remote_agent_schema_version IS
+  'Diagnostic schema vintage: the Archon build that created this database and the one that last applied schema to it.';
 
 -- Better Auth tables (PostgreSQL only). Generated by `@better-auth/cli generate`
 -- against packages/server/src/auth/instance.ts (modelName-renamed to the

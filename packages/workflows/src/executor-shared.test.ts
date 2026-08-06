@@ -58,6 +58,65 @@ describe('substituteWorkflowVariables', () => {
     expect(prompt).toBe('Save to /tmp/artifacts/runs/run-1/output.txt');
   });
 
+  it('replaces $STATE_DIR with the resolved state directory', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'Read $STATE_DIR/triage-state.json',
+      'run-1',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { stateDir: '/home/u/.archon/workspaces/acme/widget/state' }
+    );
+    expect(prompt).toBe('Read /home/u/.archon/workspaces/acme/widget/state/triage-state.json');
+  });
+
+  it('replaces $STATE_DIR even under shellSafe (engine-controlled, like $ARTIFACTS_DIR)', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'cat "$STATE_DIR/pr-state.json"',
+      'run-1',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { shellSafe: true, stateDir: '/state/root' }
+    );
+    expect(prompt).toBe('cat "/state/root/pr-state.json"');
+  });
+
+  it('throws when $STATE_DIR is referenced but no state dir was resolved', () => {
+    expect(() =>
+      substituteWorkflowVariables(
+        'Write $STATE_DIR/x.json',
+        'run-1',
+        'msg',
+        '/tmp/artifacts',
+        'main',
+        'docs/'
+      )
+    ).toThrow('$STATE_DIR is referenced but no state directory was resolved');
+  });
+
+  it('does not throw when $STATE_DIR is not referenced and no state dir is supplied', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'No state reference here',
+      'run-1',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/'
+    );
+    expect(prompt).toBe('No state reference here');
+  });
+
   it('replaces $BASE_BRANCH with config value', () => {
     const { prompt } = substituteWorkflowVariables(
       'Merge into $BASE_BRANCH',
@@ -356,6 +415,36 @@ describe('buildPromptWithContext', () => {
     expect(result).toContain('## Issue #42');
   });
 
+  it('forwards the stateDir option through to $STATE_DIR substitution', () => {
+    const result = buildPromptWithContext(
+      'Read $STATE_DIR/notes.md',
+      'run-1',
+      'msg',
+      '/tmp',
+      'main',
+      'docs/',
+      undefined,
+      'test prompt',
+      { stateDir: '/state/root' }
+    );
+    expect(result).toBe('Read /state/root/notes.md');
+  });
+
+  it('throws when $STATE_DIR is referenced and no stateDir option is forwarded', () => {
+    expect(() =>
+      buildPromptWithContext(
+        'Read $STATE_DIR/notes.md',
+        'run-1',
+        'msg',
+        '/tmp',
+        'main',
+        'docs/',
+        undefined,
+        'test prompt'
+      )
+    ).toThrow('$STATE_DIR is referenced but no state directory was resolved');
+  });
+
   it('does not append issueContext when $CONTEXT was substituted', () => {
     const result = buildPromptWithContext(
       'Fix this: $CONTEXT',
@@ -651,12 +740,37 @@ describe('classifyError', () => {
     expect(classifyError(new Error('Minimax: overloaded, try again later'))).toBe('TRANSIENT');
   });
 
+  it('classifies Codex 503 responses decorated with auth error as TRANSIENT — #2386', () => {
+    expect(
+      classifyError(
+        new Error(
+          "Node 'prime' failed: SDK returned codex_turn_failed — unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: ..., auth error: 503, auth error code: biscuit_baker_service_me_circuit_open"
+        )
+      )
+    ).toBe('TRANSIENT');
+  });
+
+  it('classifies Codex model-capacity errors as TRANSIENT — #2425', () => {
+    expect(
+      classifyError(new Error('Selected model is at capacity. Please try a different model.'))
+    ).toBe('TRANSIENT');
+  });
+
   it('classifies 401 as FATAL', () => {
     expect(classifyError(new Error('401 unauthorized'))).toBe('FATAL');
   });
 
   it('FATAL takes priority over TRANSIENT when both match', () => {
     expect(classifyError(new Error('unauthorized: exited with code 1'))).toBe('FATAL');
+  });
+
+  it('keeps concrete authentication and quota failures FATAL', () => {
+    expect(classifyError(new Error('auth error: 401'))).toBe('FATAL');
+    expect(classifyError(new Error('rate limit: session limit reached'))).toBe('FATAL');
+  });
+
+  it('keeps a generic auth error FATAL when no transient signal is present', () => {
+    expect(classifyError(new Error('auth error: credentials rejected'))).toBe('FATAL');
   });
 
   it('classifies session-limit and usage-limit errors as FATAL (never retried) — #2177', () => {

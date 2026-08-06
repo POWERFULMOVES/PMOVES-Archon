@@ -38,6 +38,13 @@ const mockGetWorkflowRun = mock(() => Promise.resolve(null));
 const mockResumeWorkflowRun = mock(() => Promise.resolve({ id: 'run-id', status: 'running' }));
 const mockFailWorkflowRun = mock(() => Promise.resolve());
 const mockUpdateWorkflowRun = mock(() => Promise.resolve());
+// /workflow abandon cascade-cancels the sub-run tree (#2121 Phase 2), walking it
+// via findChildRuns. This entry is load-bearing: mock.module MERGES over the real
+// module rather than replacing the namespace, so an omitted export keeps its REAL
+// implementation. While this was missing, every abandon test ran the real
+// findChildRuns → pool.query → created and schema-initialised a real SQLite
+// database on disk, in a test that reads as fully mocked (#2240).
+const mockFindChildRuns = mock(() => Promise.resolve([]));
 // CAS gate resolvers (#2113) — approve/reject stamp the resolution atomically here
 // instead of via updateWorkflowRun. resolveAndCancelApprovalGate is the atomic
 // resolve+cancel for terminal reject outcomes. Default to "won the race".
@@ -94,6 +101,7 @@ mock.module('../db/workflows', () => ({
   cancelWorkflowRun: mockCancelWorkflowRun,
   listWorkflowRuns: mockListWorkflowRuns,
   getWorkflowRun: mockGetWorkflowRun,
+  findChildRuns: mockFindChildRuns,
   resumeWorkflowRun: mockResumeWorkflowRun,
   failWorkflowRun: mockFailWorkflowRun,
   updateWorkflowRun: mockUpdateWorkflowRun,
@@ -181,6 +189,8 @@ mock.module('@archon/isolation', () => ({
     adopt: mock(() => Promise.resolve(null)),
     healthCheck: mock(() => Promise.resolve(true)),
   }),
+  // Loaded transitively via the orchestrator → child-isolation-resolver (PR-A).
+  classifyIsolationError: (err: Error) => err.message,
 }));
 
 // Mock cleanup service
@@ -1286,6 +1296,32 @@ describe('CommandHandler', () => {
         // Verify loadConfig function is passed as the second argument
         expect(spyDiscoverWorkflows).toHaveBeenCalledWith(expect.any(String), expect.any(Function));
       });
+
+      // #2213 — chat is the surface most non-CLI authors use; a silently
+      // dropped key (e.g. an `interactive:` they believe is a gate) has to
+      // reach the conversation, not only `archon validate workflows`.
+      test('should show parse warnings inline with the workflow that raised them', async () => {
+        spyDiscoverWorkflows.mockResolvedValueOnce({
+          workflows: [
+            makeTestWorkflowWithSource({ name: 'clean' }),
+            makeTestWorkflowWithSource({ name: 'gated' }, 'project', [
+              "Node 'plan': unknown key 'interactive' will be ignored.",
+            ]),
+          ],
+          errors: [],
+        });
+
+        const result = await handleCommand(conversationWithCodebase, '/workflow list');
+
+        expect(result.success).toBe(true);
+        expect(result.message).toContain("unknown key 'interactive' will be ignored");
+        // Rendered under `gated`, not under `clean` — the author must be able to
+        // tell which workflow is affected without cross-referencing.
+        const gatedIdx = result.message.indexOf('`gated`');
+        const warningIdx = result.message.indexOf("unknown key 'interactive'");
+        expect(gatedIdx).toBeGreaterThan(-1);
+        expect(warningIdx).toBeGreaterThan(gatedIdx);
+      });
     });
 
     describe('/workflow reload', () => {
@@ -1397,6 +1433,45 @@ describe('CommandHandler', () => {
 
         expect(result.success).toBe(true);
         expect(result.workflow?.definition.name).toBe('assist');
+      });
+
+      // #2213 — the run path, not just `/workflow list`. Chat and the console
+      // both start runs through here; discarding parseWarnings meant the author
+      // saw a warning while browsing and silence at the moment of consequence.
+      test('should carry parse warnings on the run result', async () => {
+        spyDiscoverWorkflows.mockResolvedValueOnce({
+          workflows: [
+            makeTestWorkflowWithSource({ name: 'clean' }),
+            makeTestWorkflowWithSource({ name: 'gated' }, 'project', [
+              "Node 'plan': unknown key 'interactive' will be ignored.",
+            ]),
+          ],
+          errors: [],
+        });
+
+        const result = await handleCommand(conversationWithCodebase, '/workflow run gated');
+
+        expect(result.success).toBe(true);
+        expect(result.workflow?.definition.name).toBe('gated');
+        expect(result.workflow?.parseWarnings).toEqual([
+          "Node 'plan': unknown key 'interactive' will be ignored.",
+        ]);
+      });
+
+      test('should omit parse warnings for a clean workflow', async () => {
+        spyDiscoverWorkflows.mockResolvedValueOnce({
+          workflows: [
+            makeTestWorkflowWithSource({ name: 'clean' }),
+            // A DIFFERENT workflow's warnings must not attach to this run.
+            makeTestWorkflowWithSource({ name: 'gated' }, 'project', ["dropped 'interactive'"]),
+          ],
+          errors: [],
+        });
+
+        const result = await handleCommand(conversationWithCodebase, '/workflow run clean');
+
+        expect(result.success).toBe(true);
+        expect(result.workflow?.parseWarnings).toBeUndefined();
       });
 
       test('should match workflow name via suffix match', async () => {
@@ -1775,6 +1850,13 @@ describe('CommandHandler', () => {
         expect(result.message).toContain('Abandoned');
         expect(result.message).toContain('implement');
         expect(mockCancelWorkflowRun).toHaveBeenCalledWith('run-123');
+        // The cascade walk must actually run against the mock, not merely be
+        // survived. cascadeCancelChildren swallows its own errors into a failure
+        // count, so a cascade that is broken — or one silently talking to a real
+        // database — still reports "Abandoned"; the only visible tell is this
+        // warning suffix. Assert both halves so the stub cannot regress unnoticed.
+        expect(result.message).not.toContain('could not be cancelled');
+        expect(mockFindChildRuns).toHaveBeenCalledWith('run-123');
       });
 
       test('should reject abandon of already-terminal run', async () => {

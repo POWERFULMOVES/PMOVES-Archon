@@ -264,9 +264,117 @@ describe('OpencodeProvider', () => {
         toolName: 'read',
         toolOutput: 'file contents',
         toolCallId: 'tool-1',
+        toolOutcome: 'success',
       },
       { type: 'result', sessionId: 'session-1' },
     ]);
+  });
+
+  test('tool errors preserve a structured error outcome', async () => {
+    scriptedEvents = [
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            sessionID: 'session-1',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'tool-error',
+            state: { status: 'pending', input: { command: 'false' } },
+          },
+        },
+      },
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            sessionID: 'session-1',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'tool-error',
+            state: { status: 'error', error: 'command failed' },
+          },
+        },
+      },
+      { type: 'session.idle', properties: { sessionID: 'session-1' } },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks[1]).toMatchObject({
+      type: 'tool_result',
+      toolCallId: 'tool-error',
+      toolOutcome: 'error',
+    });
+  });
+
+  test('multi-agent tool results retain scoped IDs and factual outcomes', async () => {
+    const cwd = await createTempProjectDir();
+    const sessionIds = ['scout-session', 'reviewer-session'];
+    const runtime = makeRuntime({
+      sessionCreate: mock(async () => ({ data: { id: sessionIds.shift() } })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            sessionID: 'scout-session',
+            type: 'tool',
+            tool: 'read',
+            callID: 'call-1',
+            state: { status: 'completed', output: 'contents' },
+          },
+        },
+      },
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            sessionID: 'reviewer-session',
+            type: 'tool',
+            tool: 'bash',
+            callID: 'call-1',
+            state: { status: 'error', error: 'command failed' },
+          },
+        },
+      },
+      { type: 'session.idle', properties: { sessionID: 'scout-session' } },
+      { type: 'session.idle', properties: { sessionID: 'reviewer-session' } },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', cwd, undefined, {
+        assistantConfig: TEST_MODEL,
+        nodeConfig: {
+          nodeId: 'research',
+          agents: {
+            scout: { description: 'Scout', prompt: 'Explore' },
+            reviewer: { description: 'Reviewer', prompt: 'Review' },
+          },
+        },
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'tool_result',
+          toolCallId: 'scout:call-1',
+          toolOutcome: 'success',
+        }),
+        expect.objectContaining({
+          type: 'tool_result',
+          toolCallId: 'reviewer:call-1',
+          toolOutcome: 'error',
+        }),
+      ])
+    );
   });
 
   test('terminal result chunk includes sessionId and normalized tokens', async () => {
@@ -304,12 +412,7 @@ describe('OpencodeProvider', () => {
         tokens: { input: 11, output: 7, total: 21, cost: 0.42 },
         cost: 0.42,
         stopReason: 'stop',
-        modelUsage: {
-          providerID: 'anthropic',
-          modelID: 'claude-sonnet',
-          reasoning: 3,
-          cache: 1,
-        },
+        resolvedModel: { id: 'claude-sonnet' },
       },
     ]);
   });
@@ -427,12 +530,6 @@ describe('OpencodeProvider', () => {
         type: 'result',
         sessionId: 'session-1',
         structuredOutput: { answer: 'ok', confidence: 0.9 },
-        modelUsage: {
-          providerID: undefined,
-          modelID: undefined,
-          reasoning: undefined,
-          cache: undefined,
-        },
       },
     ]);
   });
@@ -476,12 +573,6 @@ describe('OpencodeProvider', () => {
       {
         type: 'result',
         sessionId: 'session-1',
-        modelUsage: {
-          providerID: undefined,
-          modelID: undefined,
-          reasoning: undefined,
-          cache: undefined,
-        },
       },
     ]);
     expect(mockLogger.warn).toHaveBeenCalledTimes(1);

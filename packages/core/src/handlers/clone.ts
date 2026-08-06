@@ -394,9 +394,11 @@ export async function cloneRepository(repoUrl: string): Promise<RegisterResult> 
   }
 
   try {
-    // `--` end-of-options: cloneUrl is always the positional repository, never
-    // an option, even if it begins with '-'. (CodeQL js/second-order-command-line-injection)
-    await execFileAsync('git', ['clone', '--', cloneUrl, targetPath]);
+    // GIT_TERMINAL_PROMPT=0 turns any missing-creds scenario into an
+    // immediate, readable error instead of a hung stdin credential prompt.
+    await execFileAsync('git', ['clone', '--', cloneUrl, targetPath], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
   } catch (error) {
     const safeErr = sanitizeError(error as Error);
     throw new Error(`Failed to clone repository: ${safeErr.message}`);

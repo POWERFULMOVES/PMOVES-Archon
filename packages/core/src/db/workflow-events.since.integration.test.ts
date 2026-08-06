@@ -32,7 +32,8 @@ mock.module('./connection', () => ({
   getDatabaseType: () => 'sqlite',
 }));
 
-const { listWorkflowEventsSince, createWorkflowEvent } = await import('./workflow-events');
+const { listWorkflowEventsSince, createWorkflowEvent, listWorkflowEvents } =
+  await import('./workflow-events');
 
 // workflow_events.workflow_run_id has an enforced FK (PRAGMA foreign_keys = ON) — seed parents.
 await db.query(
@@ -50,6 +51,36 @@ await db.query(
 const minuteAgo = (): Date => new Date(Date.now() - 60_000);
 
 describe('listWorkflowEventsSince — real SQLite (catches the C1 datetime mismatch)', () => {
+  test('preserves insertion chronology for lifecycle events sharing a timestamp', async () => {
+    await createWorkflowEvent({
+      workflow_run_id: 'run-1',
+      event_type: 'node_started',
+      step_name: 'build',
+    });
+    await createWorkflowEvent({
+      workflow_run_id: 'run-1',
+      event_type: 'node_completed',
+      step_name: 'build',
+    });
+    await db.query(
+      `UPDATE remote_agent_workflow_events
+       SET created_at = '2026-01-01 00:00:01'
+       WHERE workflow_run_id = 'run-1' AND step_name = 'build'`,
+      []
+    );
+
+    const first = await listWorkflowEventsSince(new Date('2026-01-01T00:00:00.000Z'), 100);
+    const second = await listWorkflowEventsSince(new Date('2026-01-01T00:00:00.000Z'), 100);
+    const lifecycleTypes = (rows: typeof first): string[] =>
+      rows.filter(row => row.step_name === 'build').map(row => row.event_type);
+
+    expect(lifecycleTypes(first)).toEqual(['node_started', 'node_completed']);
+    expect(lifecycleTypes(second)).toEqual(lifecycleTypes(first));
+
+    const stored = await listWorkflowEvents('run-1');
+    expect(lifecycleTypes(stored)).toEqual(['node_started', 'node_completed']);
+  });
+
   test('returns an event stored via datetime() when queried with an ISO Date cursor', async () => {
     await createWorkflowEvent({
       workflow_run_id: 'run-1',

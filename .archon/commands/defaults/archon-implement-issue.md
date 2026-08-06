@@ -307,6 +307,7 @@ git status --porcelain  # verify nothing scratch/review/PR-body is staged
 - `.pr-body.md`, `pr-body.md`, `*.scratch.md`, `*.tmp.md`
 - `review/`, `*-report.md` at the repo root
 - Anything under `$ARTIFACTS_DIR`
+- Repo-local Archon telemetry: `.archon/artifacts/`, `.archon/logs/`, `.archon/state/` (local-only — never in git)
 
 ### 7.2 Write Commit Message
 
@@ -348,7 +349,7 @@ EOF
 
 ## Phase 8: PR - Create Pull Request
 
-**Before creating a PR**, check if one already exists for this issue or branch using `gh pr list`. If a PR already exists, skip creation and use the existing one.
+**Before creating a PR**, check if one already exists for this issue or branch using `gh pr list --repo "$ORIGIN_REPO"` (resolve `ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')` in the same shell — in a fork clone, gh otherwise targets the upstream parent). If a PR already exists, skip creation and use the existing one.
 
 ### 8.1 Push to Remote
 
@@ -374,7 +375,10 @@ Look for the project's PR template at `.github/pull_request_template.md`, `.gith
 Write the prepared body to `$ARTIFACTS_DIR/pr-body.md`, then:
 
 ```bash
-gh pr create --title "Fix: {title} (#{number})" \
+# Fork-safe target: without --repo, gh opens the PR against the upstream parent
+ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
+
+gh pr create --repo "$ORIGIN_REPO" --title "Fix: {title} (#{number})" \
   --body-file $ARTIFACTS_DIR/pr-body.md \
   --base $BASE_BRANCH
 ```
@@ -382,8 +386,9 @@ gh pr create --title "Fix: {title} (#{number})" \
 ### 8.3 Get PR Number
 
 ```bash
-PR_URL=$(gh pr view --json url -q '.url')
-PR_NUMBER=$(gh pr view --json number -q '.number')
+ORIGIN_REPO=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
+PR_URL=$(gh pr view --repo "$ORIGIN_REPO" --json url -q '.url')
+PR_NUMBER=$(gh pr view --repo "$ORIGIN_REPO" --json number -q '.number')
 ```
 
 **PHASE_8_CHECKPOINT:**
