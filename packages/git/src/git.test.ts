@@ -2194,7 +2194,7 @@ branch refs/heads/feature/auth
       expect(result).toEqual({ ok: true, value: undefined });
       expect(execSpy).toHaveBeenCalledWith(
         'git',
-        ['clone', 'https://github.com/owner/repo.git', '/tmp/target'],
+        ['clone', '--', 'https://github.com/owner/repo.git', '/tmp/target'],
         {
           timeout: 120000,
           env: expect.objectContaining({ GIT_TERMINAL_PROMPT: '0' }) as NodeJS.ProcessEnv,
