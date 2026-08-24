@@ -148,6 +148,27 @@ export function buildRequestSubprocessEnv(
     env.ANTHROPIC_API_KEY = env.CLAUDE_API_KEY;
     getLog().debug('claude.api_key_mirrored');
   }
+  // Same hazard as the mirror guard above, reached through the other door. That
+  // guard stops us INJECTING an install key next to an OAuth token; this drops one
+  // the process merely INHERITED. buildSubprocessEnv() spreads the host process
+  // environment, so an ANTHROPIC_API_KEY present there reaches the CLI — and since
+  // the CLI prefers it over CLAUDE_CODE_OAUTH_TOKEN, the run is silently rebilled
+  // against that key, or fails outright when the key has no credit (the observed
+  // case: a live zero-credit key turned every run into "Credit balance is too low"
+  // while a valid subscription token sat unused in the same environment).
+  //
+  // Deliberately scoped to the INHERITED case. An ANTHROPIC_API_KEY arriving in
+  // requestOptions is an Archon-managed per-user credential and stays authoritative
+  // (container-env.test.ts, 'keeps managed creds'). hasOwnProperty rather than
+  // truthiness: an explicitly-passed empty string is still an explicit decision, and
+  // must not be second-guessed here.
+  const apiKeyWasExplicit = requestOptions?.env
+    ? Object.prototype.hasOwnProperty.call(requestOptions.env, 'ANTHROPIC_API_KEY')
+    : false;
+  if (!apiKeyWasExplicit && env.CLAUDE_CODE_OAUTH_TOKEN && env.ANTHROPIC_API_KEY) {
+    delete env.ANTHROPIC_API_KEY;
+    getLog().debug('claude.inherited_api_key_dropped');
+  }
   return env;
 }
 
