@@ -187,6 +187,40 @@ export function buildRequestSubprocessEnv(
     env.ANTHROPIC_API_KEY = env.CLAUDE_API_KEY;
     getLog().debug('claude.api_key_mirrored');
   }
+  // Same hazard as the mirror guard above, reached through the other door. That
+  // guard stops us INJECTING an install key next to an OAuth token; this drops one
+  // the process merely INHERITED. buildSubprocessEnv() spreads the host process
+  // environment, so an ANTHROPIC_API_KEY present there reaches the CLI — and since
+  // the CLI prefers it over any bearer credential, the run is silently rebilled
+  // against that key, or fails outright when the key has no credit (the observed
+  // case: a zero-credit key turned every run into "Credit balance is too low"
+  // while a valid subscription token sat unused in the same environment).
+  //
+  // Worth noting for plan-billed installs: this is not only about STALE keys. When
+  // an account bills through a coding plan rather than API credit, *every*
+  // ANTHROPIC_API_KEY it holds is creditless, so an inherited one is always the
+  // wrong credential to prefer — not merely an out-of-date one.
+  //
+  // Deliberately scoped to the INHERITED case. An ANTHROPIC_API_KEY arriving in
+  // requestOptions is an Archon-managed per-user credential and stays authoritative
+  // (container-env.test.ts, 'keeps managed creds'). hasOwnProperty rather than
+  // truthiness: an explicitly-passed empty string is still an explicit decision, and
+  // must not be second-guessed here.
+  const apiKeyWasExplicit = requestOptions?.env
+    ? Object.prototype.hasOwnProperty.call(requestOptions.env, 'ANTHROPIC_API_KEY')
+    : false;
+  // Both variables count as "a bearer credential is present". ANTHROPIC_AUTH_TOKEN
+  // is listed first because it is the one the CLI actually reads: measured against
+  // the binary this SDK ships (Claude Code 2.1.209), one identical plan token gives
+  //   ANTHROPIC_AUTH_TOKEN=<token>    -> authenticates
+  //   CLAUDE_CODE_OAUTH_TOKEN=<token> -> 401 Invalid bearer token
+  // Keying this guard on CLAUDE_CODE_OAUTH_TOKEN alone would therefore miss the
+  // configuration that actually works, and keep the API key that shadows it.
+  const bearerCredential = env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!apiKeyWasExplicit && bearerCredential && env.ANTHROPIC_API_KEY) {
+    delete env.ANTHROPIC_API_KEY;
+    getLog().debug('claude.inherited_api_key_dropped');
+  }
   return env;
 }
 
