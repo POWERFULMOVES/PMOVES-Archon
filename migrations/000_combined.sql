@@ -282,6 +282,20 @@ CREATE INDEX IF NOT EXISTS idx_workflow_events_type
 -- (WHERE created_at >= $1 ORDER BY created_at ASC).
 CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at
   ON remote_agent_workflow_events(created_at);
+-- event_order is declared in the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS
+-- is a no-op on an EXISTING table, so on any upgrade from a pre-event_order schema
+-- the column is still absent at this point. Add it (idempotently) BEFORE the unique
+-- index that references it — otherwise the index fails with 42703
+-- "column event_order does not exist" and the whole schema-init transaction rolls
+-- back, crash-looping the container on boot with no retry able to recover it.
+-- Mirrors the SQLite ordering fix (#2418). The equivalent ADD COLUMN/sequence/default
+-- block later in this file is now a redundant no-op, kept as the documented upgrade path.
+ALTER TABLE remote_agent_workflow_events
+  ADD COLUMN IF NOT EXISTS event_order BIGINT;
+CREATE SEQUENCE IF NOT EXISTS remote_agent_workflow_events_event_order_seq
+  OWNED BY remote_agent_workflow_events.event_order;
+ALTER TABLE remote_agent_workflow_events
+  ALTER COLUMN event_order SET DEFAULT nextval('remote_agent_workflow_events_event_order_seq');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_run_order
   ON remote_agent_workflow_events(workflow_run_id, event_order)
   WHERE event_order IS NOT NULL;
