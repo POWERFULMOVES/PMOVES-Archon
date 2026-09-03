@@ -32,7 +32,7 @@ nodes:
     depends_on: [first]
 ```
 
-That's it. Three fields at the top, a list of nodes below. Each node needs a unique `id`. Archon discovers workflow files recursively inside `.archon/workflows/`, so you can organize them in subdirectories if you want.
+That's it. Three fields at the top, a list of nodes below. Each node needs a unique `id`. Archon supports flat files, one grouping folder, or the exact `.archon/workflows/<pack>/<workflow>/<file>.yaml` package layout.
 
 > **Where to put it**: Create `.archon/workflows/my-workflow.yaml` in your repository. Run `archon workflow list` to confirm Archon found it.
 
@@ -197,11 +197,13 @@ You've just built a mini version of `archon-idea-to-pr` — the same structure, 
 | `description` | Shown in listings and used by the router | Required |
 | `provider` | Sets the AI provider (any registered provider, e.g. `claude`, `codex`) | When you need a specific provider |
 | `model` | Sets the model for all nodes (`sonnet`, `opus`, `haiku`) | When you want to override the config default |
-| `context` | `fresh` starts a new session; `shared` inherits from prior node | Use `fresh` before verification nodes |
+| `context` | `fresh` starts a new session; `shared` inherits the ambient prior session; `{ resume: node-id }` forks one exact upstream AI session | Use `fresh` before independent verification; use `resume` to return to a named lineage after fan-out |
 | `depends_on` | List of node IDs that must complete before this node runs | To express ordering and fan-in |
 | `idle_timeout` | Per-node idle timeout in milliseconds (default: 30 minutes) | For long-running nodes |
 
 These options apply at the node level (inside `nodes:`). `provider` and `model` can also be set at the top level of the YAML to apply to all nodes.
+
+Named resume is available to command and prompt nodes when the source is a transitively upstream command, prompt, or plain loop on the same provider. Claude and Pi support immutable forks; Codex does not. An exact fork failure stops the node rather than silently starting fresh.
 
 **Per-node model override:**
 ```yaml

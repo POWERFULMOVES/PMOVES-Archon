@@ -45,8 +45,9 @@ mock.module('@archon/paths', () => ({
 }));
 
 // --- Imports (after all mock.module calls) ---
-import { executeDagWorkflow } from './dag-executor';
-import type { ScriptNode, WorkflowRun } from './schemas';
+import { executeDagWorkflow, type ExecuteDagWorkflowOptions } from './dag-executor';
+import { resolveWorkflow } from './graph-plan';
+import type { ExecNode, WorkflowDefinition, WorkflowRun } from './schemas';
 import type { WorkflowDeps, IWorkflowPlatform, WorkflowConfig } from './deps';
 import type { IWorkflowStore } from './store';
 
@@ -62,17 +63,23 @@ function createMockStore(): IWorkflowStore {
         parent_conversation_id: null,
         codebase_id: null,
         status: 'running' as const,
+        outcome: null,
         user_message: 'mock message',
         metadata: {},
         started_at: new Date(),
         completed_at: null,
         last_activity_at: null,
         working_path: null,
+        user_id: null,
+        parent_run_id: null,
+        output_root: null,
+        adopted_from_run_id: null,
       })
     ),
     getWorkflowRun: mock(() => Promise.resolve(null)),
+    findChildRuns: mock(() => Promise.resolve([])),
+    getRunAncestry: mock(() => Promise.resolve([])),
     getActiveWorkflowRunByPath: mock(() => Promise.resolve(null)),
-    failOrphanedRuns: mock(() => Promise.resolve({ count: 0 })),
     findResumableRun: mock(() => Promise.resolve(null)),
     resumeWorkflowRun: mock(() =>
       Promise.resolve({
@@ -82,41 +89,83 @@ function createMockStore(): IWorkflowStore {
         parent_conversation_id: null,
         codebase_id: null,
         status: 'running' as const,
+        outcome: null,
         user_message: 'mock message',
         metadata: {},
         started_at: new Date(),
         completed_at: null,
         last_activity_at: null,
         working_path: null,
+        user_id: null,
+        parent_run_id: null,
+        output_root: null,
+        adopted_from_run_id: null,
       })
     ),
+    recoverCancelledFanOutRun: mock(() => Promise.reject(new Error('unused in this test'))),
     updateWorkflowRun: mock(() => Promise.resolve()),
     updateWorkflowActivity: mock(() => Promise.resolve()),
     getWorkflowRunStatus: mock(() => Promise.resolve('running' as const)),
     completeWorkflowRun: mock(() => Promise.resolve()),
     failWorkflowRun: mock(() => Promise.resolve()),
     pauseWorkflowRun: mock(() => Promise.resolve()),
-    cancelWorkflowRun: mock(() => Promise.resolve()),
+    pauseWorkflowRunForWait: mock(() => Promise.resolve()),
+    failPausedAttentionWait: mock(() => Promise.resolve({ failed: true })),
+    clearWorkflowWaitContext: mock(() => Promise.resolve({ cleared: true })),
+    rewriteApprovalContext: mock(() => Promise.resolve({ resolved: true })),
+    claimWriteback: mock(() => Promise.resolve({ claimed: true })),
+    releaseWritebackClaim: mock(() => Promise.resolve()),
+    cancelWorkflowRun: mock(() => Promise.resolve({ cancelled: false })),
+    cancelFanOutRun: mock(() => Promise.resolve({ cancelled: false })),
     createWorkflowEvent: mock(() => Promise.resolve()),
+    persistWorkflowEvent: mock(() => Promise.resolve()),
+    persistWorkflowEventIfRunning: mock(() => Promise.resolve({ persisted: true })),
     getDagResumeSnapshot: mock(() =>
       Promise.resolve({
-        completedNodeOutputs: new Map<string, string>(),
+        completedNodeOutputs: new Map<string, { output: string }>(),
+        fanOutSnapshots: new Map(),
+        unresolvedNodeStarts: new Set<string>(),
         tokens: { input: 0, output: 0 },
+        costUsd: 0,
       })
     ),
     getCodebase: mock(() => Promise.resolve(null)),
     getCodebaseEnvVars: mock(() => Promise.resolve({})),
+    getWorkflowNodeSession: mock(() => Promise.resolve(null)),
+    listWorkflowRunNodeSessions: mock(() => Promise.resolve([])),
+    upsertWorkflowRunNodeSession: mock(() => Promise.resolve()),
+    upsertWorkflowNodeSession: mock(() => Promise.resolve()),
+    deleteWorkflowNodeSessions: mock(() => Promise.resolve({ deleted: 0 })),
   };
 }
 
-const mockSendQuery = mock(function* () {
-  yield { type: 'assistant', content: 'AI response' };
-  yield { type: 'result', sessionId: 'session-id' };
-});
+const mockSendQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+  async function* (_prompt, _cwd, _resumeSessionId, _options) {
+    yield { type: 'assistant', content: 'AI response' };
+    yield { type: 'result', sessionId: 'session-id' };
+  }
+);
 
-const mockGetAgentProvider = mock(() => ({
+const mockGetAgentProvider = mock<WorkflowDeps['getAgentProvider']>(_provider => ({
   sendQuery: mockSendQuery,
   getType: () => 'claude',
+  getCapabilities: () => ({
+    sessionResume: true,
+    mcp: true,
+    hooks: true,
+    skills: true,
+    agents: true,
+    toolRestrictions: true,
+    structuredOutput: 'enforced' as const,
+    envInjection: true,
+    costControl: true,
+    effortControl: true,
+    fallbackModel: true,
+    sandbox: true,
+    settingSources: true,
+    nativeTools: true,
+    containerExec: true,
+  }),
 }));
 
 function createMockDeps(): WorkflowDeps {
@@ -151,12 +200,17 @@ function makeWorkflowRun(id: string): WorkflowRun {
     parent_conversation_id: null,
     codebase_id: null,
     status: 'running',
+    outcome: null,
     user_message: 'test',
     metadata: {},
     started_at: new Date(),
     completed_at: null,
     last_activity_at: null,
     working_path: null,
+    user_id: null,
+    parent_run_id: null,
+    output_root: null,
+    adopted_from_run_id: null,
   };
 }
 
@@ -166,6 +220,47 @@ const minimalConfig: WorkflowConfig = {
   commands: {},
   defaults: { loadDefaultCommands: false, loadDefaultWorkflows: false },
 };
+
+/**
+ * `deps`, `cwd`, `workflow`, and `workflowRun` carry each test's own fixtures, so every call
+ * supplies them; the run directories derive from `cwd` the way every call site built them.
+ */
+type TestWorkflowDefinition = Omit<WorkflowDefinition, 'description'> & {
+  description?: string;
+};
+
+type DagOptionsOverrides = Omit<Partial<ExecuteDagWorkflowOptions>, 'workflow'> &
+  Pick<ExecuteDagWorkflowOptions, 'deps' | 'cwd' | 'workflowRun'> & {
+    workflow: TestWorkflowDefinition;
+  };
+
+/**
+ * Options for a direct `executeDagWorkflow` call, built from only what a test varies. The
+ * defaults are the exact values these tests used to spell out at every call site. They are
+ * this file's own fixtures — `dag-executor.test.ts` has a builder of the same shape over its
+ * own mocks, and the two do not have to agree.
+ */
+function dagOptions(overrides: DagOptionsOverrides): ExecuteDagWorkflowOptions {
+  const { cwd, workflow, ...rest } = overrides;
+  return {
+    platform: createMockPlatform(),
+    conversationId: 'conv-deps',
+    workflowProvider: 'claude',
+    workflowModel: undefined,
+    artifactsDir: join(cwd, 'artifacts'),
+    stateDir: join(cwd, 'state'),
+    logDir: join(cwd, 'logs'),
+    baseBranch: 'main',
+    docsDir: 'docs/',
+    config: minimalConfig,
+    ...rest,
+    cwd,
+    workflow: resolveWorkflow({
+      ...workflow,
+      description: workflow.description ?? workflow.name,
+    }),
+  };
+}
 
 describe('script node deps field — command construction', () => {
   let testDir: string;
@@ -190,28 +285,21 @@ describe('script node deps field — command construction', () => {
   });
 
   it('uv inline with deps uses uv run --with flags', async () => {
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'fetch-data',
+      kind: 'exec',
       script: 'import httpx; print(httpx.get("https://example.com").status_code)',
       runtime: 'uv',
       deps: ['httpx', 'beautifulsoup4'],
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-1'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-1'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -231,27 +319,20 @@ describe('script node deps field — command construction', () => {
   });
 
   it('uv inline without deps uses uv run python -c', async () => {
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'simple-py',
+      kind: 'exec',
       script: 'print("hello")',
       runtime: 'uv',
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-2'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-2'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -263,28 +344,21 @@ describe('script node deps field — command construction', () => {
   });
 
   it('uv inline with empty deps array uses uv run python -c (no extra flags)', async () => {
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'empty-deps-py',
+      kind: 'exec',
       script: 'print("no deps")',
       runtime: 'uv',
       deps: [],
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-3'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-3'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -296,28 +370,21 @@ describe('script node deps field — command construction', () => {
   });
 
   it('bun inline with deps uses bun --no-env-file -e (no extra dep flags — bun auto-installs)', async () => {
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'bun-with-deps',
+      kind: 'exec',
       script: 'import { z } from "zod"; console.log(z.string().parse("hello"))',
       runtime: 'bun',
       deps: ['zod', 'node-fetch'],
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-4'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-4'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -332,27 +399,20 @@ describe('script node deps field — command construction', () => {
   });
 
   it('bun inline without deps uses bun --no-env-file -e', async () => {
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'bun-no-deps',
+      kind: 'exec',
       script: 'console.log("hello")',
       runtime: 'bun',
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-5'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-5'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -370,28 +430,21 @@ describe('script node deps field — command construction', () => {
     const { writeFile } = await import('fs/promises');
     await writeFile(join(scriptsDir, 'analyze.py'), 'import httpx\nprint("ok")');
 
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'run-analyze',
+      kind: 'exec',
       script: 'analyze',
       runtime: 'uv',
       deps: ['httpx'],
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-6'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-6'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;
@@ -417,27 +470,20 @@ describe('script node deps field — command construction', () => {
     const { writeFile } = await import('fs/promises');
     await writeFile(join(scriptsDir, 'simple.py'), 'print("simple")');
 
-    const node: ScriptNode = {
+    const node: ExecNode = {
       id: 'run-simple',
+      kind: 'exec',
       script: 'simple',
       runtime: 'uv',
     };
 
     await executeDagWorkflow(
-      createMockDeps(),
-      createMockPlatform(),
-      'conv-deps',
-      testDir,
-      { name: 'deps-test', nodes: [node] },
-      makeWorkflowRun('deps-run-7'),
-      'claude',
-      undefined,
-      join(testDir, 'artifacts'),
-      join(testDir, 'state'),
-      join(testDir, 'logs'),
-      'main',
-      'docs/',
-      minimalConfig
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: { name: 'deps-test', nodes: [node] },
+        workflowRun: makeWorkflowRun('deps-run-7'),
+      })
     );
 
     const calls = mockExecFileAsync.mock.calls;

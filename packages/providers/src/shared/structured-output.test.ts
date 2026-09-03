@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   augmentPromptForJsonSchema,
+  compileOutputSchema,
   formatSchemaErrors,
   hasOpenAdditionalProperties,
   normalizeJsonSchemaForOpenAiStrict,
@@ -161,15 +162,103 @@ describe('validateStructuredOutput', () => {
     expect(validateStructuredOutput({ summary: 'hi' }, schema).valid).toBe(true);
   });
 
-  test('uncompilable schema fails SAFE (valid:true) and reports via onCompileError', () => {
+  test('uncompilable schema judges nothing (valid:true) and reports via onCompileError', () => {
     let compileError: string | undefined;
-    // `$ref` to a non-existent definition makes ajv.compile throw.
+    // `$ref` to a non-existent definition makes ajv.compile throw. The caller
+    // (dag-executor) turns this into a node failure — see compileOutputSchema.
     const broken = { type: 'object', properties: { a: { $ref: '#/$defs/missing' } } };
     const r = validateStructuredOutput({ a: 1 }, broken, msg => {
       compileError = msg;
     });
     expect(r.valid).toBe(true);
     expect(compileError).toBeDefined();
+  });
+});
+
+describe('compileOutputSchema', () => {
+  test('returns null for a compilable schema', () => {
+    expect(
+      compileOutputSchema({
+        type: 'object',
+        properties: { ready: { type: 'boolean' } },
+        required: ['ready'],
+      })
+    ).toBeNull();
+  });
+
+  test('returns the ajv message for a schema it rejects', () => {
+    const message = compileOutputSchema({
+      type: 'object',
+      properties: { a: { $ref: '#/$defs/missing' } },
+    });
+    expect(message).not.toBeNull();
+    expect(message).toContain('missing');
+  });
+
+  test('tolerated dialect annotations still compile (ajv strict: false)', () => {
+    // Unknown keyword + unknown format: ignored, not rejected — an author schema
+    // carrying these must keep loading.
+    expect(
+      compileOutputSchema({
+        type: 'object',
+        title: 'Result',
+        properties: { when: { type: 'string', format: 'not-a-known-format' } },
+        'x-archon-note': 'annotation',
+      })
+    ).toBeNull();
+  });
+
+  test('a compiled schema is reused by validateStructuredOutput', () => {
+    const schema = {
+      type: 'object',
+      properties: { n: { type: 'number' } },
+      required: ['n'],
+    };
+    expect(compileOutputSchema(schema)).toBeNull();
+
+    let compileError: string | undefined;
+    const ok = validateStructuredOutput({ n: 1 }, schema, msg => {
+      compileError = msg;
+    });
+    const bad = validateStructuredOutput({ n: 'one' }, schema);
+    expect(compileError).toBeUndefined();
+    expect(ok.valid).toBe(true);
+    expect(bad.valid).toBe(false);
+  });
+
+  test('an equivalent schema object declaring the same $id still compiles', () => {
+    // The loader compiles a node's schema, then the executor compiles the object
+    // that reached it (a re-parse of the file, or an include-expanded clone). Both
+    // must succeed: a `$id` left registered process-wide would make the second one
+    // throw `schema with key or id ... already exists`, and a compile failure is
+    // now fatal.
+    const first = { $id: 'https://example.test/result.json', type: 'object' };
+    const second = { $id: 'https://example.test/result.json', type: 'object' };
+    expect(compileOutputSchema(first)).toBeNull();
+    expect(compileOutputSchema(second)).toBeNull();
+    expect(validateStructuredOutput({ any: true }, second).valid).toBe(true);
+  });
+});
+
+describe('compileOutputSchema registry hygiene', () => {
+  test('a failed compile does not leave its $id registered for the next attempt', () => {
+    // ajv registers `$id` before resolving references, so the dangling `$ref` throws
+    // with the id already in the registry. The author's corrected schema, a distinct
+    // object with the same `$id`, must then get a clean compile rather than
+    // "schema with key or id ... already exists".
+    const broken = {
+      $id: 'https://example.test/broken.json',
+      type: 'object',
+      properties: { a: { $ref: '#/$defs/missing' } },
+    };
+    const fixed = {
+      $id: 'https://example.test/broken.json',
+      type: 'object',
+      properties: { a: { type: 'string' } },
+    };
+    expect(compileOutputSchema(broken)).toContain("can't resolve reference");
+    expect(compileOutputSchema(fixed)).toBeNull();
+    expect(validateStructuredOutput({ a: 'x' }, fixed).valid).toBe(true);
   });
 });
 

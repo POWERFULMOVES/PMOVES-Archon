@@ -122,6 +122,26 @@ describe('handleDagNode', () => {
     expect(wf!.dagNodes).toHaveLength(1);
     expect(wf!.dagNodes[0].status).toBe('completed');
   });
+
+  test('updates a hydrated active-node snapshot from lifecycle events', () => {
+    useWorkflowStore.getState().hydrateWorkflow({
+      runId: 'run-d3',
+      workflowName: 'dag-wf',
+      status: 'running',
+      activeNodeIds: ['node-a', 'node-b'],
+      dagNodes: [],
+      artifacts: [],
+      startedAt: 1000,
+    });
+    useWorkflowStore
+      .getState()
+      .handleDagNode(dagNodeEvent({ runId: 'run-d3', nodeId: 'node-a', status: 'completed' }));
+    useWorkflowStore
+      .getState()
+      .handleDagNode(dagNodeEvent({ runId: 'run-d3', nodeId: 'node-b', status: 'failed' }));
+
+    expect(useWorkflowStore.getState().workflows.get('run-d3')?.activeNodeIds).toEqual([]);
+  });
 });
 
 describe('handleWorkflowArtifact', () => {
@@ -245,6 +265,23 @@ describe('hydrateWorkflow', () => {
       .hydrateWorkflow(makeWorkflow({ runId: 'run-h2', status: 'running', startedAt: 500 }));
     const wf = useWorkflowStore.getState().workflows.get('run-h2');
     expect(wf!.startedAt).toBe(1000);
+  });
+
+  test('reconciles active nodes from REST into existing SSE state', () => {
+    useWorkflowStore.getState().handleWorkflowStatus(statusEvent({ runId: 'run-h6' }));
+    useWorkflowStore
+      .getState()
+      .handleDagNode(dagNodeEvent({ runId: 'run-h6', nodeId: 'stale-node' }));
+    useWorkflowStore.getState().hydrateWorkflow(
+      makeWorkflow({
+        runId: 'run-h6',
+        activeNodeIds: ['zeta', 'alpha'],
+      })
+    );
+
+    const workflow = useWorkflowStore.getState().workflows.get('run-h6');
+    expect(workflow?.activeNodeIds).toEqual(['zeta', 'alpha']);
+    expect(workflow?.dagNodes.map(node => node.nodeId)).toEqual(['stale-node']);
   });
 
   test('DOES override stale running with terminal REST data', () => {

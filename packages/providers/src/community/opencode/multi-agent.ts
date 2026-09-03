@@ -1,5 +1,6 @@
 import { createLogger } from '@archon/paths';
 
+import { mergeTokenUsage } from '../../types';
 import type { MessageChunk, SendQueryOptions, TokenUsage } from '../../types';
 import { getOrderedAgents, type NamedAgentConfig } from './agent-config';
 import { errorMessage } from './errors';
@@ -338,19 +339,27 @@ export async function* streamMultiAgentOpencodeSession(
             content: formatBufferedAssistantOutput(states),
           };
 
-          // Aggregate tokens
-          const tokens = states.reduce<TokenUsage | undefined>((acc, candidate) => {
-            const next = normalizeTokens(candidate.latestAssistantInfo);
-            if (!next) return acc;
-            if (!acc) return { ...next };
-            return {
-              input: acc.input + next.input,
-              output: acc.output + next.output,
-              total:
-                (acc.total ?? acc.input + acc.output) + (next.total ?? next.input + next.output),
-              cost: (acc.cost ?? 0) + (next.cost ?? 0),
-            };
-          }, undefined);
+          // Aggregate tokens across sub-agents. The cache axes follow the shared floor
+          // rule (#2662): one sub-agent without cache telemetry narrows the total and
+          // flags it, instead of erasing cache the others did report. `total` and `cost`
+          // keep OpenCode's own composition, including its `input + output` fallback.
+          const perAgentUsage = states
+            .map(candidate => normalizeTokens(candidate.latestAssistantInfo))
+            .filter((usage): usage is TokenUsage => usage !== undefined);
+          const mergedUsage = mergeTokenUsage(perAgentUsage);
+          const tokens: TokenUsage | undefined =
+            // A lone sub-agent passes through verbatim, as before — synthesizing `total`
+            // and `cost` for it would change what a single-agent turn reports.
+            perAgentUsage.length === 1
+              ? { ...perAgentUsage[0] }
+              : mergedUsage && {
+                  ...mergedUsage,
+                  total: perAgentUsage.reduce(
+                    (sum, usage) => sum + (usage.total ?? usage.input + usage.output),
+                    0
+                  ),
+                  cost: perAgentUsage.reduce((sum, usage) => sum + (usage.cost ?? 0), 0),
+                };
 
           // Fetch structured outputs from all agents
           const structuredOutputs = await Promise.all(

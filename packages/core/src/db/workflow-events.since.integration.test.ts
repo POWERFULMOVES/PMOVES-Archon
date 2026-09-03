@@ -28,12 +28,19 @@ const db = new SqliteAdapter(':memory:');
 
 mock.module('./connection', () => ({
   pool: db,
+  getDatabase: () => db,
   getDialect: () => sqliteDialect,
   getDatabaseType: () => 'sqlite',
 }));
 
-const { listWorkflowEventsSince, createWorkflowEvent, listWorkflowEvents } =
-  await import('./workflow-events');
+const {
+  listWorkflowEventsSince,
+  createWorkflowEvent,
+  listWorkflowEvents,
+  listRecentEvents,
+  persistWorkflowEventIfRunning,
+} = await import('./workflow-events');
+const { cancelWorkflowRun } = await import('./workflows');
 
 // workflow_events.workflow_run_id has an enforced FK (PRAGMA foreign_keys = ON) — seed parents.
 await db.query(
@@ -51,6 +58,67 @@ await db.query(
 const minuteAgo = (): Date => new Date(Date.now() - 60_000);
 
 describe('listWorkflowEventsSince — real SQLite (catches the C1 datetime mismatch)', () => {
+  test('cancellation cannot interleave between an instance claim check and its insert', async () => {
+    await db.query(
+      `INSERT INTO remote_agent_workflow_runs
+         (id, workflow_name, conversation_id, user_message, status, started_at)
+       VALUES ('run-claim-race', 'wf', 'conv-1', 'msg', 'running', datetime('now'))`,
+      []
+    );
+
+    const originalQuery = db.query.bind(db);
+    let releaseClaim!: () => void;
+    const claimReleased = new Promise<void>(resolve => {
+      releaseClaim = resolve;
+    });
+    let claimReached!: () => void;
+    const claimReady = new Promise<void>(resolve => {
+      claimReached = resolve;
+    });
+    let intercepted = false;
+
+    db.query = async <T>(sql: string, params?: unknown[]) => {
+      const oldTwoStatementRead =
+        sql.includes('SELECT status FROM remote_agent_workflow_runs') &&
+        params?.[0] === 'run-claim-race';
+      const atomicConditionalInsert =
+        sql.includes('INSERT INTO remote_agent_workflow_events') &&
+        params?.[1] === 'run-claim-race';
+
+      if (!intercepted && oldTwoStatementRead) {
+        intercepted = true;
+        const result = await originalQuery<T>(sql, params);
+        claimReached();
+        await claimReleased;
+        return result;
+      }
+      if (!intercepted && atomicConditionalInsert) {
+        intercepted = true;
+        claimReached();
+        await claimReleased;
+      }
+      return originalQuery<T>(sql, params);
+    };
+
+    try {
+      const claim = persistWorkflowEventIfRunning({
+        workflow_run_id: 'run-claim-race',
+        event_type: 'node_started',
+        step_name: 'fan-instance',
+      });
+      await claimReady;
+      await expect(cancelWorkflowRun('run-claim-race')).resolves.toEqual({ cancelled: true });
+      releaseClaim();
+      await expect(claim).resolves.toEqual({ persisted: false });
+
+      const events = await listWorkflowEvents('run-claim-race');
+      expect(events.map(event => event.event_type)).toEqual(['workflow_cancelled']);
+    } finally {
+      db.query = originalQuery;
+      releaseClaim();
+    }
+  });
+
   test('preserves insertion chronology for lifecycle events sharing a timestamp', async () => {
     await createWorkflowEvent({
       workflow_run_id: 'run-1',
@@ -114,6 +182,24 @@ describe('listWorkflowEventsSince — real SQLite (catches the C1 datetime misma
   test('a future cursor returns nothing (comparison direction is correct)', async () => {
     const rows = await listWorkflowEventsSince(new Date(Date.now() + 60_000), 100);
     expect(rows).toHaveLength(0);
+  });
+
+  test('listRecentEvents returns same-day SQLite events (dialect-aware since cursor)', async () => {
+    const id = 'recent-same-day';
+    await db.query(
+      `INSERT INTO remote_agent_workflow_events (id, workflow_run_id, event_type, step_name, data, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, 'run-1', 'node_started', 'recent', '{}', '2026-01-01 00:00:30']
+    );
+
+    // An ISO param ("…T…Z") sorts ABOVE the stored "YYYY-MM-DD HH:MM:SS" shape
+    // (T > space), so every same-day event was silently dropped before the
+    // cursor switched to the dialect-aware conversion.
+    const rows = await listRecentEvents('run-1', new Date('2026-01-01T00:00:00.000Z'));
+    expect(rows.map(r => r.id)).toContain(id);
+
+    const none = await listRecentEvents('run-1', new Date(Date.now() + 60_000));
+    expect(none).toHaveLength(0);
   });
 
   test('malformed data degrades to {} instead of throwing the whole batch (I2)', async () => {

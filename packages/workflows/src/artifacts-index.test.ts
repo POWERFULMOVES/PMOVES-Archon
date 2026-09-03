@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdir, rm, writeFile, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeNodeArtifact, readNodeArtifacts, latestNodeArtifactOfType } from './artifacts-index';
 
@@ -52,6 +52,57 @@ describe('artifacts-index', () => {
       'x'
     );
     expect('sessionId' in meta).toBe(false);
+  });
+
+  test('loop_group lineages produce distinct stable artifact identities', async () => {
+    const first = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [
+          { groupId: 'outer', iteration: 1 },
+          { groupId: 'inner', iteration: 1 },
+        ],
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+      },
+      'first'
+    );
+    const second = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [
+          { groupId: 'outer', iteration: 2 },
+          { groupId: 'inner', iteration: 1 },
+        ],
+        runId: 'r',
+        producedAt: '2026-06-03T01:00:00.000Z',
+      },
+      'second'
+    );
+
+    expect(basename(first.path)).toMatch(/^loop\.[0-9a-f]{64}__review\.md$/);
+    expect(basename(second.path)).toMatch(/^loop\.[0-9a-f]{64}__review\.md$/);
+    expect(first.path).not.toBe(second.path);
+    expect(await readFile(join(dir, first.path), 'utf8')).toBe('first');
+    expect(await readFile(join(dir, second.path), 'utf8')).toBe('second');
+    const artifacts = (await readNodeArtifacts(dir)).sort(
+      (left, right) =>
+        (left.loopGroupPath?.[0]?.iteration ?? 0) - (right.loopGroupPath?.[0]?.iteration ?? 0)
+    );
+    expect(artifacts.map(entry => entry.loopGroupPath)).toEqual([
+      [
+        { groupId: 'outer', iteration: 1 },
+        { groupId: 'inner', iteration: 1 },
+      ],
+      [
+        { groupId: 'outer', iteration: 2 },
+        { groupId: 'inner', iteration: 1 },
+      ],
+    ]);
   });
 
   test('readNodeArtifacts returns [] for a dir with no artifacts yet', async () => {
@@ -125,6 +176,192 @@ describe('artifacts-index', () => {
     expect(entries.map(e => e.nodeId)).toEqual(['a.b']);
   });
 
+  test('loop owner digests distinguish group ids that sanitize alike', async () => {
+    const first = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [{ groupId: 'a.b', iteration: 1 }],
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+      },
+      'first'
+    );
+
+    const second = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [{ groupId: 'a_b', iteration: 1 }],
+        runId: 'r',
+        producedAt: '2026-06-03T01:00:00.000Z',
+      },
+      'second'
+    );
+
+    expect(first.path).not.toBe(second.path);
+    expect(await readFile(join(dir, first.path), 'utf8')).toBe('first');
+    expect(await readFile(join(dir, second.path), 'utf8')).toBe('second');
+    expect(await readNodeArtifacts(dir)).toHaveLength(2);
+  });
+
+  test('loop owner digests distinguish body node ids that sanitize alike', async () => {
+    const [first, second] = await Promise.all([
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'a.b',
+          outputType: 'findings',
+          loopGroupPath: [{ groupId: 'group', iteration: 1 }],
+          runId: 'r',
+          producedAt: '2026-06-03T00:00:00.000Z',
+        },
+        'first'
+      ),
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'a_b',
+          outputType: 'findings',
+          loopGroupPath: [{ groupId: 'group', iteration: 1 }],
+          runId: 'r',
+          producedAt: '2026-06-03T00:01:00.000Z',
+        },
+        'second'
+      ),
+    ]);
+
+    expect(first.path).not.toBe(second.path);
+    expect(await readFile(join(dir, first.path), 'utf8')).toBe('first');
+    expect(await readFile(join(dir, second.path), 'utf8')).toBe('second');
+    expect(new Set((await readNodeArtifacts(dir)).map(entry => entry.nodeId))).toEqual(
+      new Set(['a.b', 'a_b'])
+    );
+  });
+
+  test('loop owner namespace cannot alias valid top-level or delimiter-shaped loop ids', async () => {
+    const topLevel = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'group-iteration-1__leaf',
+        outputType: 'findings',
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+      },
+      'top-level'
+    );
+    const loop = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'leaf',
+        outputType: 'findings',
+        loopGroupPath: [{ groupId: 'group', iteration: 1 }],
+        runId: 'r',
+        producedAt: '2026-06-03T00:01:00.000Z',
+      },
+      'loop'
+    );
+    const [nested, delimiterShaped] = await Promise.all([
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'leaf',
+          outputType: 'findings',
+          loopGroupPath: [
+            { groupId: 'outer', iteration: 1 },
+            { groupId: 'inner', iteration: 2 },
+          ],
+          runId: 'r',
+          producedAt: '2026-06-03T00:02:00.000Z',
+        },
+        'nested'
+      ),
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'inner-iteration-2__leaf',
+          outputType: 'findings',
+          loopGroupPath: [{ groupId: 'outer', iteration: 1 }],
+          runId: 'r',
+          producedAt: '2026-06-03T00:03:00.000Z',
+        },
+        'delimiter-shaped'
+      ),
+    ]);
+
+    expect(new Set([topLevel.path, loop.path, nested.path, delimiterShaped.path]).size).toBe(4);
+    expect(await readNodeArtifacts(dir)).toHaveLength(4);
+  });
+
+  test('readNodeArtifacts rejects invalid loop_group frame metadata', async () => {
+    await writeNodeArtifact(
+      dir,
+      { nodeId: 'good', outputType: 'plan', runId: 'r', producedAt: '2026-06-03T00:00:00.000Z' },
+      'ok'
+    );
+    await writeFile(
+      join(dir, 'nodes', 'empty-loop.meta.json'),
+      JSON.stringify({
+        nodeId: 'empty-loop',
+        outputType: 'plan',
+        loopGroupPath: [],
+        path: 'nodes/empty-loop.md',
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+        size: 1,
+      }),
+      'utf8'
+    );
+    await writeFile(
+      join(dir, 'nodes', 'zero-iteration.meta.json'),
+      JSON.stringify({
+        nodeId: 'zero-iteration',
+        outputType: 'plan',
+        loopGroupPath: [{ groupId: 'group', iteration: 0 }],
+        path: 'nodes/zero-iteration.md',
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+        size: 1,
+      }),
+      'utf8'
+    );
+
+    expect((await readNodeArtifacts(dir)).map(entry => entry.nodeId)).toEqual(['good']);
+  });
+
+  test('writeNodeArtifact rejects invalid loop_group frames before creating sidecars', async () => {
+    await expect(
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'empty-path',
+          outputType: 'plan',
+          loopGroupPath: [],
+          runId: 'r',
+          producedAt: '2026-06-03T00:00:00.000Z',
+        },
+        'invalid'
+      )
+    ).rejects.toThrow();
+    await expect(
+      writeNodeArtifact(
+        dir,
+        {
+          nodeId: 'zero-iteration',
+          outputType: 'plan',
+          loopGroupPath: [{ groupId: 'group', iteration: 0 }],
+          runId: 'r',
+          producedAt: '2026-06-03T00:00:00.000Z',
+        },
+        'invalid'
+      )
+    ).rejects.toThrow();
+
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   test('re-writing the SAME node id (e.g. on resume) overwrites without a collision error', async () => {
     await writeNodeArtifact(
       dir,
@@ -137,6 +374,55 @@ describe('artifacts-index', () => {
       'v2'
     );
     expect(await readFile(join(dir, 'nodes', 'planner.md'), 'utf8')).toBe('v2');
+  });
+
+  test('re-writing the same loop owner uses value equality and keeps one current artifact', async () => {
+    const first = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [{ groupId: 'group', iteration: 2 }],
+        runId: 'r',
+        producedAt: '2026-06-03T00:00:00.000Z',
+      },
+      'v1'
+    );
+    const second = await writeNodeArtifact(
+      dir,
+      {
+        nodeId: 'review',
+        outputType: 'findings',
+        loopGroupPath: [{ groupId: 'group', iteration: 2 }],
+        runId: 'r',
+        producedAt: '2026-06-03T01:00:00.000Z',
+      },
+      'v2'
+    );
+
+    expect(second.path).toBe(first.path);
+    expect(await readFile(join(dir, first.path), 'utf8')).toBe('v2');
+    expect(await readNodeArtifacts(dir)).toEqual([second]);
+  });
+
+  test('non-ENOENT prior-owner read failures reject without replacing output', async () => {
+    await writeNodeArtifact(
+      dir,
+      { nodeId: 'a.b', outputType: 'plan', runId: 'r', producedAt: '2026-06-03T00:00:00.000Z' },
+      'first'
+    );
+    const metaPath = join(dir, 'nodes', 'a_b.meta.json');
+    await rm(metaPath);
+    await mkdir(metaPath);
+
+    await expect(
+      writeNodeArtifact(
+        dir,
+        { nodeId: 'a_b', outputType: 'plan', runId: 'r', producedAt: '2026-06-03T01:00:00.000Z' },
+        'second'
+      )
+    ).rejects.toThrow();
+    expect(await readFile(join(dir, 'nodes', 'a_b.md'), 'utf8')).toBe('first');
   });
 
   test('readNodeArtifacts skips schema-invalid meta files (valid JSON, wrong shape)', async () => {

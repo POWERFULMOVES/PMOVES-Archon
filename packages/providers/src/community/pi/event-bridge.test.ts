@@ -126,15 +126,17 @@ describe('usageToTokens', () => {
     const usage = {
       input: 100,
       output: 50,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 150,
+      cacheRead: 20,
+      cacheWrite: 5,
+      totalTokens: 175,
       cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
     };
     expect(usageToTokens(usage)).toEqual({
-      input: 100,
+      input: 125,
       output: 50,
-      total: 150,
+      cacheRead: 20,
+      cacheWrite: 5,
+      total: 175,
       cost: 0.003,
     });
   });
@@ -160,7 +162,7 @@ describe('buildResultChunk', () => {
       type: 'result',
       isError: true,
       errorSubtype: 'missing_assistant_message',
-    };
+    } as const;
     expect(buildResultChunk([])).toEqual(expected);
     expect(buildResultChunk([{ role: 'user', content: [] }])).toEqual(expected);
   });
@@ -172,7 +174,14 @@ describe('buildResultChunk', () => {
     ]);
     expect(chunk.type).toBe('result');
     if (chunk.type === 'result') {
-      expect(chunk.tokens).toEqual({ input: 10, output: 5, total: 15, cost: 0.01 });
+      expect(chunk.tokens).toEqual({
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 15,
+        cost: 0.01,
+      });
       expect(chunk.stopReason).toBe('stop');
       expect(chunk.isError).toBeUndefined();
       expect(chunk.cost).toBe(0.01);
@@ -382,6 +391,7 @@ describe('mapPiEvent', () => {
     };
     const chunks = mapPiEvent({
       type: 'agent_end',
+      willRetry: false,
       messages: [{ role: 'assistant', usage, stopReason: 'stop', content: [] } as never],
     });
     expect(chunks).toHaveLength(1);

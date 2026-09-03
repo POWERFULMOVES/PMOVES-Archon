@@ -20,8 +20,9 @@
  * `PI_PROVIDER_ENV_VARS` (@archon/providers, regenerated from the installed
  * pi-ai SDK — `bun run check:pi-vendor-map` guards drift).
  */
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PI_PROVIDER_ENV_VARS, PI_AMBIENT_VENDORS } from '@archon/providers';
+import { CODEX_AUTH_JSON_RELATIVE_PATH, PI_AUTH_JSON_RELATIVE_PATH } from '@archon/workflows/deps';
 
 /**
  * Pre-#1955 agent-keyed credential ids → vendor-canonical ids. Accepted at
@@ -164,12 +165,11 @@ export function deliverCredential(
       }
       {
         // ChatGPT subscription → Codex CLI auth.json (real id_token since #1924).
-        const codexHome = join(opts.artifactsDir, 'codex-home');
+        const codexAuthPath = join(opts.artifactsDir, CODEX_AUTH_JSON_RELATIVE_PATH);
+        const codexHome = dirname(codexAuthPath);
         return {
           env: { CODEX_HOME: codexHome },
-          files: [
-            { path: join(codexHome, 'auth.json'), contents: buildCodexAuthJson(cred.rawCreds) },
-          ],
+          files: [{ path: codexAuthPath, contents: buildCodexAuthJson(cred.rawCreds) }],
         };
       }
 
@@ -223,7 +223,7 @@ export function deliverCredential(
 type PiAuthCredential = { type: 'api_key'; key: string } | ({ type: 'oauth' } & OAuthCredentials);
 
 /** Relative path (under the per-run artifacts dir) for the generated Pi auth.json. */
-export const PI_AUTH_JSON_RELATIVE_PATH = 'pi-home/auth.json';
+export { PI_AUTH_JSON_RELATIVE_PATH };
 /** Env var the Pi provider reads to point `AuthStorage` at the per-run auth.json. */
 export const PI_AUTH_PATH_ENV = 'ARCHON_PI_AUTH_PATH';
 

@@ -1,12 +1,25 @@
 /**
- * Script discovery - finds and loads script files from .archon/scripts/.
+ * Discover shared scripts and workflow-local packaged scripts.
  *
- * Scripts are keyed by filename without extension. Runtime is auto-detected
- * from the file extension: .ts/.js -> bun, .py -> uv.
+ * Shared scripts from `.archon/scripts/` are keyed by filename without an
+ * extension. Packaged scripts live under
+ * `.archon/workflows/<pack>/<workflow>/scripts/` and receive owner-qualified
+ * internal keys. Runtime is inferred from the extension: .ts/.js -> bun,
+ * .py -> uv.
  */
-import { readdir, stat } from 'fs/promises';
+import { access, mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
+import { createHash, randomUUID } from 'crypto';
 import { join, basename, extname } from 'path';
-import { createLogger, getHomeScriptsPath } from '@archon/paths';
+import { createLogger, getArchonHome } from '@archon/paths';
+import { BUNDLED_SCRIPTS, isBinaryBuild } from './defaults/bundled-defaults';
+import { liveSourceRoots, type WorkflowSourceRoots } from './workflow-source';
+import {
+  formatPackagedResourceReference,
+  getPackagedResourceDirectory,
+  isValidWorkflowFolderSegment,
+  parsePackagedResourceReference,
+} from './packaged-workflow';
+import type { WorkflowSource } from './schemas';
 
 /** Normalize path separators to forward slashes for cross-platform consistency */
 function normalizeSep(p: string): string {
@@ -134,30 +147,161 @@ export async function discoverScripts(dir: string): Promise<Map<string, ScriptDe
   return scripts;
 }
 
+async function discoverPackagedScripts(
+  workflowsRoot: string,
+  source: WorkflowSource
+): Promise<Map<string, ScriptDefinition>> {
+  const scripts = new Map<string, ScriptDefinition>();
+  let packs: string[];
+  try {
+    packs = await readdir(workflowsRoot);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') return scripts;
+    throw error;
+  }
+
+  for (const pack of packs) {
+    if (!isValidWorkflowFolderSegment(pack)) continue;
+    const packPath = join(workflowsRoot, pack);
+    try {
+      if (!(await stat(packPath)).isDirectory()) continue;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code === 'ENOENT') continue;
+      throw new Error(`Failed to inspect packaged workflow pack "${packPath}": ${err.message}`, {
+        cause: err,
+      });
+    }
+    let workflowFolders: string[];
+    try {
+      workflowFolders = await readdir(packPath);
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code === 'ENOENT') continue;
+      throw new Error(`Failed to read packaged workflow pack "${packPath}": ${err.message}`, {
+        cause: err,
+      });
+    }
+    for (const workflow of workflowFolders) {
+      if (!isValidWorkflowFolderSegment(workflow)) continue;
+      try {
+        if (!(await stat(join(packPath, workflow))).isDirectory()) continue;
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'ENOENT') continue;
+        throw new Error(
+          `Failed to inspect packaged workflow "${join(packPath, workflow)}": ${err.message}`,
+          { cause: err }
+        );
+      }
+      const owner = { source, pack, workflow };
+      const localScripts = await discoverScripts(
+        getPackagedResourceDirectory(workflowsRoot, owner, 'scripts')
+      );
+      for (const [name, definition] of localScripts) {
+        const qualifiedName = formatPackagedResourceReference(owner, name);
+        scripts.set(qualifiedName, { ...definition, name: qualifiedName });
+      }
+    }
+  }
+  return scripts;
+}
+
+async function materializeBundledScripts(): Promise<Map<string, ScriptDefinition>> {
+  const scripts = new Map<string, ScriptDefinition>();
+  for (const [name, bundled] of Object.entries(BUNDLED_SCRIPTS)) {
+    const packaged = parsePackagedResourceReference(name);
+    if (packaged?.owner.source !== 'bundled') {
+      throw new Error(`Invalid bundled packaged script key: ${name}`);
+    }
+    const contentHash = createHash('sha256').update(bundled.content).digest('hex').slice(0, 16);
+    const scriptDir = join(
+      getArchonHome(),
+      'cache',
+      'workflow-scripts',
+      packaged.owner.pack,
+      packaged.owner.workflow
+    );
+    const scriptPath = join(scriptDir, `${packaged.name}-${contentHash}${bundled.extension}`);
+    try {
+      await access(scriptPath);
+    } catch {
+      await mkdir(scriptDir, { recursive: true });
+      const tempPath = `${scriptPath}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tempPath, bundled.content, 'utf-8');
+      try {
+        await rename(tempPath, scriptPath);
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        try {
+          await access(scriptPath);
+          await rm(tempPath, { force: true });
+        } catch {
+          await rm(tempPath, { force: true });
+          throw err;
+        }
+      }
+    }
+    scripts.set(name, { name, path: normalizeSep(scriptPath), runtime: bundled.runtime });
+  }
+  return scripts;
+}
+
+async function discoverBundledPackagedScripts(
+  roots: WorkflowSourceRoots
+): Promise<Map<string, ScriptDefinition>> {
+  // A captured run reads the bundled scripts IT froze — the capture materialized a
+  // binary's embedded ones to files, so the filesystem path serves both builds.
+  return isBinaryBuild() && roots.kind === 'live'
+    ? await materializeBundledScripts()
+    : await discoverPackagedScripts(roots.bundledWorkflows, 'bundled');
+}
+
 /**
  * Discover scripts across all scopes for a given repo cwd.
  *
- * Resolution order (repo wins on same-name collision — matches the
- * workflows/commands precedence):
- *   1. `<cwd>/.archon/scripts/` — repo-scoped (`source: 'project'` equivalent)
- *   2. `~/.archon/scripts/`    — home-scoped (`source: 'global'` equivalent)
+ * `sourceRoots` overrides where EVERY scope is read from — a run passes the roots of its
+ * frozen capture so a statically included global or bundled script cannot change under it.
  *
- * Within a single scope, duplicate basenames across extensions still throw
- * (matches `discoverScripts` behavior). Across scopes, the repo-level entry
- * silently overrides the home-level one.
+ * Shared bare-name scripts use repo-over-home precedence. Packaged scripts
+ * are owner-qualified and merge without participating in that override rule.
+ * Sources are bundled packages, home shared/package scripts, then repo
+ * shared/package scripts.
+ *
+ * Within a single shared scope, duplicate basenames across extensions still
+ * throw (matches `discoverScripts` behavior).
  */
-export async function discoverScriptsForCwd(cwd: string): Promise<Map<string, ScriptDefinition>> {
-  const homeScripts = await discoverScripts(getHomeScriptsPath());
-  const repoScripts = await discoverScripts(join(cwd, '.archon', 'scripts'));
+export async function discoverScriptsForCwd(
+  cwd: string,
+  sourceRoots?: WorkflowSourceRoots
+): Promise<Map<string, ScriptDefinition>> {
+  // Scripts are executable SOURCE, so they resolve under the roots the workflow was read
+  // from, not the workspace it acts on. Omitting `sourceRoots` reads live off `cwd`,
+  // which is both the in-place case and the pre-capture behavior.
+  const roots = sourceRoots ?? liveSourceRoots(cwd);
+  const bundledPackagedScripts = await discoverBundledPackagedScripts(roots);
+  const homeScripts = await discoverScripts(roots.globalScripts);
+  const homePackagedScripts = await discoverPackagedScripts(roots.globalWorkflows, 'global');
+  const repoScripts = roots.project
+    ? await discoverScripts(join(roots.project, '.archon', 'scripts'))
+    : new Map<string, ScriptDefinition>();
+  const repoPackagedScripts = roots.project
+    ? await discoverPackagedScripts(join(roots.project, '.archon', 'workflows'), 'project')
+    : new Map<string, ScriptDefinition>();
 
-  // Start with home, overlay repo (repo wins)
-  const merged = new Map<string, ScriptDefinition>(homeScripts);
+  // Internal packaged keys include their scope, so included workflows retain
+  // exact ownership. Legacy shared scripts keep repo-over-home precedence.
+  const merged = new Map<string, ScriptDefinition>(bundledPackagedScripts);
+  for (const [name, def] of homeScripts) merged.set(name, def);
+  for (const [name, def] of homePackagedScripts) merged.set(name, def);
   for (const [name, def] of repoScripts) {
     if (merged.has(name)) {
       getLog().debug({ name }, 'script.repo_overrides_home');
     }
     merged.set(name, def);
   }
+  for (const [name, def] of repoPackagedScripts) merged.set(name, def);
   return merged;
 }
 

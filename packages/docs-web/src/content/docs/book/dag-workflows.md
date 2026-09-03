@@ -168,15 +168,18 @@ This time `plan` runs; `investigate` is skipped. The same workflow, two paths.
 `when:` evaluates a condition before running a node. If the condition is false, the node is skipped:
 
 ```yaml
-when: "$nodeId.output == 'VALUE'"
+when: "$nodeId.output == 'VALUE'"         # whole output — bash:/script: producers only
 when: "$nodeId.output != 'VALUE'"
 when: "$nodeId.output.field == 'VALUE'"   # JSON field access
+when: "$INPUTS.name == 'VALUE'"           # a declared input supplied by the caller
 ```
 
 Two failure modes, by design:
 
 - An **invalid/unparseable expression** (bad syntax) is fail-closed — the node is **skipped**.
-- A `$node.output.field` **reference that can't resolve** — a field not declared in the producer's `output_format` schema, or a schemaless node whose output isn't JSON or lacks that key — **fails the node** (it is not silently treated as empty). The one exception: a field the producer declared **optional** but left absent resolves to `''`. Whole-text `$node.output` never fails.
+- A `$node.output.field` **reference that can't resolve** — a field not declared in the producer's `output_format` schema, or a schemaless node whose output isn't JSON or lacks that key — **fails the node** (it is not silently treated as empty). The one exception: a field the producer declared **optional** but left absent resolves to `''`. Whole-text `$node.output` never fails. A `$INPUTS.<name>` the run does not carry likewise **fails the node**.
+
+Comparing the **whole output** of an AI producer (`prompt:`, `command:`, `loop:`, `loop_group:` with no `output_format`) to a literal is rejected when the workflow loads — a model's free-form reply is never byte-identical to `BUG`, so the comparison would silently skip the node. Declare `output_format` and compare a field. See [`when:` Condition Syntax](/guides/authoring-workflows/#when-condition-syntax).
 
 ### Accessing Node Output
 
@@ -238,10 +241,10 @@ Archon supports eight node types. Exactly one mode field is required per node:
 
 | Type | Syntax | When to use |
 |------|--------|-------------|
-| **Command** | `command: my-command` | Load a command from `.archon/commands/my-command.md`. The standard choice. |
+| **Command** | `command: my-command` | Load from the owning package in packaged workflows, or shared command lookup in legacy workflows. The standard choice. |
 | **Prompt** | `prompt: "inline instructions..."` | Quick, one-off instructions that don't need a reusable command file. |
 | **Bash** | `bash: "shell command"` | Run a shell script without AI. Stdout is captured as `$nodeId.output`. Deterministic operations only. |
-| **Script** | `script: "..." ` + `runtime: bun \| uv` | Run TypeScript/JavaScript (bun) or Python (uv) without AI. Inline code or named reference to `.archon/scripts/`. Stdout captured as `$nodeId.output`. See [Script Nodes](/guides/script-nodes/). |
+| **Script** | `script: "..."` + `runtime: bun \| uv` | Run TypeScript/JavaScript (bun) or Python (uv) without AI. Inline code or a package-local/shared named reference. Stdout captured as `$nodeId.output`. See [Script Nodes](/guides/script-nodes/). |
 | **Loop** | `loop: { prompt: "...", until: SIGNAL }` | Repeat an AI prompt until a completion signal appears in the output. See [Loop Nodes](/guides/loop-nodes/). |
 | **Loop Group** | `loop_group: { until: SIGNAL, nodes: [...] }` | Repeat a multi-node sub-DAG body until a completion condition is met (cross-node iteration). See [Loop Nodes](/guides/loop-nodes/). |
 | **Approval** | `approval: { message: "..." }` | Pause the workflow for a human approve/reject decision. See [Approval Nodes](/guides/approval-nodes/). |

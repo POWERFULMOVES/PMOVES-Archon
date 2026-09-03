@@ -18,8 +18,9 @@ This chapter collects every CLI command, variable, and YAML option in one place.
 
 | Command | Description |
 |---------|-------------|
-| `archon workflow list` | List all available workflows |
-| `archon workflow list --json` | Machine-readable JSON output |
+| `archon workflow list` | Human-readable compact discovery; shortened descriptions end in ` [truncated]` |
+| `archon workflow list --json` | Machine-readable compact discovery; `descriptionTruncated` reports omitted content |
+| `archon workflow list <name> --full --json` | Exact authored description for one workflow |
 | `archon workflow run <name> "<prompt>"` | Run a workflow |
 | `archon workflow run <name> --branch <name> "<prompt>"` | Run with an explicit branch |
 | `archon workflow run <name> --no-worktree "<prompt>"` | Run in the live checkout (no isolation) |
@@ -105,12 +106,13 @@ archon workflow run my-workflow "auth refresh-tokens"
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `name` | Yes | string | Identifies the workflow in `archon workflow list` |
-| `description` | Yes | string | Shown in listings and used by the router |
+| `description` | Yes | string | Used by the router; compact previews appear in CLI listings |
 | `nodes` | Yes | array | DAG nodes (see Node Options below) |
 | `provider` | No | string | Registered provider identifier (e.g. `claude`, `codex`). Default: `claude` |
 | `model` | No | string | Model for all nodes (`sonnet`, `opus`, `haiku`, or full model ID) |
-| `modelReasoningEffort` | No | string | Codex only: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` |
-| `webSearchMode` | No | string | Codex only: `disabled` \| `cached` \| `live` |
+| `effort` | No | string | Reasoning depth on any provider that has one; also a node field: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` \| `max` \| `ultra` \| `persistent` |
+| `modelReasoningEffort` | No | string | **Deprecated** — translated into `effort` at load (dropped if `effort` is also declared), with a warning: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` \| `max` \| `ultra` \| `persistent` |
+| `webSearchMode` | No | string | Codex only, no per-node form. Gates Codex's built-in search tool, not network access: `disabled` \| `cached` \| `live` |
 
 ### Node Options (DAG)
 
@@ -119,22 +121,22 @@ All nodes share these base fields:
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `id` | Yes | string | Unique node identifier; used in `depends_on` and `$nodeId.output` |
-| `command` | One of | string | Name of a command file in `.archon/commands/` |
+| `command` | One of | string | Package-local command name (packaged workflow) or shared command name (legacy workflow) |
 | `prompt` | One of | string | Inline AI instructions |
 | `bash` | One of | string | Shell script (runs without AI; stdout captured as `$nodeId.output`) |
-| `script` | One of | string | TypeScript/JavaScript (bun) or Python (uv) — inline or named ref to `.archon/scripts/`. Requires `runtime`. See [Script Nodes](/guides/script-nodes/) |
+| `script` | One of | string | TypeScript/JavaScript (bun) or Python (uv) — inline or named package-local/shared reference. Requires `runtime`. See [Script Nodes](/guides/script-nodes/) |
 | `loop` | One of | object | Loop configuration (see Loop Options below) |
 | `loop_group` | One of | object | Multi-node sub-DAG repeated per iteration (see Loop Group Options below) |
 | `approval` | One of | object | Pause for human review; see [Approval Nodes](/guides/approval-nodes/) |
 | `cancel` | One of | string | Reason string; terminates the run with `cancelled` status (not `failed`). Usually gated with `when:` |
-| `include` | One of | string | Name of another workflow whose nodes are inlined at discovery as a namespaced sub-DAG; see [Reusing a Shared Sub-DAG](/guides/authoring-workflows/#reusing-a-shared-sub-dag-with-include) |
-| `workflow` | One of | string | Name of another workflow run at execution time as a separate governed CHILD run (own run record, gates, artifacts, cost); see [Composing a Governed Sub-Run](/guides/authoring-workflows/#composing-a-governed-sub-run-with-workflow) |
+| `include` | One of | string | Name of another workflow whose nodes are inlined at discovery as a namespaced sub-DAG; see [Composing Another Workflow](/guides/authoring-workflows/#composing-another-workflow-with-include) |
+| `workflow` | One of | string | Name of another workflow run at execution time as a separate governed CHILD run (own run record, gates, artifacts, cost); see [Launching a Separate Governed Run](/guides/authoring-workflows/#launching-a-separate-governed-run-with-workflow) |
 | `depends_on` | No | string[] | Node IDs that must complete before this node runs |
 | `when` | No | string | Condition expression; node is skipped if false |
 | `trigger_rule` | No | string | Join semantics when multiple upstreams exist (see Trigger Rules) |
 | `provider` | No | string | Per-node provider override (any registered provider) |
 | `model` | No | string | Per-node model override |
-| `context` | No | `fresh` \| `shared` | Session context — `fresh` starts a new conversation, `shared` inherits from prior node |
+| `context` | No | `fresh` \| `shared` \| `{ resume: node-id }` | Session context — `fresh` starts a new conversation; scalar `shared` inherits the ambient prior session in a sequential layer; named [`resume`](/guides/authoring-workflows/#addressable-session-ancestry) forks one exact upstream session and is required for parallel ancestry |
 | `output_format` | No | JSON Schema | Enforce structured JSON output from this node |
 | `allowed_tools` | No | string[] | Restrict available tools to this list (Claude only) |
 | `denied_tools` | No | string[] | Remove specific tools from this node's context (Claude only) |
@@ -142,7 +144,7 @@ All nodes share these base fields:
 | `retry` | No | object | Retry configuration for transient failures (see Retry Options). **Hard error on loop nodes** |
 | `hooks` | No | object | SDK hook callbacks (Claude only; see Hook Schema) |
 | `mcp` | No | string | Path to MCP server config JSON file (Claude only) |
-| `skills` | No | string[] | Skill names to preload into this node's context (Claude only) |
+| `skills` | No | string[] | Declared skill names for this node; Claude omission/`[]` selects none |
 | `agents` | No | object | Inline sub-agent definitions keyed by kebab-case ID. Claude only |
 
 **Script-specific fields** (required when `script:` is set):
@@ -158,8 +160,9 @@ All nodes share these base fields:
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `input` | No | string | Data string forwarded as the child's `$ARGUMENTS`. Substituted like a `prompt:` body (`$nodeId.output`, workflow variables) |
+| `with` | No | object | Named string values forwarded as the child's `$INPUTS`. Keys must be valid input identifiers. Mutually exclusive with `input` |
 | `isolation` | No | `'inherit' \| 'worktree'` | Which checkout the child runs in. Default (and `'inherit'`) shares the parent's. `'worktree'` gives the child its own worktree + branch — opt-in only, never inferred, and it fails the node rather than falling back to the shared checkout when a worktree can't be created (folder projects, surfaces with no resolver) |
-| `fan_out` | No | object | Run one child per item of a runtime list: `items` (a `$node.output` ref or literal JSON array), `max_parallel` (default `5`, bounds concurrency not total), `join` (default `all_done`), `as` (reserved, rejected at load). Every child runs to its own terminal state; none cancels another |
+| `fan_out` | No | object | Run one child per item of a runtime list: `items` (a `$node.output` ref or literal JSON array), `max_parallel` (default `5`, bounds concurrency not total), `join` (default `all_done`), `as` (names the item as `$INPUTS.<as>` and must not collide with `with`). Every child runs to its own terminal state; none cancels another |
 
 `retry` is rejected on `workflow:` nodes, and `workflow:` is rejected inside a `loop_group` body. The child's terminal output threads back as `$nodeId.output`; a child approval gate pauses the whole tree — approve the **child** by run id and the parent auto-resumes. A child gate is the exception: it works for a 1:1 sub-run, but a child that pauses inside a `fan_out:` expansion **fails the node** instead — a parent has one approval slot and cannot hand it to N children, so gate before or after the fan-out node rather than inside a child of it.
 
@@ -190,11 +193,12 @@ Defined under `loop:` inside a node:
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `prompt` | One of `prompt`/`command` | string | Inline AI instructions executed each iteration |
-| `command` | One of `prompt`/`command` | string | Command file (under `.archon/commands/`) whose body is the iteration prompt — exactly one of `prompt` or `command` |
-| `until` | Yes | string | Completion signal string — loop ends when AI output contains this |
+| `command` | One of `prompt`/`command` | string | Package-local or shared command whose body is the iteration prompt — exactly one of `prompt` or `command` |
+| `until` | One channel required | string | Deprecated prose completion signal — use `<promise>SIGNAL</promise>` or a final line containing only `SIGNAL`. Omit it for a deterministic or structured loop: with no signal declared, nothing matches prose |
 | `max_iterations` | Yes | number | Maximum iterations before the node fails |
 | `fresh_context` | No | boolean | Start a new session each iteration (default: false) |
-| `until_bash` | No | string | Shell script run after each iteration; exit 0 signals completion |
+| `until_bash` | One channel required | string | Shell script run after each iteration; exit 0 signals completion. Skipped once a cheaper channel already fired |
+| `until_field` | One channel required | string | **`loop:` only.** Names a boolean in the node's `output_format`; the loop ends when its validated value is `true` |
 | `interactive` | No | boolean | Pause at a human gate after each iteration for input via `/workflow approve` |
 | `gate_message` | No | string | Message shown at the interactive gate (required when `interactive: true`) |
 | `signal_completes` | No | boolean | Interactive loops only: a detected completion signal completes the node immediately (even on iteration 1) instead of gating (default: false) |
@@ -204,7 +208,7 @@ Defined under `loop:` inside a node:
 ```yaml
 - id: refine
   loop:
-    prompt: "Review the current draft and improve it. Output COMPLETE when done."
+    prompt: "Review the current draft and improve it. Output <promise>COMPLETE</promise> when done."
     until: "COMPLETE"
     max_iterations: 5
 ```
@@ -216,11 +220,11 @@ per iteration (see [Cross-Node Loops](/guides/loop-nodes/#cross-node-loops-with-
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `nodes` | Yes | node[] | Sub-DAG body re-run in full each iteration. Any node type, including nested `loop_group`. `depends_on` is body-scoped; body ids must not shadow outer ids |
-| `until` | Yes | string | Completion signal — checked in the body's terminal-node output |
+| `nodes` | Yes | node[] | Sub-DAG body re-run in full each iteration. Executable nodes, `include:`, and nested `loop_group` are supported; runtime `workflow:` sub-runs are not. `depends_on` is body-scoped; body ids must not shadow outer ids |
+| `until` | One channel required | string | Completion signal — checked in the body's terminal-node output. Omit it for a deterministic group |
 | `max_iterations` | Yes | number | Maximum iterations before the node fails |
 | `fresh_context` | No | boolean | `true` starts fresh body AI sessions each iteration (default: false — sessions continue) |
-| `until_bash` | No | string | Shell script run after each iteration; exit 0 signals completion |
+| `until_bash` | One channel required | string | Shell script run after each iteration; exit 0 signals completion. Skipped once a cheaper channel already fired |
 | `interactive` | No | boolean | Pause at a human gate after each non-completing iteration |
 | `gate_message` | No | string | Message shown at the interactive gate |
 | `signal_completes` | No | boolean | Interactive loops only: a detected completion signal completes the group immediately (even on iteration 1) instead of gating (default: false) |
@@ -340,7 +344,7 @@ defaults:
 | Error | Likely Cause | Fix |
 |-------|-------------|-----|
 | `Workflow "X" not found` | YAML file not discovered | Check file is in `.archon/workflows/` and `archon workflow list` shows it |
-| `Command "X" not found` | Command file missing | Check `.archon/commands/X.md` exists and `archon validate commands X` passes |
+| `Command "X" not found` | Command file missing | For a packaged workflow, check its own `commands/X.md` and run `archon validate workflows <name>`; otherwise check the shared command path and run `archon validate commands X` |
 | `Routing unclear — falling back to archon-assist` | No workflow matched the input | Use an explicit workflow name: `archon workflow run my-workflow "..."` |
 | `Worktree already exists for branch X` | Prior run left a worktree | Run `archon complete X` or `archon isolation cleanup` |
 | `Not a git repository` | Running outside a repo | `cd` into a git repo first — workflow and isolation commands require one |

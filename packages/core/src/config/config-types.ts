@@ -21,6 +21,10 @@ import type {
   ProviderDefaultsMap,
 } from '@archon/providers/types';
 import type { RawAliasesConfig, RawTiersConfig } from '@archon/workflows/model-validation';
+import {
+  workflowRunContinuationConfigSchema,
+  type WorkflowRunConfigLayer,
+} from '@archon/workflows/schemas/run-config';
 
 export type {
   ClaudeProviderDefaults,
@@ -178,7 +182,15 @@ export interface GlobalConfig {
    * overrides these per-field.
    */
   container?: ContainerConfig;
+
+  /** Default-off policy for continuing terminal quota failures after time passes. */
+  workflows?: WorkflowContinuationConfig;
 }
+
+// Ordinary global/repo config remains forward-compatible: unlike the explicitly
+// selected run layer, it strips extension keys it does not understand yet.
+export const workflowContinuationConfigSchema = workflowRunContinuationConfigSchema.strip();
+export type WorkflowContinuationConfig = NonNullable<WorkflowRunConfigLayer['workflows']>;
 
 /**
  * Repository configuration (project-specific settings)
@@ -201,6 +213,9 @@ export interface RepoConfig {
 
   /** Repo-level model tier presets — override global tiers with same name. */
   tiers?: RawTiersConfig;
+
+  /** Project override for quota-failure continuation. */
+  workflows?: WorkflowContinuationConfig;
 
   /**
    * Commands configuration
@@ -375,6 +390,12 @@ export interface MergedConfig {
   };
   concurrency: {
     maxConversations: number;
+  };
+  workflows: {
+    autoResumeOnQuotaReset: boolean;
+    quotaFallbackDelayMs?: number;
+    quotaMaxAttempts: number;
+    quotaDeadlineMs: number;
   };
   commands: {
     /**

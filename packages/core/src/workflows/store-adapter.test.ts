@@ -1,52 +1,82 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
-import type { IWorkflowStore } from '@archon/workflows/store';
+import type { DagResumeSnapshot, IWorkflowStore } from '@archon/workflows/store';
+import type { WorkflowRunStatus } from '@archon/workflows/schemas/workflow-run';
+import type { ResolvedCredential } from '../credentials/delivery';
 
 // Mock DB modules before importing store-adapter
 const mockCreateWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
 const mockGetWorkflowRun = mock(() => Promise.resolve(null));
+const mockFindChildRuns = mock(() => Promise.resolve([]));
+const mockGetRunAncestry = mock(() => Promise.resolve([]));
 const mockGetActiveWorkflowRunByPath = mock(() => Promise.resolve(null));
-const mockFailOrphanedRuns = mock(() => Promise.resolve({ count: 0 }));
 const mockFindResumableRun = mock(() => Promise.resolve(null));
 const mockResumeWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
+const mockRecoverCancelledFanOutRun = mock(() => Promise.resolve({ id: 'run-1' }));
 const mockUpdateWorkflowRun = mock(() => Promise.resolve());
 const mockUpdateWorkflowActivity = mock(() => Promise.resolve());
-const mockGetWorkflowRunStatus = mock(() => Promise.resolve('running'));
+const mockGetWorkflowRunStatus = mock<(_id: string) => Promise<WorkflowRunStatus | null>>(() =>
+  Promise.resolve('running')
+);
 const mockCompleteWorkflowRun = mock(() => Promise.resolve());
 const mockFailWorkflowRun = mock(() => Promise.resolve());
 const mockCancelWorkflowRun = mock(() => Promise.resolve());
+const mockCancelFanOutRun = mock(() => Promise.resolve());
 const mockPauseWorkflowRun = mock(() => Promise.resolve());
+const mockPauseWorkflowRunForWait = mock(() => Promise.resolve());
+const mockFailPausedAttentionWait = mock(() => Promise.resolve({ failed: true }));
+const mockClearWorkflowWaitContext = mock(() => Promise.resolve({ cleared: true }));
+// Backs createWorkflowStore()'s rewriteApprovalContext (#2707 step 3 pause
+// escalation) — per AGENTS.md's mock.module rule, an export the factory omits
+// keeps its REAL implementation, so this must be listed even though no test
+// here calls rewriteApprovalContext yet.
+const mockResolveApprovalGate = mock(() => Promise.resolve({ resolved: true }));
 
 mock.module('../db/workflows', () => ({
   createWorkflowRun: mockCreateWorkflowRun,
   getWorkflowRun: mockGetWorkflowRun,
+  findChildRuns: mockFindChildRuns,
+  getRunAncestry: mockGetRunAncestry,
   getActiveWorkflowRunByPath: mockGetActiveWorkflowRunByPath,
-  failOrphanedRuns: mockFailOrphanedRuns,
   findResumableRun: mockFindResumableRun,
   resumeWorkflowRun: mockResumeWorkflowRun,
+  recoverCancelledFanOutRun: mockRecoverCancelledFanOutRun,
   updateWorkflowRun: mockUpdateWorkflowRun,
   updateWorkflowActivity: mockUpdateWorkflowActivity,
   getWorkflowRunStatus: mockGetWorkflowRunStatus,
   completeWorkflowRun: mockCompleteWorkflowRun,
   failWorkflowRun: mockFailWorkflowRun,
   cancelWorkflowRun: mockCancelWorkflowRun,
+  cancelFanOutRun: mockCancelFanOutRun,
   pauseWorkflowRun: mockPauseWorkflowRun,
+  pauseWorkflowRunForWait: mockPauseWorkflowRunForWait,
+  failPausedAttentionWait: mockFailPausedAttentionWait,
+  clearWorkflowWaitContext: mockClearWorkflowWaitContext,
+  resolveApprovalGate: mockResolveApprovalGate,
   claimWriteback: mock(() => Promise.resolve({ claimed: true })),
   releaseWritebackClaim: mock(() => Promise.resolve()),
 }));
 
 const mockCreateWorkflowEvent = mock(() => Promise.resolve());
-const mockGetDagResumeSnapshot = mock(() =>
+const mockPersistWorkflowEvent = mock(() => Promise.resolve());
+const mockPersistWorkflowEventIfRunning = mock(() => Promise.resolve({ persisted: true }));
+const mockGetDagResumeSnapshot = mock<(_id: string) => Promise<DagResumeSnapshot>>(() =>
   Promise.resolve({
-    completedNodeOutputs: new Map<string, string>(),
+    completedNodeOutputs: new Map(),
+    fanOutSnapshots: new Map(),
+    unresolvedNodeStarts: new Set(),
     tokens: { input: 0, output: 0 },
+    costUsd: 0,
   })
 );
 mock.module('../db/workflow-events', () => ({
   createWorkflowEvent: mockCreateWorkflowEvent,
+  persistWorkflowEvent: mockPersistWorkflowEvent,
+  persistWorkflowEventIfRunning: mockPersistWorkflowEventIfRunning,
   getDagResumeSnapshot: mockGetDagResumeSnapshot,
 }));
 
-const mockGetCodebase = mock(() => Promise.resolve(null));
+type StoredCodebase = Awaited<ReturnType<IWorkflowStore['getCodebase']>>;
+const mockGetCodebase = mock<(_id: string) => Promise<StoredCodebase>>(() => Promise.resolve(null));
 mock.module('../db/codebases', () => ({
   getCodebase: mockGetCodebase,
 }));
@@ -54,6 +84,15 @@ mock.module('../db/codebases', () => ({
 mock.module('@archon/providers', () => ({
   getAgentProvider: mock(() => ({})),
   getRegisteredProviders: mock(() => []),
+  getRegistration: mock(
+    (): { parseRunConfig: (raw: Record<string, unknown>) => Record<string, unknown> } => ({
+      parseRunConfig: (raw: Record<string, unknown>): Record<string, unknown> => raw,
+    })
+  ),
+  parseProviderRunModel: mock((_provider: string, model: string): string => model),
+  isRegisteredProvider: mock((): boolean => false),
+  InvalidProviderRunConfigError: class InvalidProviderRunConfigError extends Error {},
+  getProviderCapabilities: mock((): { effortControl: boolean } => ({ effortControl: false })),
   // Vendor → env-var map consumed by credentials/delivery (#1955). A realistic
   // subset of the generated map (incl. HF_TOKEN, the upstream var).
   PI_PROVIDER_ENV_VARS: {
@@ -84,7 +123,9 @@ mock.module('../credentials/config', () => ({
   isPerUserProviderKeysEnabled: mockIsPerUserProviderKeysEnabled,
 }));
 
-const mockListDecryptedUserProviderCredentials = mock(async () => []);
+const mockListDecryptedUserProviderCredentials = mock<
+  (_userId: string) => Promise<{ provider: string; cred: ResolvedCredential }[]>
+>(async () => []);
 mock.module('../db/user-provider-key-store', () => ({
   listDecryptedUserProviderCredentials: mockListDecryptedUserProviderCredentials,
   saveUserProviderKey: mock(() => Promise.resolve()),
@@ -106,9 +147,19 @@ mock.module('../db/env-vars', () => ({
 }));
 mock.module('../db/workflow-node-sessions', () => ({
   getWorkflowNodeSession: mock(() => Promise.resolve(null)),
-  setWorkflowNodeSession: mock(() => Promise.resolve()),
+  upsertWorkflowNodeSession: mock(() => Promise.resolve()),
   deleteWorkflowNodeSessions: mock(() => Promise.resolve()),
 }));
+mock.module(
+  '../db/workflow-run-node-sessions',
+  (): {
+    listWorkflowRunNodeSessions: () => Promise<never[]>;
+    upsertWorkflowRunNodeSession: () => Promise<void>;
+  } => ({
+    listWorkflowRunNodeSessions: mock((): Promise<never[]> => Promise.resolve([])),
+    upsertWorkflowRunNodeSession: mock((): Promise<void> => Promise.resolve()),
+  })
+);
 
 const { createWorkflowStore, createWorkflowDeps } = await import('./store-adapter');
 
@@ -118,23 +169,37 @@ describe('createWorkflowStore', () => {
     const requiredMethods: (keyof IWorkflowStore)[] = [
       'createWorkflowRun',
       'getWorkflowRun',
+      'findChildRuns',
+      'getRunAncestry',
       'getActiveWorkflowRunByPath',
-      'failOrphanedRuns',
       'findResumableRun',
       'resumeWorkflowRun',
+      'recoverCancelledFanOutRun',
       'updateWorkflowRun',
       'updateWorkflowActivity',
       'getWorkflowRunStatus',
       'completeWorkflowRun',
       'failWorkflowRun',
       'pauseWorkflowRun',
+      'pauseWorkflowRunForWait',
+      'failPausedAttentionWait',
+      'clearWorkflowWaitContext',
+      'rewriteApprovalContext',
       'claimWriteback',
       'releaseWritebackClaim',
       'cancelWorkflowRun',
+      'cancelFanOutRun',
       'createWorkflowEvent',
+      'persistWorkflowEvent',
+      'persistWorkflowEventIfRunning',
       'getDagResumeSnapshot',
       'getCodebase',
       'getCodebaseEnvVars',
+      'getWorkflowNodeSession',
+      'upsertWorkflowNodeSession',
+      'deleteWorkflowNodeSessions',
+      'listWorkflowRunNodeSessions',
+      'upsertWorkflowRunNodeSession',
     ];
     for (const method of requiredMethods) {
       expect(typeof store[method]).toBe('function');
@@ -163,7 +228,7 @@ describe('createWorkflowStore', () => {
     await expect(
       store.createWorkflowEvent({
         workflow_run_id: 'run-1',
-        event_type: 'step_started',
+        event_type: 'node_started',
         step_index: 0,
         step_name: 'test-step',
       })
@@ -171,9 +236,12 @@ describe('createWorkflowStore', () => {
   });
 
   test('delegates getDagResumeSnapshot to DB', async () => {
-    const expected = {
-      completedNodeOutputs: new Map([['step1', 'output text']]),
+    const expected: DagResumeSnapshot = {
+      completedNodeOutputs: new Map([['step1', { output: 'output text' }]]),
+      fanOutSnapshots: new Map(),
+      unresolvedNodeStarts: new Set(),
       tokens: { input: 40, output: 4 },
+      costUsd: 0,
     };
     mockGetDagResumeSnapshot.mockResolvedValueOnce(expected);
     const store = createWorkflowStore();
@@ -182,11 +250,48 @@ describe('createWorkflowStore', () => {
     expect(mockGetDagResumeSnapshot).toHaveBeenCalledWith('run-123');
   });
 
+  test('delegates durable workflow events to DB without swallowing failures', async () => {
+    const event = {
+      workflow_run_id: 'run-123',
+      event_type: 'fan_out_instances' as const,
+      step_name: 'fan',
+      data: { instances: [] },
+    };
+    const store = createWorkflowStore();
+    await store.persistWorkflowEvent(event);
+    expect(mockPersistWorkflowEvent).toHaveBeenCalledWith(event);
+
+    mockPersistWorkflowEvent.mockRejectedValueOnce(new Error('disk full'));
+    await expect(store.persistWorkflowEvent(event)).rejects.toThrow('disk full');
+  });
+
+  test('delegates conditional running-state event claims', async () => {
+    const event = {
+      workflow_run_id: 'run-123',
+      event_type: 'node_started' as const,
+      step_name: 'fan-instance',
+    };
+    mockPersistWorkflowEventIfRunning.mockResolvedValueOnce({ persisted: false });
+    const store = createWorkflowStore();
+
+    await expect(store.persistWorkflowEventIfRunning(event)).resolves.toEqual({
+      persisted: false,
+    });
+    expect(mockPersistWorkflowEventIfRunning).toHaveBeenCalledWith(event);
+  });
+
   test('delegates cancelWorkflowRun to DB', async () => {
     mockCancelWorkflowRun.mockResolvedValueOnce(undefined);
     const store = createWorkflowStore();
-    await store.cancelWorkflowRun('run-123');
-    expect(mockCancelWorkflowRun).toHaveBeenCalledWith('run-123');
+    const event = { step_name: 'halt', reason: 'stopped' };
+    await store.cancelWorkflowRun('run-123', event);
+    expect(mockCancelWorkflowRun).toHaveBeenCalledWith('run-123', event);
+  });
+
+  test('delegates cancelFanOutRun to DB', async () => {
+    const store = createWorkflowStore();
+    await store.cancelFanOutRun('run-123', 'fan_out_gate');
+    expect(mockCancelFanOutRun).toHaveBeenCalledWith('run-123', 'fan_out_gate');
   });
 
   test('delegates getCodebase to DB', async () => {
@@ -195,6 +300,7 @@ describe('createWorkflowStore', () => {
       name: 'owner/repo',
       repository_url: 'https://github.com/owner/repo',
       default_cwd: '/workspace/repo',
+      kind: 'repo',
     });
     const store = createWorkflowStore();
     const result = await store.getCodebase('cb-1');
@@ -203,6 +309,7 @@ describe('createWorkflowStore', () => {
       name: 'owner/repo',
       repository_url: 'https://github.com/owner/repo',
       default_cwd: '/workspace/repo',
+      kind: 'repo',
     });
   });
 });
@@ -237,11 +344,11 @@ describe('createWorkflowDeps', () => {
       expect(typeof deps.getUserProviderEnv).toBe('function');
     });
 
-    test('getUserProviderEnv returns { env: {}, files: [] } when list query throws', async () => {
+    test('getUserProviderEnv returns empty delivery bags when list query throws', async () => {
       mockListDecryptedUserProviderCredentials.mockRejectedValueOnce(new Error('db gone'));
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [] });
+      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
     });
 
     // Regression guard for #2035: enabling the credential vault (auto-key on by
@@ -253,7 +360,7 @@ describe('createWorkflowDeps', () => {
       mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([]);
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-unconnected', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [] });
+      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
     });
 
     test('getUserProviderEnv aggregates env from multiple providers', async () => {
@@ -264,6 +371,42 @@ describe('createWorkflowDeps', () => {
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
       expect(result?.env).toMatchObject({ OPENROUTER_API_KEY: 'or-k', GEMINI_API_KEY: 'g-k' });
+      expect(result?.protectedValues).toEqual(['or-k', 'g-k']);
+    });
+
+    test('getUserProviderEnv protects OAuth secrets without hiding public metadata', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([
+        {
+          provider: 'openai',
+          cred: {
+            kind: 'oauth',
+            oauthApiKey: 'derived-bearer',
+            rawCreds: {
+              type: 'oauth',
+              access: 'access-token',
+              refresh: 'refresh-token',
+              id_token: 'id-token',
+              accountId: 'account-id',
+              enterpriseUrl: 'company.ghe.com',
+              availableModelIds: ['claude-sonnet-4', 'gpt-5'],
+              expires: 123,
+            },
+          },
+        },
+      ]);
+      const deps = createWorkflowDeps();
+      const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+      expect(result?.protectedValues).toEqual([
+        'derived-bearer',
+        'access-token',
+        'refresh-token',
+        'id-token',
+      ]);
+      expect(result?.protectedValues).not.toContain('oauth');
+      expect(result?.protectedValues).not.toContain('account-id');
+      expect(result?.protectedValues).not.toContain('company.ghe.com');
+      expect(result?.protectedValues).not.toContain('claude-sonnet-4');
+      expect(result?.protectedValues).not.toContain('gpt-5');
     });
   });
 });

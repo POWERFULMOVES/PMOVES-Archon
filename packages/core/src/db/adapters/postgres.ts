@@ -4,6 +4,7 @@
 import { Pool } from 'pg';
 import type { PoolClient } from 'pg';
 import type { DbNotificationListener, IDatabase, QueryResult, SqlDialect } from './types';
+import { WORKFLOW_EVENT_NOTIFY_CHANNEL } from './types';
 import { createLogger } from '@archon/paths';
 import { getSchemaSQL } from '../bundled-schema';
 import { APP_VERSION } from '../schema-version';
@@ -18,7 +19,7 @@ import { APP_VERSION } from '../schema-version';
 const WORKFLOW_EVENT_NOTIFY_SQL = `
 CREATE OR REPLACE FUNCTION archon_notify_workflow_event() RETURNS trigger AS $$
 BEGIN
-  PERFORM pg_notify('archon_dashboard_event', NEW.workflow_run_id::text);
+  PERFORM pg_notify('${WORKFLOW_EVENT_NOTIFY_CHANNEL}', NEW.workflow_run_id::text);
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

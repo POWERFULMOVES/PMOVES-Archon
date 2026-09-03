@@ -51,6 +51,18 @@ export interface IDatabase {
 }
 
 /**
+ * The Postgres `NOTIFY` channel carrying one workflow-event insert, payload = the
+ * bare `workflow_run_id`. Named once here because it is a wire value with a producer
+ * (the trigger in `postgres.ts`) and several consumers, and a hand-copied literal in
+ * each is how they drift.
+ *
+ * The name is a misnomer — it carries every workflow event, not only dashboard ones —
+ * and is deliberately NOT renamed: an older binary sharing the same database listens
+ * on this exact string, so a rename would need a dual-notify transition for nothing.
+ */
+export const WORKFLOW_EVENT_NOTIFY_CHANNEL = 'archon_dashboard_event';
+
+/**
  * Optional capability for databases that support push notifications
  * (Postgres `LISTEN/NOTIFY`). Kept as a NARROW interface separate from
  * `IDatabase` — only the Postgres adapter implements it; SQLite has no

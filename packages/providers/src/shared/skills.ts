@@ -9,11 +9,38 @@ export interface ResolvedSkills {
   missing: string[];
 }
 
+export interface ClaudeSkillSearchOptions {
+  /** Effective Claude config directory. Defaults to CLAUDE_CONFIG_DIR or ~/.claude. */
+  userConfigDir?: string;
+  /** Whether Claude is configured to load project settings. */
+  includeProject?: boolean;
+  /** Container runs cannot see host user skills unless explicitly mounted. */
+  includeUser?: boolean;
+}
+
+/** Claude Code's provider-native skill roots, in discovery precedence order. */
+export function claudeSkillSearchRoots(
+  cwd: string,
+  options: ClaudeSkillSearchOptions = {}
+): string[] {
+  const home = process.env.HOME ?? homedir();
+  const roots: string[] = [];
+  if (options.includeProject !== false) {
+    roots.push(join(cwd, '.claude', 'skills'));
+  }
+  if (options.includeUser !== false) {
+    const userConfigDir =
+      options.userConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(home, '.claude');
+    roots.push(join(userConfigDir, 'skills'));
+  }
+  return roots;
+}
+
 /**
- * Skill-discovery search order for a named skill. Mirrors the locations
- * Claude's SDK and Pi's default resource loader both respect, so Archon
- * workflows that already work under Claude find the same skills under any
- * provider that calls this resolver.
+ * Cross-provider skill-discovery search order for a named skill. Pi and
+ * Copilot use this compatibility resolver. Claude uses the narrower
+ * `claudeSkillSearchRoots` contract because its CLI does not discover
+ * `.agents/skills`.
  *
  * Order (first match wins per name):
  *   1. `<cwd>/.agents/skills/<name>/`     — project-local, agentskills.io standard
@@ -50,11 +77,17 @@ export function resolveSkillDirectories(
   cwd: string,
   skillNames: string[] | undefined
 ): ResolvedSkills {
+  return resolveSkillDirectoriesFromRoots(skillSearchRoots(cwd), skillNames);
+}
+
+function resolveSkillDirectoriesFromRoots(
+  roots: string[],
+  skillNames: string[] | undefined
+): ResolvedSkills {
   if (!skillNames || skillNames.length === 0) {
     return { paths: [], missing: [] };
   }
 
-  const roots = skillSearchRoots(cwd);
   const paths: string[] = [];
   const missing: string[] = [];
   const seen = new Set<string>();
@@ -88,4 +121,42 @@ export function resolveSkillDirectories(
   }
 
   return { paths, missing };
+}
+
+/**
+ * Names whose skill *directory* exists under any of `roots`, whether or not it
+ * holds a loadable `SKILL.md`.
+ *
+ * This separates "installed, but not loadable from here" — a wrong path, a
+ * disabled setting source, or a directory missing its SKILL.md, all of which are
+ * actionable author errors — from "absent from disk entirely", which is the
+ * normal state of Claude's built-in and `plugin:skill` entries. Shared by the
+ * provider preflight and workflow validation so the two cannot disagree about
+ * which case a declared name falls into.
+ */
+export function findInstalledSkillNames(roots: string[], skillNames: string[]): string[] {
+  const installed: string[] = [];
+  for (const rawName of skillNames) {
+    if (typeof rawName !== 'string') continue;
+    const name = rawName.trim();
+    if (name.length === 0) continue;
+    if (isAbsolute(name) || basename(name) !== name || name === '.' || name === '..') continue;
+    if (roots.some(root => existsSync(join(root, name)))) installed.push(rawName);
+  }
+  return installed;
+}
+
+/**
+ * Resolve skills only from locations Claude Code natively discovers.
+ *
+ * Claude does not discover the cross-provider `.agents/skills` convention.
+ * Keep this separate from `resolveSkillDirectories`, which Pi and Copilot use
+ * for their broader compatibility contract.
+ */
+export function resolveClaudeSkillDirectories(
+  cwd: string,
+  skillNames: string[] | undefined,
+  options?: ClaudeSkillSearchOptions
+): ResolvedSkills {
+  return resolveSkillDirectoriesFromRoots(claudeSkillSearchRoots(cwd, options), skillNames);
 }

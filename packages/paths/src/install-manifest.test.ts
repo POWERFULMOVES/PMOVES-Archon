@@ -1,0 +1,134 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
+import { tmpdir } from 'os';
+import { isAbsolute, join, resolve } from 'path';
+import { spawnSync } from 'node:child_process';
+import { refreshCompiledInstallManifest, type InstallManifest } from './install-manifest';
+import { removeTempTree } from './test-utils';
+
+describe('compiled install manifest', () => {
+  const envKeys = ['ARCHON_HOME', 'WORKSPACE_PATH', 'ARCHON_DOCKER'] as const;
+  const originalEnv: Partial<Record<(typeof envKeys)[number], string>> = {};
+  let testDir: string;
+
+  beforeEach(() => {
+    for (const key of envKeys) originalEnv[key] = process.env[key];
+    testDir = mkdtempSync(join(tmpdir(), 'archon-install-manifest-'));
+    delete process.env.WORKSPACE_PATH;
+    delete process.env.ARCHON_DOCKER;
+    process.env.ARCHON_HOME = testDir;
+  });
+
+  afterEach(async () => {
+    for (const key of envKeys) {
+      const value = originalEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    // Async so the removal can retry: this suite runs the compiled-startup path through
+    // a real `spawnSync`, and `rmSync` has no retry of its own on any runtime (#2306).
+    await removeTempTree(testDir);
+  });
+
+  function manifestPath(): string {
+    return join(testDir, 'install.json');
+  }
+
+  function readManifest(): InstallManifest {
+    return JSON.parse(readFileSync(manifestPath(), 'utf8')) as InstallManifest;
+  }
+
+  function createBinary(name: string): string {
+    const binary = join(testDir, 'bin', name);
+    mkdirSync(join(testDir, 'bin'), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, 0o755);
+    return binary;
+  }
+
+  test('writes exactly the canonical binary path and version', () => {
+    const binary = createBinary('archon');
+
+    refreshCompiledInstallManifest(true, binary, '1.2.3');
+
+    const manifest = readManifest();
+    expect(manifest).toEqual({ binary: realpathSync(binary), version: '1.2.3' });
+    expect(Object.keys(manifest)).toEqual(['binary', 'version']);
+    expect(isAbsolute(manifest.binary)).toBe(true);
+  });
+
+  test('does not write for a source-mode invocation', () => {
+    refreshCompiledInstallManifest(false, process.execPath, 'dev');
+    expect(() => readManifest()).toThrow();
+  });
+
+  test('does not rewrite an unchanged manifest', () => {
+    const binary = createBinary('archon');
+    const manifest: InstallManifest = { binary: realpathSync(binary), version: '1.2.3' };
+    const original = JSON.stringify(manifest);
+    writeFileSync(manifestPath(), original);
+    const preservedTime = new Date('2000-01-01T00:00:00.000Z');
+    utimesSync(manifestPath(), preservedTime, preservedTime);
+    const originalMtime = statSync(manifestPath()).mtimeMs;
+
+    refreshCompiledInstallManifest(true, binary, '1.2.3');
+
+    expect(readFileSync(manifestPath(), 'utf8')).toBe(original);
+    expect(statSync(manifestPath()).mtimeMs).toBe(originalMtime);
+  });
+
+  test('replaces the manifest when the binary or version changes', () => {
+    const first = createBinary('archon-first');
+    const second = createBinary('archon-second');
+    refreshCompiledInstallManifest(true, first, '1.0.0');
+
+    refreshCompiledInstallManifest(true, second, '2.0.0');
+
+    expect(readManifest()).toEqual({ binary: realpathSync(second), version: '2.0.0' });
+  });
+
+  test('repairs malformed discovery metadata', () => {
+    writeFileSync(manifestPath(), '{"binary":42,"version":"old"}');
+
+    refreshCompiledInstallManifest(true, 'missing/archon', '1.0.0');
+
+    expect(readManifest()).toEqual({
+      binary: resolve('missing/archon'),
+      version: '1.0.0',
+    });
+  });
+
+  test('does not throw or leave a temporary file when persistence fails', () => {
+    mkdirSync(manifestPath());
+
+    expect(() => refreshCompiledInstallManifest(true, process.execPath, '1.2.3')).not.toThrow();
+    expect(readdirSync(testDir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  test('respects the JSON log gate before a compiled startup failure', () => {
+    writeFileSync(manifestPath(), 'not-json');
+
+    const result = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, 'fixtures', 'install-manifest-json.ts')],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, ARCHON_HOME: testDir, LOG_LEVEL: 'debug' },
+      }
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('{"ok":true}\n');
+    expect(result.stderr).toBe('');
+  });
+});

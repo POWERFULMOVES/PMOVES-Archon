@@ -19,6 +19,11 @@ sessions/
 api_sessions/
 workspace/
 
+# Nested git worktrees (separate checkouts, formatted on their own branch)
+worktrees/
+.worktrees/
+.claude/worktrees/
+
 # Lock files (auto-generated)
 package-lock.json
 
@@ -38,6 +43,7 @@ packages/docs-web/
 
 # Project documentation (don't auto-format)
 docs/
+AGENTS.md
 CLAUDE.md
 README.md
 CHANGELOG.md

@@ -85,7 +85,7 @@ nodes:
 
   # 8. depends_on + $nodeId.output substitution
   - id: downstream
-    bash: "echo 'downstream got: $prompt-node.output'"
+    bash: "echo downstream got: $prompt-node.output"
     depends_on: [prompt-node]
 
   # 9. when: conditional (JSON dot-access on bash JSON output)

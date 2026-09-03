@@ -49,8 +49,10 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
     conversationId: null as string | null,
     conversationPlatformId: null as string | null,
     workerPlatformId: null as string | null,
+    outcome: null,
     workingPath: null,
     userMessage: '',
+    activeNodes: [] as string[],
     finishedAt: null as string | null,
   };
   return [
@@ -61,6 +63,7 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
       origin: 'cli',
       status: 'running',
       startedAt: iso(4 * 60 + 12),
+      activeNodes: ['plan/draft'],
       currentNode: 'plan/draft',
       lastTool: 'read_file',
     },
@@ -71,6 +74,7 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
       origin: 'web',
       status: 'running',
       startedAt: iso(9 * 60 + 38),
+      activeNodes: ['implement/loop'],
       currentNode: 'implement/loop',
       lastTool: 'edit_file',
     },
@@ -88,6 +92,8 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
         message:
           'Answer the foundation questions above. Your answers will guide the research phase.',
         completionSignaled: false,
+        decisions: [{ id: 'approve' }, { id: 'reject' }],
+        decisionsAuthored: false,
       },
     },
     {
@@ -96,6 +102,7 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
       workflow: 'review',
       origin: 'slack',
       status: 'paused',
+      outcome: 'succeeded',
       startedAt: iso(4 * 60 + 2),
       currentNode: 'review/approve',
       lastTool: null,
@@ -103,6 +110,8 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
         nodeId: 'review/approve',
         message: 'Approve changes before opening PR?',
         completionSignaled: false,
+        decisions: [{ id: 'approve' }, { id: 'reject' }],
+        decisionsAuthored: false,
       },
     },
     {
@@ -122,6 +131,7 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
       workflow: 'assist',
       origin: 'telegram',
       status: 'completed',
+      outcome: 'failed',
       startedAt: iso(8 * 60 + 14),
       finishedAt: iso(0),
       currentNode: null,

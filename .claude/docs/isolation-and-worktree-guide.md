@@ -193,7 +193,7 @@ Same worktree always gets the same port (deterministic hash).
 
 For each active environment:
 1. Filesystem gone → `removeEnvironment()`
-2. Branch merged into main → remove (if no uncommitted changes, no other conversations reference it)
+2. Branch merged into main → remove (if no uncommitted changes, no workflow run can still claim it)
 3. Stale (14+ days, non-Telegram) → remove (same checks)
 
 After environment cleanup: `sessionDb.deleteOldSessions(30)` (session retention).
@@ -204,7 +204,7 @@ After environment cleanup: `sessionDb.deleteOldSessions(30)` (session retention)
 
 When at worktree limit: only removes **merged branches** (not stale ones). For each environment:
 - Check `isBranchMerged(repoPath, branchName, mainBranch)`
-- Skip if uncommitted changes or conversations reference it
+- Skip if uncommitted changes, or a workflow run can still claim it (running, pending, paused, or failed-but-resumable)
 - Remove with `deleteRemoteBranch: true`
 
 If merged cleanup frees space → proceed with creation. If not → block with formatted limit message showing breakdown of merged/stale/active counts.

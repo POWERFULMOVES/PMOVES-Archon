@@ -1,4 +1,70 @@
+import { describe, expect, test } from 'bun:test';
 import { ConversationLockManager } from './conversation-lock';
+
+/**
+ * Nothing in this file sleeps. `acquireLock` resolves with the acquisition
+ * status, not with handler completion, so the handlers report their own starts
+ * into a log and the test decides when each one finishes. Waiting is always
+ * "drain microtasks until the manager reached this state", and ordering is
+ * asserted against the log rather than assumed from a wall-clock margin.
+ */
+
+interface GatedHandler {
+  /** Lets the handler finish. */
+  release: () => void;
+  handler: () => Promise<void>;
+}
+
+/**
+ * A handler the test drives explicitly: it appends its label to `log` when it
+ * starts and stays in flight until released. `fail` makes it reject on release,
+ * which exercises the manager's error path without a timing assumption.
+ */
+function gate(log: string[], label: string, { fail = false } = {}): GatedHandler {
+  let release!: () => void;
+  const released = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  return {
+    release,
+    handler: async () => {
+      log.push(label);
+      await released;
+      if (fail) throw new Error(`handler ${label} failed`);
+    },
+  };
+}
+
+/**
+ * The manager releases a lock and hands off to the next queued message entirely
+ * on the microtask queue, so draining microtasks converges without touching the
+ * clock. The bound turns a broken handoff into an immediate failure rather than
+ * a hang.
+ */
+async function drainUntil(predicate: () => boolean, expectation: string): Promise<void> {
+  for (let tick = 0; tick < 100; tick++) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`manager never reached expected state: ${expectation}`);
+}
+
+/**
+ * Waits for one more handler to start, whichever one the manager picked. The
+ * caller then asserts the log, so picking the wrong one fails on the ordering
+ * assertion instead of blocking on a handler that never runs.
+ */
+function drainUntilStarted(log: string[], count: number): Promise<void> {
+  return drainUntil(() => log.length >= count, `${count} handler(s) started, saw [${log}]`);
+}
+
+/** Waits for the manager to have no active conversations and nothing queued. */
+function drainUntilIdle(manager: ConversationLockManager): Promise<void> {
+  return drainUntil(() => {
+    const stats = manager.getStats();
+    return stats.active === 0 && stats.queuedTotal === 0;
+  }, 'idle (no active conversations, empty queues)');
+}
 
 describe('ConversationLockManager', () => {
   test('initializes with correct maxConcurrent', () => {
@@ -23,183 +89,166 @@ describe('ConversationLockManager', () => {
 
   test('processes handler immediately when under capacity', async () => {
     const manager = new ConversationLockManager(10);
-    let executed = false;
+    const log: string[] = [];
+    const only = gate(log, 'only');
 
-    await manager.acquireLock('test-1', async () => {
-      executed = true;
-    });
+    const result = await manager.acquireLock('test-1', only.handler);
+    await drainUntilStarted(log, 1);
 
-    // Small delay to allow async completion
-    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(result.status).toBe('started');
+    expect(log).toEqual(['only']);
+    expect(manager.getStats().active).toBe(1);
 
-    expect(executed).toBe(true);
-    expect(manager.getStats().active).toBe(0); // Should be completed
+    only.release();
+    await drainUntilIdle(manager);
   });
 
   test('queues message when same conversation already active', async () => {
     const manager = new ConversationLockManager(10);
-    const executionOrder: number[] = [];
+    const log: string[] = [];
+    const first = gate(log, 'first');
+    const second = gate(log, 'second');
 
-    // Start first message (will block for 50ms)
-    manager.acquireLock('same-conv', async () => {
-      executionOrder.push(1);
-      await new Promise(resolve => setTimeout(resolve, 50));
-    });
+    await manager.acquireLock('same-conv', first.handler);
+    await drainUntilStarted(log, 1);
 
-    // Small delay to ensure first handler is started
-    await new Promise(resolve => setTimeout(resolve, 10));
+    const queued = await manager.acquireLock('same-conv', second.handler);
+    expect(queued.status).toBe('queued-conversation');
 
-    // Start second message (should queue)
-    manager.acquireLock('same-conv', async () => {
-      executionOrder.push(2);
-    });
-
-    // Check stats immediately
     const stats = manager.getStats();
     expect(stats.active).toBe(1);
     expect(stats.queuedTotal).toBe(1);
     expect(stats.queuedByConversation).toEqual([
       { conversationId: 'same-conv', queuedMessages: 1 },
     ]);
+    expect(log).toEqual(['first']);
 
-    // Wait for both to complete
-    await new Promise(resolve => setTimeout(resolve, 100));
+    first.release();
+    await drainUntilStarted(log, 2);
+    expect(log).toEqual(['first', 'second']);
 
-    expect(executionOrder).toEqual([1, 2]); // Should execute in order
-    expect(manager.getStats().active).toBe(0);
-    expect(manager.getStats().queuedTotal).toBe(0);
+    second.release();
+    await drainUntilIdle(manager);
   });
 
   test('queues message when at max capacity', async () => {
     const manager = new ConversationLockManager(2);
+    const log: string[] = [];
+    const one = gate(log, 'conv-1');
+    const two = gate(log, 'conv-2');
+    const three = gate(log, 'conv-3');
 
-    // Start 2 conversations (fills capacity)
-    manager.acquireLock('conv-1', async () => {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    });
-    manager.acquireLock('conv-2', async () => {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    });
+    await manager.acquireLock('conv-1', one.handler);
+    await manager.acquireLock('conv-2', two.handler);
+    await drainUntilStarted(log, 2);
 
-    // Small delay to ensure both started
-    await new Promise(resolve => setTimeout(resolve, 10));
+    // A third distinct conversation has nowhere to run until capacity frees up.
+    const queued = await manager.acquireLock('conv-3', three.handler);
+    expect(queued.status).toBe('queued-capacity');
+    expect(manager.getStats().active).toBe(2);
+    expect(manager.getStats().queuedTotal).toBe(1);
+    expect(log).toEqual(['conv-1', 'conv-2']);
 
-    // Try to start third (should queue)
-    manager.acquireLock('conv-3', async () => {
-      // This should execute eventually
-    });
+    // Finishing one occupant is what admits the queued conversation.
+    one.release();
+    await drainUntilStarted(log, 3);
+    expect(log).toEqual(['conv-1', 'conv-2', 'conv-3']);
 
-    const stats = manager.getStats();
-    expect(stats.active).toBe(2); // At capacity
-    expect(stats.queuedTotal).toBe(1); // One queued
-
-    // Wait for completion (need longer to process queued item)
-    await new Promise(resolve => setTimeout(resolve, 150));
-
-    expect(manager.getStats().active).toBe(0);
-    expect(manager.getStats().queuedTotal).toBe(0);
+    two.release();
+    three.release();
+    await drainUntilIdle(manager);
   });
 
   test('multiple conversations process concurrently', async () => {
     const manager = new ConversationLockManager(10);
-    const startTimes: Record<string, number> = {};
+    const log: string[] = [];
+    const conversations = ['conv-1', 'conv-2', 'conv-3'].map(id => ({ id, gated: gate(log, id) }));
 
-    // Start 3 conversations simultaneously
-    const promises = [1, 2, 3].map(i =>
-      manager.acquireLock(`conv-${i}`, async () => {
-        startTimes[`conv-${i}`] = Date.now();
-        await new Promise(resolve => setTimeout(resolve, 30));
-      })
-    );
+    for (const { id, gated } of conversations) {
+      const result = await manager.acquireLock(id, gated.handler);
+      expect(result.status).toBe('started');
+    }
+    await drainUntilStarted(log, 3);
 
-    await Promise.all(promises);
+    // None has been released, so all three are genuinely in flight at once.
+    const stats = manager.getStats();
+    expect(stats.active).toBe(3);
+    expect(stats.queuedTotal).toBe(0);
+    expect(stats.activeConversationIds.sort()).toEqual(['conv-1', 'conv-2', 'conv-3']);
 
-    // Small delay to allow all to start
-    await new Promise(resolve => setTimeout(resolve, 20));
-
-    // All should have started around the same time (concurrent)
-    const times = Object.values(startTimes);
-    expect(times.length).toBe(3);
-    const maxDiff = Math.max(...times) - Math.min(...times);
-    expect(maxDiff).toBeLessThan(20); // Started within 20ms of each other
-
-    // Wait for completion
-    await new Promise(resolve => setTimeout(resolve, 100));
+    for (const { gated } of conversations) gated.release();
+    await drainUntilIdle(manager);
   });
 
   test('queued messages process in order after completion', async () => {
     const manager = new ConversationLockManager(10);
-    const executionOrder: number[] = [];
+    const log: string[] = [];
+    const first = gate(log, 'first');
+    const second = gate(log, 'second');
+    const third = gate(log, 'third');
 
-    // Start first message
-    manager.acquireLock('test-conv', async () => {
-      executionOrder.push(1);
-      await new Promise(resolve => setTimeout(resolve, 30));
-    });
+    await manager.acquireLock('test-conv', first.handler);
+    await drainUntilStarted(log, 1);
 
-    // Small delay
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await manager.acquireLock('test-conv', second.handler);
+    await manager.acquireLock('test-conv', third.handler);
+    expect(manager.getStats().queuedTotal).toBe(2);
+    expect(log).toEqual(['first']);
 
-    // Queue second and third messages
-    manager.acquireLock('test-conv', async () => {
-      executionOrder.push(2);
-      await new Promise(resolve => setTimeout(resolve, 10));
-    });
-    manager.acquireLock('test-conv', async () => {
-      executionOrder.push(3);
-    });
+    // Each release admits exactly the next message in arrival order.
+    first.release();
+    await drainUntilStarted(log, 2);
+    expect(log).toEqual(['first', 'second']);
 
-    // Wait for all to complete
-    await new Promise(resolve => setTimeout(resolve, 100));
+    second.release();
+    await drainUntilStarted(log, 3);
+    expect(log).toEqual(['first', 'second', 'third']);
 
-    expect(executionOrder).toEqual([1, 2, 3]); // FIFO order
+    third.release();
+    await drainUntilIdle(manager);
   });
 
   test('error in handler does not prevent queue processing', async () => {
     const manager = new ConversationLockManager(10);
-    const executionOrder: number[] = [];
+    const log: string[] = [];
+    const failing = gate(log, 'failing', { fail: true });
+    const next = gate(log, 'next');
 
-    // First message throws error
-    manager.acquireLock('test-conv', async () => {
-      executionOrder.push(1);
-      throw new Error('Test error');
-    });
+    await manager.acquireLock('test-conv', failing.handler);
+    await drainUntilStarted(log, 1);
 
-    // Small delay
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await manager.acquireLock('test-conv', next.handler);
+    expect(manager.getStats().queuedTotal).toBe(1);
 
-    // Second message should still execute
-    manager.acquireLock('test-conv', async () => {
-      executionOrder.push(2);
-    });
+    failing.release();
+    await drainUntilStarted(log, 2);
+    expect(log).toEqual(['failing', 'next']);
 
-    // Wait for completion
-    await new Promise(resolve => setTimeout(resolve, 50));
-
-    expect(executionOrder).toEqual([1, 2]); // Second still executes
-    expect(manager.getStats().active).toBe(0); // Cleaned up properly
+    next.release();
+    await drainUntilIdle(manager);
   });
 
-  test('stats show correct active conversation IDs', async () => {
+  test('stats stop reporting a conversation once it finishes', async () => {
     const manager = new ConversationLockManager(10);
+    const log: string[] = [];
+    const a = gate(log, 'conv-a');
+    const b = gate(log, 'conv-b');
 
-    // Start 2 conversations
-    manager.acquireLock('conv-a', async () => {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    });
-    manager.acquireLock('conv-b', async () => {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    });
+    await manager.acquireLock('conv-a', a.handler);
+    await manager.acquireLock('conv-b', b.handler);
+    await drainUntilStarted(log, 2);
 
-    // Small delay
-    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(manager.getStats().activeConversationIds.sort()).toEqual(['conv-a', 'conv-b']);
 
-    const stats = manager.getStats();
-    expect(stats.activeConversationIds).toContain('conv-a');
-    expect(stats.activeConversationIds).toContain('conv-b');
-    expect(stats.activeConversationIds.length).toBe(2);
+    a.release();
+    await drainUntil(
+      () => manager.getStats().active === 1,
+      'only conv-b active after conv-a finished'
+    );
+    expect(manager.getStats().activeConversationIds).toEqual(['conv-b']);
 
-    // Wait for completion
-    await new Promise(resolve => setTimeout(resolve, 100));
+    b.release();
+    await drainUntilIdle(manager);
+    expect(manager.getStats().activeConversationIds).toEqual([]);
   });
 });

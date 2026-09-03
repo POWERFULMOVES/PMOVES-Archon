@@ -1,4 +1,8 @@
 import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Options, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { createMockLogger } from '../test/mocks/logger';
 
 const mockLogger = createMockLogger();
@@ -6,8 +10,11 @@ mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
 }));
 
-// Create mock query function
-const mockQuery = mock(async function* () {
+type MockQuery = (...args: Parameters<typeof sdkQuery>) => AsyncGenerator<unknown, void, unknown>;
+
+// Keep the SDK input signature while allowing tests to exercise malformed and
+// forward-compatible events at the provider's runtime validation boundary.
+const mockQuery = mock<MockQuery>(async function* (_params) {
   // Empty generator by default
 });
 
@@ -16,7 +23,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   query: mockQuery,
 }));
 
-import { ClaudeProvider, shouldPassNoEnvFile } from './provider';
+import { ClaudeProvider, classifySubprocessError, shouldPassNoEnvFile } from './provider';
 import * as claudeModule from './provider';
 import * as binaryResolver from './binary-resolver';
 
@@ -120,6 +127,7 @@ describe('ClaudeProvider', () => {
       const caps = client.getCapabilities();
       expect(caps).toMatchObject({
         sessionResume: true,
+        sessionFork: true,
         mcp: true,
         hooks: true,
         skills: true,
@@ -129,7 +137,6 @@ describe('ClaudeProvider', () => {
         envInjection: true,
         costControl: true,
         effortControl: true,
-        thinkingControl: true,
         fallbackModel: true,
         sandbox: true,
         settingSources: true,
@@ -202,6 +209,12 @@ describe('ClaudeProvider', () => {
         yield {
           type: 'result',
           session_id: 'session-123-abc',
+          usage: {
+            input_tokens: 20,
+            output_tokens: 5,
+            cache_read_input_tokens: 70,
+            cache_creation_input_tokens: 10,
+          },
         };
       });
 
@@ -211,7 +224,11 @@ describe('ClaudeProvider', () => {
       }
 
       expect(chunks).toHaveLength(1);
-      expect(chunks[0]).toEqual({ type: 'result', sessionId: 'session-123-abc' });
+      expect(chunks[0]).toEqual({
+        type: 'result',
+        sessionId: 'session-123-abc',
+        tokens: { input: 100, output: 5, cacheRead: 70, cacheWrite: 10 },
+      });
     });
 
     test('yields result with structuredOutput when SDK result has structured_output', async () => {
@@ -563,7 +580,7 @@ describe('ClaudeProvider', () => {
       });
     });
 
-    test('drops housekeeping task_started when SDK sets skip_transcript', async () => {
+    test('hides a skip_transcript task lifecycle while preserving its idle heartbeat', async () => {
       mockQuery.mockImplementation(async function* () {
         yield {
           type: 'system',
@@ -572,6 +589,19 @@ describe('ClaudeProvider', () => {
           description: 'Ambient task',
           skip_transcript: true,
         };
+        yield {
+          type: 'system',
+          subtype: 'task_progress',
+          task_id: 't-housekeeping',
+          description: 'Ambient task is still running',
+        };
+        yield {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 't-housekeeping',
+          status: 'completed',
+          summary: 'Ambient task finished',
+        };
       });
 
       const chunks = [];
@@ -579,7 +609,39 @@ describe('ClaudeProvider', () => {
         chunks.push(chunk);
       }
 
-      expect(chunks).toHaveLength(0);
+      expect(chunks).toEqual([{ type: 'system', content: '' }]);
+    });
+
+    test('hides an ambient task lifecycle while preserving its idle heartbeat', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't-ambient',
+          description: 'Live update watcher',
+          ambient: true,
+        };
+        yield {
+          type: 'system',
+          subtype: 'task_progress',
+          task_id: 't-ambient',
+          description: 'Watching for updates',
+        };
+        yield {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 't-ambient',
+          status: 'completed',
+          summary: 'Watcher stopped',
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([{ type: 'system', content: '' }]);
     });
 
     test('yields task_progress with summary + usage + lastToolName', async () => {
@@ -660,6 +722,46 @@ describe('ClaudeProvider', () => {
       expect(chunks[0]).toMatchObject({ type: 'task_notification', status: 'failed' });
     });
 
+    test('drops housekeeping task_notification when SDK sets ambient', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 't-ambient',
+          status: 'completed',
+          summary: 'Watcher stopped',
+          ambient: true,
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toHaveLength(0);
+    });
+
+    test('drops housekeeping task_notification when SDK sets skip_transcript', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 't-housekeeping',
+          status: 'completed',
+          summary: 'Housekeeping task finished',
+          skip_transcript: true,
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toHaveLength(0);
+    });
+
     // --- #2083 — background-task liveness (SDK 0.3.209 background_tasks_changed) ---
 
     test('yields background_tasks chunk from SDK background_tasks_changed', async () => {
@@ -703,6 +805,53 @@ describe('ClaudeProvider', () => {
       // An empty set means "all background work drained" — it must be forwarded,
       // not dropped, or the executor's wait gate would never release.
       expect(chunks).toEqual([{ type: 'background_tasks', tasks: [] }]);
+    });
+
+    test('filters ambient entries from background task replacement sets', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'background_tasks_changed',
+          tasks: [
+            {
+              task_id: 't-user',
+              task_type: 'local_agent',
+              description: 'Research problem',
+            },
+            {
+              task_id: 't-ambient',
+              task_type: 'live_update_watcher',
+              description: 'Watch for updates',
+              ambient: true,
+            },
+          ],
+        };
+        yield {
+          type: 'system',
+          subtype: 'background_tasks_changed',
+          tasks: [
+            {
+              task_id: 't-ambient',
+              task_type: 'live_update_watcher',
+              description: 'Watch for updates',
+              ambient: true,
+            },
+          ],
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        {
+          type: 'background_tasks',
+          tasks: [{ taskId: 't-user', taskType: 'local_agent', description: 'Research problem' }],
+        },
+        { type: 'background_tasks', tasks: [] },
+      ]);
     });
 
     test('keeps forwarding chunks that arrive AFTER the result (background-task wait window)', async () => {
@@ -906,6 +1055,143 @@ describe('ClaudeProvider', () => {
       // Phase 4 opt-in is for workflow nodes only. Direct chat keeps the
       // SDK default (false) so the chat surface is unchanged.
       expect(callArgs.options).not.toHaveProperty('agentProgressSummaries');
+    });
+
+    // --- Issue #2324 — tool-scoped hook frames must reach the audit stream -----
+
+    test('opts the SDK into lifecycle hook events for every surface (#2324)', async () => {
+      mockQuery.mockImplementation(async function* () {
+        // Empty
+      });
+
+      for await (const _ of client.sendQuery('test', '/workspace')) {
+        // consume
+      }
+
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      // The SDK defaults `includeHookEvents` to false, which suppresses
+      // `hook_started` / `hook_response` for every hook type except
+      // SessionStart and Setup. Without an explicit opt-in, a node-level
+      // `PreToolUse` hook that denies Bash never reaches the workflow
+      // `hook_activity` stream.
+      expect(callArgs.options).toMatchObject({ includeHookEvents: true });
+    });
+
+    test('forwards a denied PreToolUse hook through the chunk pipeline (#2324)', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'hook_started',
+          hook_id: 'h-1',
+          hook_name: 'Bash',
+          hook_event: 'PreToolUse',
+        };
+        yield {
+          type: 'system',
+          subtype: 'hook_response',
+          hook_id: 'h-1',
+          hook_name: 'Bash',
+          hook_event: 'PreToolUse',
+          outcome: 'error',
+          exit_code: 2,
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        {
+          type: 'hook_started',
+          hookId: 'h-1',
+          hookName: 'Bash',
+          hookEvent: 'PreToolUse',
+        },
+        {
+          type: 'hook_response',
+          hookId: 'h-1',
+          hookName: 'Bash',
+          hookEvent: 'PreToolUse',
+          outcome: 'error',
+          exitCode: 2,
+        },
+      ]);
+    });
+
+    test('forwards a PostToolUse hook lifecycle (#2324)', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'hook_started',
+          hook_id: 'h-2',
+          hook_name: 'Edit',
+          hook_event: 'PostToolUse',
+        };
+        yield {
+          type: 'system',
+          subtype: 'hook_response',
+          hook_id: 'h-2',
+          hook_name: 'Edit',
+          hook_event: 'PostToolUse',
+          outcome: 'success',
+          exit_code: 0,
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        {
+          type: 'hook_started',
+          hookId: 'h-2',
+          hookName: 'Edit',
+          hookEvent: 'PostToolUse',
+        },
+        {
+          type: 'hook_response',
+          hookId: 'h-2',
+          hookName: 'Edit',
+          hookEvent: 'PostToolUse',
+          outcome: 'success',
+          exitCode: 0,
+        },
+      ]);
+    });
+
+    test('drops hook_progress frames (only emitted for async hooks — none registered) (#2324)', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'system',
+          subtype: 'hook_progress',
+          hook_id: 'h-3',
+          hook_name: 'Bash',
+          hook_event: 'PreToolUse',
+          stdout: 'still running...',
+          stderr: '',
+          output: '',
+        };
+        yield {
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'Real response' }],
+          },
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      // The hook_progress frame is intentionally not surfaced: Archon
+      // registers only synchronous hooks, and the hooks guide documents
+      // the carve-out. Only the assistant message reaches the stream.
+      expect(chunks).toEqual([{ type: 'assistant', content: 'Real response' }]);
     });
 
     test('handles tool_use with empty input', async () => {
@@ -1146,6 +1432,52 @@ describe('ClaudeProvider', () => {
       expect(mockQuery).toHaveBeenCalledTimes(1);
     });
 
+    // The SDK reports a spawn failure caused by a MISSING WORKING DIRECTORY as a
+    // libc/architecture mismatch, because posix_spawn returns ENOENT against the
+    // executable's path and the SDK only checks that the executable exists.
+    test('reports a missing working directory instead of the SDK libc message', async () => {
+      const error = new Error(
+        'Claude Code native binary at /pkg/claude exists but failed to launch. ' +
+          "This usually means the binary does not match this system's libc."
+      );
+      mockQuery.mockImplementation(async function* () {
+        throw error;
+      });
+
+      const consumeGenerator = async () => {
+        for await (const _ of client.sendQuery('test', '/worktrees/removed-by-cleanup')) {
+          // consume
+        }
+      };
+
+      await expect(consumeGenerator()).rejects.toThrow(
+        /working directory "\/worktrees\/removed-by-cleanup" does not exist/
+      );
+      // The message names libc only to tell the operator to disregard it.
+      await expect(consumeGenerator()).rejects.toThrow(/The binary is fine/);
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+    });
+
+    test('keeps the original launch error when the working directory exists', async () => {
+      const error = new Error(
+        'Claude Code native binary at /pkg/claude exists but failed to launch. ' +
+          "This usually means the binary does not match this system's libc."
+      );
+      mockQuery.mockImplementation(async function* () {
+        throw error;
+      });
+
+      const consumeGenerator = async () => {
+        // process.cwd() is a real directory, so the cwd explanation does not apply
+        // and a genuine libc mismatch must still surface as itself.
+        for await (const _ of client.sendQuery('test', process.cwd())) {
+          // consume
+        }
+      };
+
+      await expect(consumeGenerator()).rejects.toThrow(/failed to launch/);
+    });
+
     test('classifies "Operation aborted" errors as crash and retries', async () => {
       const error = new Error('Operation aborted');
       mockQuery.mockImplementation(async function* () {
@@ -1180,11 +1512,9 @@ describe('ClaudeProvider', () => {
     }, 5_000);
 
     test('captures all stderr output for diagnostics', async () => {
-      mockQuery.mockImplementation(async function* (args: {
-        options: { stderr?: (data: string) => void };
-      }) {
+      mockQuery.mockImplementation(async function* (args) {
         // Simulate non-error stderr output followed by crash
-        if (args.options.stderr) {
+        if (args.options?.stderr) {
           args.options.stderr('Spawning Claude Code process: node cli.js');
           args.options.stderr('AJV validation: schema loaded');
           args.options.stderr('startup diagnostic: ready');
@@ -1199,12 +1529,13 @@ describe('ClaudeProvider', () => {
       };
 
       // Use rejects so assertions always execute
-      const err = await consumeGenerator().catch((e: unknown) => e as Error);
-      expect(err).toBeInstanceOf(Error);
+      const thrown = await consumeGenerator().catch((error: unknown) => error);
+      expect(thrown).toBeInstanceOf(Error);
+      if (!(thrown instanceof Error)) throw new Error('Expected consumeGenerator to throw');
       // The error should contain stderr context from ALL captured lines
-      expect(err.message).toContain('stderr:');
-      expect(err.message).toContain('AJV validation');
-      expect(err.message).toContain('startup diagnostic');
+      expect(thrown.message).toContain('stderr:');
+      expect(thrown.message).toContain('AJV validation');
+      expect(thrown.message).toContain('startup diagnostic');
     }, 5_000);
 
     test('passes settingSources from assistantConfig', async () => {
@@ -1255,6 +1586,22 @@ describe('ClaudeProvider', () => {
       expect(mockQuery).toHaveBeenCalledTimes(1);
       const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
       expect(callArgs.options.settingSources).toEqual(['project']);
+    });
+
+    test('honors assistant-level settingSources: [] without widening to defaults', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'test-session' };
+      });
+
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        assistantConfig: { settingSources: [] },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      expect(callArgs.options.settingSources).toEqual([]);
     });
 
     test('per-node settingSources override wins over the assistant default', async () => {
@@ -1530,20 +1877,31 @@ describe('ClaudeProvider', () => {
       expect(callArgs.options).not.toHaveProperty('effort');
     });
 
-    test('passes thinking object to SDK via nodeConfig', async () => {
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid' };
-      });
+    // #2556: Archon's ladder is the union of every provider's vocabulary, so a
+    // Claude node can ask for every shared rung; values outside the SDK's slice
+    // land on its nearest endpoint.
+    test('passes native rungs through and clamps the shared endpoints', async () => {
+      for (const [declared, applied] of [
+        ['xhigh', 'xhigh'],
+        ['minimal', 'low'],
+        ['max', 'max'],
+        ['ultra', 'max'],
+        ['persistent', 'max'],
+      ] as const) {
+        mockQuery.mockClear();
+        mockQuery.mockImplementation(async function* () {
+          yield { type: 'result', session_id: 'sid' };
+        });
 
-      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        nodeConfig: { thinking: { type: 'enabled', budgetTokens: 8000 } },
-      })) {
-        // consume
+        for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+          nodeConfig: { effort: declared },
+        })) {
+          // consume
+        }
+
+        const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+        expect(callArgs.options.effort).toBe(applied);
       }
-
-      expect(mockQuery).toHaveBeenCalledTimes(1);
-      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      expect(callArgs.options.thinking).toEqual({ type: 'enabled', budgetTokens: 8000 });
     });
 
     test('passes maxBudgetUsd to SDK', async () => {
@@ -1855,10 +2213,8 @@ describe('sendQuery decomposition behaviors', () => {
   }, 5_000);
 
   test('enriched error (with stderr) is thrown at retry exhaustion, not raw error', async () => {
-    mockQuery.mockImplementation(async function* (args: {
-      options: { stderr?: (data: string) => void };
-    }) {
-      if (args.options.stderr) {
+    mockQuery.mockImplementation(async function* (args) {
+      if (args.options?.stderr) {
         args.options.stderr('diagnostic: something broke');
       }
       throw new Error('process exited with code 1');
@@ -1870,34 +2226,44 @@ describe('sendQuery decomposition behaviors', () => {
       }
     };
 
-    const err = await consumeGenerator().catch((e: unknown) => e as Error);
-    expect(err).toBeInstanceOf(Error);
+    const thrown = await consumeGenerator().catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(Error);
+    if (!(thrown instanceof Error)) throw new Error('Expected consumeGenerator to throw');
     // Must contain stderr context, not just the raw error
-    expect(err.message).toContain('stderr:');
-    expect(err.message).toContain('diagnostic: something broke');
+    expect(thrown.message).toContain('stderr:');
+    expect(thrown.message).toContain('diagnostic: something broke');
   }, 5_000);
 
   test('PostToolUse hooks preserve success, failure, and interruption outcomes', async () => {
-    mockQuery.mockImplementation(async function* (args: {
-      options: {
-        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
-      };
-    }) {
-      const successHook = args.options.hooks?.PostToolUse?.[0]?.hooks?.[0];
-      const failureHook = args.options.hooks?.PostToolUseFailure?.[0]?.hooks?.[0];
-      await successHook?.({ tool_name: 'Read', tool_use_id: 'success-id', tool_response: 'ok' });
-      await failureHook?.({
-        tool_name: 'Bash',
-        tool_use_id: 'error-id',
-        error: 'exit 1',
-        is_interrupt: false,
-      });
-      await failureHook?.({
-        tool_name: 'Task',
-        tool_use_id: 'interrupt-id',
-        error: 'stopped',
-        is_interrupt: true,
-      });
+    mockQuery.mockImplementation(async function* (args) {
+      const successHook = args.options?.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      const failureHook = args.options?.hooks?.PostToolUseFailure?.[0]?.hooks?.[0];
+      const hookOptions = { signal: new AbortController().signal };
+      await successHook?.(
+        { tool_name: 'Read', tool_use_id: 'success-id', tool_response: 'ok' } as never,
+        'success-id',
+        hookOptions
+      );
+      await failureHook?.(
+        {
+          tool_name: 'Bash',
+          tool_use_id: 'error-id',
+          error: 'exit 1',
+          is_interrupt: false,
+        } as never,
+        'error-id',
+        hookOptions
+      );
+      await failureHook?.(
+        {
+          tool_name: 'Task',
+          tool_use_id: 'interrupt-id',
+          error: 'stopped',
+          is_interrupt: true,
+        } as never,
+        'interrupt-id',
+        hookOptions
+      );
       yield { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } };
     });
 
@@ -1930,14 +2296,14 @@ describe('sendQuery decomposition behaviors', () => {
   });
 
   test('terminal tool result queue drain preserves hook outcome', async () => {
-    mockQuery.mockImplementation(async function* (args: {
-      options: {
-        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
-      };
-    }) {
+    mockQuery.mockImplementation(async function* (args) {
       yield { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } };
-      const successHook = args.options.hooks?.PostToolUse?.[0]?.hooks?.[0];
-      await successHook?.({ tool_name: 'Read', tool_use_id: 'late-id', tool_response: 'ok' });
+      const successHook = args.options?.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      await successHook?.(
+        { tool_name: 'Read', tool_use_id: 'late-id', tool_response: 'ok' } as never,
+        'late-id',
+        { signal: new AbortController().signal }
+      );
     });
 
     const chunks = [];
@@ -1953,21 +2319,21 @@ describe('sendQuery decomposition behaviors', () => {
   });
 
   test('PostToolUse hook handles circular reference without crashing', async () => {
-    mockQuery.mockImplementation(async function* (args: {
-      options: {
-        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
-      };
-    }) {
+    mockQuery.mockImplementation(async function* (args) {
       // Simulate a tool use that triggers the PostToolUse hook with circular data
-      const hooks = args.options.hooks?.PostToolUse;
+      const hooks = args.options?.hooks?.PostToolUse;
       if (hooks?.[0]?.hooks?.[0]) {
         const circular: Record<string, unknown> = { key: 'val' };
         circular.self = circular; // circular reference
-        await hooks[0].hooks[0]({
-          tool_name: 'TestTool',
-          tool_use_id: 'tc-circ',
-          tool_response: circular,
-        });
+        await hooks[0].hooks[0](
+          {
+            tool_name: 'TestTool',
+            tool_use_id: 'tc-circ',
+            tool_response: circular,
+          } as never,
+          'tc-circ',
+          { signal: new AbortController().signal }
+        );
       }
       yield {
         type: 'assistant',
@@ -2055,6 +2421,22 @@ describe('sendQuery decomposition behaviors', () => {
   });
 
   describe('inline agents (nodeConfig.agents)', () => {
+    let workflowCwd: string;
+
+    beforeEach(() => {
+      workflowCwd = mkdtempSync(join(tmpdir(), 'archon-claude-workflow-'));
+    });
+
+    afterEach(() => {
+      rmSync(workflowCwd, { recursive: true, force: true });
+    });
+
+    const stageClaudeSkill = (name: string): void => {
+      const dir = join(workflowCwd, '.claude', 'skills', name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: test\n---\n`);
+    };
+
     test('passes inline agents map through to SDK options.agents', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
@@ -2069,8 +2451,8 @@ describe('sendQuery decomposition behaviors', () => {
         },
       };
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
-        nodeConfig: { agents },
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: { nodeId: 'agent-node', agents },
       })) {
         // consume
       }
@@ -2085,8 +2467,9 @@ describe('sendQuery decomposition behaviors', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
         nodeConfig: {
+          nodeId: 'agent-node',
           agents: {
             'sub-a': { description: 'd', prompt: 'p' },
           },
@@ -2096,24 +2479,43 @@ describe('sendQuery decomposition behaviors', () => {
       }
 
       const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      // agent (singular) is set by skills wrapper; inline-only must leave it unset
       expect(callArgs.options.agent).toBeUndefined();
+      expect(callArgs.options.agents).toMatchObject({
+        'sub-a': { description: 'd', prompt: 'p' },
+      });
     });
 
-    test('merges inline agents with skills wrapper; user wins on ID collision', async () => {
+    test('workflow omission selects no skills and enables strict MCP', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: { nodeId: 'closed-node' },
+      })) {
+        // consume
+      }
+
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      expect(callArgs.options.agent).toBeUndefined();
+      expect(callArgs.options.agents).toBeUndefined();
+      expect(callArgs.options.allowedTools).toBeUndefined();
+      expect(callArgs.options.skills).toEqual([]);
+      expect(callArgs.options.strictMcpConfig).toBe(true);
+      expect(callArgs.options.mcpServers).toBeUndefined();
+    });
+
+    test('passes exact native skill selection while preserving inline agents', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      stageClaudeSkill('my-skill');
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
         nodeConfig: {
+          nodeId: 'skilled-node',
           skills: ['my-skill'],
           agents: {
-            // Intentionally collides with the internal 'dag-node-skills' wrapper ID
-            'dag-node-skills': {
-              description: 'user override',
-              prompt: 'user-defined prompt',
-            },
             'extra-sub': { description: 'd', prompt: 'p' },
           },
         },
@@ -2122,46 +2524,22 @@ describe('sendQuery decomposition behaviors', () => {
       }
 
       const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      const outAgents = callArgs.options.agents as Record<
-        string,
-        { description: string; prompt: string }
-      >;
-      // Both entries present
-      expect(Object.keys(outAgents).sort()).toEqual(['dag-node-skills', 'extra-sub']);
-      // User's definition wins the collision
-      expect(outAgents['dag-node-skills'].description).toBe('user override');
-      expect(outAgents['dag-node-skills'].prompt).toBe('user-defined prompt');
+      expect(callArgs.options.skills).toEqual(['my-skill']);
+      expect(callArgs.options.agent).toBeUndefined();
+      expect(callArgs.options.agents).toEqual({
+        'extra-sub': { description: 'd', prompt: 'p' },
+      });
     });
 
-    test('logs a warning when user-defined dag-node-skills overrides the skills wrapper', async () => {
+    test('native skills without allowed_tools leave the SDK tool set unrestricted', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
+      stageClaudeSkill('agent-browser');
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
         nodeConfig: {
-          skills: ['my-skill'],
-          agents: {
-            'dag-node-skills': { description: 'user override', prompt: 'p' },
-          },
-        },
-      })) {
-        // consume
-      }
-
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ nodeSkills: ['my-skill'] }),
-        'claude.inline_agents_override_skills_wrapper'
-      );
-    });
-
-    test('skills without allowed_tools omits tools field so SDK defaults apply', async () => {
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid' };
-      });
-
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
-        nodeConfig: {
+          nodeId: 'skilled-node',
           skills: ['agent-browser'],
           // no allowed_tools → options.tools is undefined
         },
@@ -2170,12 +2548,8 @@ describe('sendQuery decomposition behaviors', () => {
       }
 
       const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      const outAgents = callArgs.options.agents as Record<
-        string,
-        { description: string; tools?: string[] }
-      >;
-      // tools should NOT be set — lets SDK provide all default native tools
-      expect(outAgents['dag-node-skills'].tools).toBeUndefined();
+      expect(callArgs.options.skills).toEqual(['agent-browser']);
+      expect(callArgs.options.tools).toBeUndefined();
     });
 
     test('skills with allowed_tools includes Skill in the tools list', async () => {
@@ -2183,8 +2557,10 @@ describe('sendQuery decomposition behaviors', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
+      stageClaudeSkill('agent-browser');
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
         nodeConfig: {
+          nodeId: 'skilled-node',
           skills: ['agent-browser'],
           allowed_tools: ['Bash', 'Read'],
         },
@@ -2193,34 +2569,338 @@ describe('sendQuery decomposition behaviors', () => {
       }
 
       const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      const outAgents = callArgs.options.agents as Record<
-        string,
-        { description: string; tools?: string[] }
-      >;
-      // tools should include the explicit list plus Skill
-      expect(outAgents['dag-node-skills'].tools).toEqual(['Bash', 'Read', 'Skill']);
+      expect(callArgs.options.tools).toEqual(['Bash', 'Read', 'Skill']);
+      expect(callArgs.options.allowedTools).toContain('Skill');
     });
 
-    test('does NOT warn when inline agents do not collide with the skills wrapper', async () => {
+    test('fails before querying when a declared skill is unavailable to Claude', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      const agentsOnly = join(workflowCwd, '.agents', 'skills', 'my-skill');
+      mkdirSync(agentsOnly, { recursive: true });
+      writeFileSync(join(agentsOnly, 'SKILL.md'), '# agents only\n');
+
+      let error: unknown;
+      try {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          nodeConfig: { nodeId: 'missing-skill', skills: ['my-skill'] },
+        })) {
+          // consume
+        }
+      } catch (caught) {
+        error = caught;
+      }
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('.claude/skills/');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('warns but still runs when a declared skill is on no root at all', async () => {
+      // Claude's built-in skills and `plugin:skill` names resolve inside the SDK
+      // and exist under no skills directory. Throwing on "absent from disk" made
+      // every one of them undeclarable (PR #2535 review), so an unresolved name
+      // warns and lets the SDK decide.
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
-        nodeConfig: {
-          skills: ['my-skill'],
-          agents: {
-            'brief-gen': { description: 'd', prompt: 'p' },
+      const chunks: string[] = [];
+      for await (const chunk of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: { nodeId: 'builtin-skill', skills: ['dataviz'] },
+      })) {
+        if (chunk.type === 'system') chunks.push(chunk.content ?? '');
+      }
+
+      expect(mockQuery).toHaveBeenCalled();
+      const callArgs = mockQuery.mock.calls[0]![0] as { options: Options };
+      expect(callArgs.options.skills).toEqual(['dataviz']);
+      expect(chunks.join('\n')).toContain('built-in');
+    });
+
+    test('names only the unreachable skill when a built-in is declared alongside it', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      const agentsOnly = join(workflowCwd, '.agents', 'skills', 'stranded-skill');
+      mkdirSync(agentsOnly, { recursive: true });
+      writeFileSync(join(agentsOnly, 'SKILL.md'), '# agents only\n');
+
+      let error: unknown;
+      try {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          nodeConfig: { nodeId: 'mixed', skills: ['dataviz', 'stranded-skill'] },
+        })) {
+          // consume
+        }
+      } catch (caught) {
+        error = caught;
+      }
+
+      // 'dataviz' resolves nowhere on disk and may be a built-in, so it must not
+      // be blamed in an error about a misplaced install.
+      expect((error as Error).message).toContain('stranded-skill');
+      expect((error as Error).message).not.toContain('dataviz');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('resolves user skills from the effective CLAUDE_CONFIG_DIR on host', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      const configDir = join(workflowCwd, 'custom-claude-config');
+      const skillDir = join(configDir, 'skills', 'custom-skill');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), '# custom\n');
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        env: { CLAUDE_CONFIG_DIR: configDir },
+        nodeConfig: { nodeId: 'custom-config', skills: ['custom-skill'] },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.skills).toEqual(['custom-skill']);
+    });
+
+    test('rejects a user-only skill when effective settingSources is project-only', async () => {
+      const configDir = join(workflowCwd, 'project-only-config');
+      const skillDir = join(configDir, 'skills', 'user-only');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), '# user only\n');
+
+      const consume = async (): Promise<void> => {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          env: { CLAUDE_CONFIG_DIR: configDir },
+          assistantConfig: { settingSources: ['project'] },
+          nodeConfig: { nodeId: 'project-only', skills: ['user-only'] },
+        })) {
+          // consume
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(/enabled Claude-native skill directory/);
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('rejects a project-only skill when per-node settingSources is user-only', async () => {
+      stageClaudeSkill('project-only');
+
+      const consume = async (): Promise<void> => {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          nodeConfig: {
+            nodeId: 'user-only',
+            skills: ['project-only'],
+            settingSources: ['user'],
           },
+        })) {
+          // consume
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(/enabled Claude-native skill directory/);
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('rejects every declared skill when effective settingSources is empty', async () => {
+      stageClaudeSkill('disabled');
+
+      const consume = async (): Promise<void> => {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          assistantConfig: { settingSources: ['project', 'user'] },
+          nodeConfig: { nodeId: 'no-sources', skills: ['disabled'], settingSources: [] },
+        })) {
+          // consume
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(/effective settingSources currently enables none/);
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('assistant-level empty settingSources rejects every declared workflow skill', async () => {
+      stageClaudeSkill('assistant-disabled');
+
+      const consume = async (): Promise<void> => {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          assistantConfig: { settingSources: [] },
+          nodeConfig: { nodeId: 'assistant-no-sources', skills: ['assistant-disabled'] },
+        })) {
+          // consume
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(/effective settingSources currently enables none/);
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('container workflows fail before spend for a host user-only skill', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      const configDir = join(workflowCwd, 'host-claude-config');
+      const skillDir = join(configDir, 'skills', 'user-only');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), '# user only\n');
+
+      let error: unknown;
+      try {
+        for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+          env: { CLAUDE_CONFIG_DIR: configDir },
+          execContext: { kind: 'container', containerId: 'c-1' },
+          nodeConfig: { nodeId: 'container-skill', skills: ['user-only'] },
+        })) {
+          // consume
+        }
+      } catch (caught) {
+        error = caught;
+      }
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('Container workflows');
+      expect((error as Error).message).toContain('project-local .claude/skills/');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    test('container workflows accept a declared project-local skill', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      stageClaudeSkill('container-project-skill');
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        execContext: { kind: 'container', containerId: 'c-1' },
+        nodeConfig: { nodeId: 'container-project', skills: ['container-project-skill'] },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.skills).toEqual(['container-project-skill']);
+      expect(options.strictMcpConfig).toBe(true);
+    });
+
+    test('retries preserve exact declared skill, MCP, and tool restrictions', async () => {
+      let attempt = 0;
+      mockQuery.mockImplementation(async function* () {
+        attempt++;
+        if (attempt === 1) throw new Error('process exited with code 1');
+        yield { type: 'result', session_id: 'sid' };
+      });
+      stageClaudeSkill('retry-skill');
+      const mcpPath = join(workflowCwd, 'retry-mcp.json');
+      writeFileSync(mcpPath, JSON.stringify({ exact: { command: 'node', args: ['server.js'] } }));
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: {
+          nodeId: 'retry-node',
+          skills: ['retry-skill'],
+          mcp: mcpPath,
+          allowed_tools: ['Read'],
         },
       })) {
         // consume
       }
 
-      const warnCalls = mockLogger.warn.mock.calls.filter(
-        (args: unknown[]) => args[1] === 'claude.inline_agents_override_skills_wrapper'
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      for (const call of mockQuery.mock.calls) {
+        const options = (call[0] as { options: Record<string, unknown> }).options;
+        expect(options.skills).toEqual(['retry-skill']);
+        expect(options.strictMcpConfig).toBe(true);
+        expect(options.mcpServers).toEqual({
+          exact: { command: 'node', args: ['server.js'] },
+        });
+        expect(options.tools).toEqual(['Read', 'Skill']);
+        expect(options.allowedTools).toHaveLength(2);
+        expect(options.allowedTools).toEqual(expect.arrayContaining(['Skill', 'mcp__exact__*']));
+      }
+    });
+
+    test('uses the same closed capability options when resuming', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+
+      for (const sessionId of [undefined, 'resume-me']) {
+        for await (const _ of client.sendQuery('test', workflowCwd, sessionId, {
+          nodeConfig: { nodeId: 'closed-node' },
+        })) {
+          // consume
+        }
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      for (const call of mockQuery.mock.calls) {
+        const options = (call[0] as { options: Record<string, unknown> }).options;
+        expect(options.skills).toEqual([]);
+        expect(options.strictMcpConfig).toBe(true);
+      }
+      const resumedOptions = (mockQuery.mock.calls[1][0] as { options: Record<string, unknown> })
+        .options;
+      expect(resumedOptions.resume).toBe('resume-me');
+    });
+
+    test('strict MCP passes exactly the workflow-declared server map', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+      const mcpPath = join(workflowCwd, 'mcp.json');
+      writeFileSync(
+        mcpPath,
+        JSON.stringify({ declared: { command: 'node', args: ['server.mjs'] } })
       );
-      expect(warnCalls).toHaveLength(0);
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: { nodeId: 'mcp-node', mcp: mcpPath },
+      })) {
+        // consume
+      }
+
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.strictMcpConfig).toBe(true);
+      expect(Object.keys(options.mcpServers as Record<string, unknown>)).toEqual(['declared']);
+      expect(options.allowedTools).toContain('mcp__declared__*');
+    });
+
+    test('keeps partial non-workflow nodeConfig on ambient defaults', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+
+      for await (const _ of client.sendQuery('title', workflowCwd, undefined, {
+        nodeConfig: { allowed_tools: [] },
+      })) {
+        // consume
+      }
+
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.skills).toBeUndefined();
+      expect(options.strictMcpConfig).toBeUndefined();
+      expect(options.tools).toEqual([]);
+    });
+
+    test('does not grant Skill to a non-workflow call that carries skills', async () => {
+      // The `options.skills` narrowing is gated on the workflow path. Granting
+      // the Skill tool outside that gate would expose the whole ambient catalog
+      // instead of a declared subset (PR #2535 review).
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+
+      for await (const _ of client.sendQuery('title', workflowCwd, undefined, {
+        nodeConfig: { allowed_tools: ['Read'], skills: ['my-skill'] },
+      })) {
+        // consume
+      }
+
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.skills).toBeUndefined();
+      expect(options.tools).toEqual(['Read']);
+      expect(options.allowedTools ?? []).not.toContain('Skill');
     });
   });
 });
@@ -2328,6 +3008,21 @@ describe('API error surfaced as text (#1797)', () => {
     expect(error?.message).toContain('Claude API error (authentication_failed)');
     expect(error?.message).toContain('Invalid API key');
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('account_on_hold throws as a non-retryable auth error', async () => {
+    mockQuery.mockImplementation(async function* () {
+      yield syntheticAssistantMessage('account_on_hold', 'This account is temporarily on hold');
+      yield apiErrorResult('This account is temporarily on hold');
+    });
+
+    const { error } = await collect(client.sendQuery('test', '/workspace'));
+    expect(error?.message).toContain('Claude API error (account_on_hold)');
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ errorClass: 'auth' }),
+      'query_error'
+    );
   });
 
   test('api_error result without a preceding synthetic message still throws (belt-and-suspenders)', async () => {
@@ -2525,5 +3220,52 @@ describe('API error surfaced as text (#1797)', () => {
     expect(chunks.filter(c => c.type === 'assistant')).toHaveLength(0);
     // billing_error classifies as auth → non-retryable
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('classifySubprocessError (#2715)', () => {
+  test('does not classify a bare "401"/"403" substring as auth', () => {
+    expect(classifySubprocessError('connect ECONNREFUSED 127.0.0.1:401', '')).not.toBe('auth');
+    expect(classifySubprocessError('timeout after 401ms', '')).not.toBe('auth');
+    expect(classifySubprocessError('proxy responded with 403', '')).not.toBe('auth');
+  });
+
+  test('still classifies genuine auth signals as auth', () => {
+    expect(classifySubprocessError('Unauthorized', '')).toBe('auth');
+    expect(classifySubprocessError('authentication failed', '')).toBe('auth');
+    expect(classifySubprocessError('invalid token provided', '')).toBe('auth');
+    expect(classifySubprocessError('Your credit balance is too low to access the API', '')).toBe(
+      'auth'
+    );
+    // Real-world provider shape: a 401 co-occurring with the word "Unauthorized" —
+    // the word carries the signal, not the digits.
+    expect(classifySubprocessError('exceeded retry limit, last status: 401 Unauthorized', '')).toBe(
+      'auth'
+    );
+  });
+
+  test('resolves a crash-pattern message carrying a stray digit to the retryable "crash" class, not silently to "unknown"', () => {
+    // Not classifying as 'auth' isn't sufficient on its own — shouldRetry =
+    // errorClass === 'rate_limit' || errorClass === 'crash', so a crash-shaped
+    // message must specifically land on 'crash' (retryable), not fall through
+    // to 'unknown' (also non-retryable), or a future reordering of
+    // SUBPROCESS_CRASH_PATTERNS/AUTH_PATTERNS could silently regress retry
+    // eligibility without any test catching it.
+    expect(classifySubprocessError('exited with code 401', '')).toBe('crash');
+  });
+
+  test('does not classify a bare "429" substring as rate_limit', () => {
+    expect(classifySubprocessError('connect ECONNREFUSED 127.0.0.1:4291', '')).not.toBe(
+      'rate_limit'
+    );
+    expect(
+      classifySubprocessError('operation timed out after 4293ms while establishing connection', '')
+    ).not.toBe('rate_limit');
+  });
+
+  test('still classifies genuine rate-limit signals as rate_limit', () => {
+    expect(classifySubprocessError('rate limit exceeded', '')).toBe('rate_limit');
+    expect(classifySubprocessError('too many requests, please slow down', '')).toBe('rate_limit');
+    expect(classifySubprocessError('server overloaded', '')).toBe('rate_limit');
   });
 });

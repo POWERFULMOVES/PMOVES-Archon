@@ -24,16 +24,15 @@ import type { ProviderCapabilities } from '../../types';
  */
 export const OPENCODE_CAPABILITIES: ProviderCapabilities = {
   sessionResume: true,
-  mcp: true,
+  mcp: false, // top-level nodeConfig.mcp has no OpenCode request translation yet
   hooks: false,
-  skills: true,
+  skills: false, // top-level nodeConfig.skills has no OpenCode request translation yet
   agents: true,
   toolRestrictions: true,
   structuredOutput: 'enforced', // sends format:{json_schema}; reads info.structured_output
   envInjection: true,
   costControl: false,
   effortControl: false,
-  thinkingControl: false, // OpenCode handles effort/thinking via opencode.json agent config, not prompt body
   fallbackModel: false,
   sandbox: false,
   settingSources: false, // Claude Agent SDK-only knob (which setting sources the agent loads)

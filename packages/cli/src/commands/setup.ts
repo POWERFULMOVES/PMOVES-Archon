@@ -44,6 +44,7 @@ import { randomBytes } from 'crypto';
 import { spawn, execSync, spawnSync, type ChildProcess } from 'child_process';
 import { execFileAsync } from '@archon/git';
 import { getRegisteredProviders } from '@archon/providers';
+import { TIER_NAMES, buildAiProfile } from '@archon/workflows/model-validation';
 import {
   getArchonEnvPath as pathsGetArchonEnvPath,
   getRepoArchonEnvPath as pathsGetRepoArchonEnvPath,
@@ -585,6 +586,82 @@ export function readInstallDefaultModel(
     // must not break setup; the prompt just won't show a current value.
     return undefined;
   }
+}
+
+const TIER_DOCS_URL =
+  'https://archon.diy/getting-started/ai-assistants/#per-user-credentials-and-ai-settings';
+
+/**
+ * Best-effort check for a non-empty `tiers:` block in ~/.archon/config.yaml,
+ * mirroring readInstallDefaultModel's read: a setup re-run on an install that
+ * already configured tiers must not warn that tiers are missing. Any
+ * read/parse failure reports "not configured" — the authoritative parse
+ * happens in @archon/core's config loader at runtime.
+ */
+export function readInstallTiersConfigured(
+  configPath: string = join(pathsGetArchonHome(), 'config.yaml')
+): boolean {
+  try {
+    if (!existsSync(configPath)) return false;
+    const parsed: unknown = Bun.YAML.parse(readFileSync(configPath, 'utf-8'));
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    const tiers = (parsed as Record<string, unknown>).tiers;
+    return typeof tiers === 'object' && tiers !== null && Object.keys(tiers).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Model-tier step for the chosen default assistant. Built-in tier defaults
+ * exist for claude and codex only, and accepting them intentionally writes
+ * NOTHING to config.yaml: the built-ins stay implicit so upstream default
+ * bumps reach this install on upgrade instead of freezing at setup time.
+ * Providers without built-ins get a pointer, not a wizard — `archon ai tier
+ * set` and the console AI Settings panel own tier editing.
+ */
+async function confirmModelTiers(provider: string): Promise<void> {
+  if (readInstallTiersConfigured()) {
+    log.info('Model tiers already configured — inspect them with `archon ai tier list`.');
+    return;
+  }
+
+  let aliases: ReturnType<typeof buildAiProfile>['aliases'] = {};
+  try {
+    aliases = buildAiProfile(provider).aliases;
+  } catch {
+    // buildAiProfile is throw-averse; an odd provider lands in the no-defaults branch.
+  }
+  const rows = TIER_NAMES.flatMap(tier => {
+    const preset = aliases[tier];
+    return preset ? [`${tier} -> ${preset.provider}/${preset.model}`] : [];
+  });
+
+  if (rows.length === TIER_NAMES.length) {
+    const useDefaults = await confirm({
+      message: `Use the built-in model tiers for ${provider}? (${rows.join(', ')})`,
+      initialValue: true,
+    });
+    if (isCancel(useDefaults)) {
+      cancel('Setup cancelled.');
+      process.exit(0);
+    }
+    if (!useDefaults) {
+      note(
+        'Set your own tiers with `archon ai tier set <tier> <provider> <model>`\n' +
+          `or in the console AI Settings -> Model Tiers panel.\nDocs: ${TIER_DOCS_URL}`,
+        'Model tiers'
+      );
+    }
+    return;
+  }
+
+  log.warning(
+    `No built-in model tiers exist for provider '${provider}'. Bundled workflows (and tier-addressed chat) ` +
+      'fail until small/medium/large are configured:\n' +
+      '  archon ai tier set <tier> <provider> <model>\n' +
+      `Docs: ${TIER_DOCS_URL}`
+  );
 }
 
 /**
@@ -2256,6 +2333,10 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
   // preserves whatever the Pi writer produced.
   await writeInstallDefaults(config.ai);
 
+  // Model tiers: confirm built-in defaults (claude/codex) or point providers
+  // without built-ins at the owning config surfaces before anything runs.
+  await confirmModelTiers(config.ai.defaultAssistant);
+
   // Tell the operator exactly what happened — especially that <repo>/.env was
   // NOT touched, because prior versions wrote there and this is the biggest
   // behavior change for returning users.
@@ -2305,7 +2386,7 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
     }
     s.stop('Archon skill installed');
     skillInstalledBase = skillTargetRaw;
-    skillInstalledPath = join(skillTargetRaw, '.claude', 'skills', 'archon');
+    skillInstalledPath = join(skillTargetRaw, '.claude', 'skills', 'archon-cli');
 
     const bootstrapResult = bootstrapProjectConfig(skillTargetRaw);
     if (bootstrapResult.state === 'created') {
@@ -2394,7 +2475,7 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
   }
 
   if (skillInstalledPath && skillInstalledBase) {
-    const codexInstalledPath = join(skillInstalledBase, '.agents', 'skills', 'archon');
+    const codexInstalledPath = join(skillInstalledBase, '.agents', 'skills', 'archon-cli');
     summaryLines.push('');
     summaryLines.push('Archon skill installed:');
     summaryLines.push(`  ${skillInstalledPath}  (Claude Code)`);

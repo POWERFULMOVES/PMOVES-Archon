@@ -1,6 +1,7 @@
 // Archon path resolution utilities
 export {
   expandTilde,
+  canonicalizeProjectPath,
   isDocker,
   isWSL,
   getWSLDistroName,
@@ -8,7 +9,9 @@ export {
   getArchonWorkspacesPath,
   ensureArchonWorkspacesPath,
   getArchonWorktreesPath,
+  getArchonTempPath,
   getArchonConfigPath,
+  getInstallManifestPath,
   getCredentialKeyPath,
   getArchonEnvPath,
   getRepoArchonEnvPath,
@@ -38,8 +41,11 @@ export {
   getProjectStoragePaths,
   getStoragePathsForRoot,
   isInsideArchonHome,
+  resolveRunStorageRoot,
   getRunArtifactsDirForKey,
   getRunArtifactsDirForRoot,
+  getRunLogPathForRoot,
+  getRunWorkflowSourceDirForRoot,
   slugifyFolderName,
   getFolderProjectRoot,
   getFolderProjectArtifactsPath,
@@ -53,6 +59,14 @@ export {
   getWebDistDir,
 } from './archon-paths';
 export type { ProjectStorageKey, ProjectStoragePaths } from './archon-paths';
+
+// Detached workflow install identity
+export {
+  DETACHED_INSTALL_CONTEXT_KEYS,
+  captureDetachedInstallContext,
+  restoreDetachedInstallContext,
+} from './detached-install-context';
+export type { DetachedInstallContext, DetachedInstallContextKey } from './detached-install-context';
 
 // Env loader
 export { loadArchonEnv, isVerboseBoot } from './env-loader';
@@ -68,6 +82,10 @@ export {
   BUNDLED_GIT_COMMIT,
   BUNDLED_WEB_DIST_SHA256,
 } from './bundled-build';
+
+// Compiled CLI discovery manifest
+export { refreshCompiledInstallManifest } from './install-manifest';
+export type { InstallManifest } from './install-manifest';
 
 // Update check
 export {

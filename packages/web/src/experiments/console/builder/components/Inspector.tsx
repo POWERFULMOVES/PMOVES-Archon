@@ -6,8 +6,8 @@
  * uncontrolled input so half-typed ids don't thrash the graph).
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
+import { NODE_ID_PATTERN } from '@/lib/node-ref';
 import { VARIANT_REGISTRY } from '../variants';
-import { NODE_ID_PATTERN } from '../editor/state';
 import type { BaseFields, BuilderNode } from '../types';
 import { CheckboxField, Field, SelectField, TextField } from './inspector/fields';
 import { PromptFields } from './inspector/PromptFields';
@@ -17,6 +17,7 @@ import { ScriptFields } from './inspector/ScriptFields';
 import { LoopFields } from './inspector/LoopFields';
 import { ApprovalFields } from './inspector/ApprovalFields';
 import { CancelFields } from './inspector/CancelFields';
+import { WaitFields } from './inspector/WaitFields';
 import { WhenBuilder } from './WhenBuilder';
 
 interface InspectorProps {
@@ -92,6 +93,15 @@ function VariantFields({
     case 'approval':
       return (
         <ApprovalFields
+          data={node.data}
+          onChange={(data): void => {
+            onPatch({ ...node, data });
+          }}
+        />
+      );
+    case 'wait':
+      return (
+        <WaitFields
           data={node.data}
           onChange={(data): void => {
             onPatch({ ...node, data });

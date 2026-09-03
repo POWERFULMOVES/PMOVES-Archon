@@ -9,6 +9,14 @@
  * - Utility functions
  */
 
+export {
+  EFFORT_LADDER,
+  clampEffort,
+  isEffortRung,
+  type AssertNever,
+  type EffortRung,
+} from './effort';
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -139,6 +147,12 @@ export {
 
 export { generateAndSetTitle } from './services/title-generator';
 
+export {
+  waitForRunAttention,
+  DEFAULT_ATTENTION_POLL_INTERVAL_MS,
+} from './services/run-attention-watch';
+export type { RunWaitResult, RunAttentionWaitOptions } from './services/run-attention-watch';
+
 // =============================================================================
 // State
 // =============================================================================
@@ -184,6 +198,7 @@ export {
   isPerUserGitHubEnabled,
   loadDeviceFlowConfig,
   assertEncryptionKeyAtBoot,
+  resolveGitHubTokenFromEnv,
   connectGithubForUser,
   persistGithubConnection,
   startDeviceFlow,
@@ -270,4 +285,4 @@ export { isPathWithinWorkspace, validateAndResolvePath } from './utils/path-vali
 export { getPort } from './utils/port-allocation';
 
 // Worktree sync
-export { syncArchonToWorktree } from './utils/worktree-sync';
+export { resolveWorkflowSourceRoot } from './utils/workflow-source-root';

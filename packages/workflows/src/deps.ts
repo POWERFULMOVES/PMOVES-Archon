@@ -19,6 +19,18 @@ import type {
   ProviderCapabilities,
 } from '@archon/providers/types';
 import type { RawAliasesConfig, RawTiersConfig } from './model-validation';
+import type {
+  WorkflowRunConfigLayer,
+  WorkflowRunConfigMetadata,
+  WorkflowRunConfigSource,
+} from './schemas/run-config';
+
+export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
+export const PI_AUTH_JSON_RELATIVE_PATH = 'pi-home/auth.json';
+export const MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS = [
+  CODEX_AUTH_JSON_RELATIVE_PATH,
+  PI_AUTH_JSON_RELATIVE_PATH,
+] as const;
 
 // Re-export provider types so existing workflow engine consumers don't break
 export type {
@@ -76,9 +88,19 @@ export interface WorkflowConfig {
   baseBranch?: string;
   docsPath?: string;
   envVars?: Record<string, string>;
+  /** Archon-injected credential entries within envVars. */
+  protectedEnvKeys?: readonly string[];
+  /** Exact injected credential values, including credentials delivered through files. */
+  protectedCredentialValues?: readonly string[];
   aliases?: RawAliasesConfig;
   tiers?: RawTiersConfig;
   commands: { folder?: string };
+  workflows?: {
+    autoResumeOnQuotaReset: boolean;
+    quotaFallbackDelayMs?: number;
+    quotaMaxAttempts: number;
+    quotaDeadlineMs: number;
+  };
   defaults?: {
     loadDefaultWorkflows?: boolean;
     loadDefaultCommands?: boolean;
@@ -115,6 +137,13 @@ export interface WorkflowDeps {
   store: IWorkflowStore;
   getAgentProvider: AgentProviderFactory;
   loadConfig: (cwd: string) => Promise<WorkflowConfig>;
+  /** Seal a run-owned config layer before it is persisted in public run metadata. */
+  sealRunConfig?: (
+    layer: WorkflowRunConfigLayer,
+    source: WorkflowRunConfigSource
+  ) => WorkflowRunConfigMetadata;
+  /** Restore a previously sealed run-owned config layer during continuation. */
+  unsealRunConfig?: (metadata: WorkflowRunConfigMetadata) => WorkflowRunConfigLayer;
   /**
    * Optional: resolve a fresh GitHub bot token for the given (owner, repo).
    * Used to inject GH_TOKEN/GITHUB_TOKEN into bash/script subprocess env so
@@ -154,12 +183,13 @@ export interface WorkflowDeps {
   isPerUserProviderKeysEnabled?: () => boolean;
   /**
    * Optional: resolve every connected provider credential for a user into a
-   * delivery bag (env vars + files to write under `artifactsDir`). Called
+   * delivery bag (env vars + files to write under `artifactsDir`) plus the
+   * decrypted values that must be scrubbed from subprocess failures. Called
    * once per run from `executeWorkflow`. Implementations own the delivery
    * map — the engine just merges `env` into `config.envVars` and writes the
    * `files` before any provider invocation.
    *
-   * Must never throw — return `{ env: {}, files: [] }` on any failure so the
+   * Must never throw — return empty bags on any failure so the
    * workflow continues with whatever env inheritance was already in place.
    */
   getUserProviderEnv?: (
@@ -168,6 +198,7 @@ export interface WorkflowDeps {
   ) => Promise<{
     env: Record<string, string>;
     files: { path: string; contents: string }[];
+    protectedValues: string[];
   }>;
   /**
    * Optional: resolve the originating user's personal AI preferences (model

@@ -1,6 +1,7 @@
 name: Test Suite
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, dev, PMOVES.AI-Edition-Hardened]
   pull_request:
@@ -11,12 +12,64 @@ on:
 permissions:
   contents: read
 
+env:
+  BUN_VERSION: '1.4.0'
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run-tests: ${{ steps.decision.outputs.run-tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Decide whether tests are needed
+        id: decision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.after || github.event.pull_request.head.sha }}
+        # Assign before echoing. A failing command substituted into another command's arguments
+        # does not trip `set -e`, so `echo "run-tests=$(...)"` would report success and write an
+        # empty decision that every downstream `== 'true'` gate reads as "skip".
+        run: |
+          run_tests=$(bun scripts/should-run-test-suite.ts "$EVENT_NAME" "$BASE_SHA" "$HEAD_SHA")
+          echo "run-tests=$run_tests" >> "$GITHUB_OUTPUT"
+
+  workflow-fixtures:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run workflow fixtures
+        run: bun run cli workflow test --json
+
   test:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     strategy:
       # Both legs must always report. With the default fail-fast, an ubuntu
       # failure cancels windows, so a windows-only break stays invisible until
@@ -32,7 +85,14 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.11
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache Bun dependencies
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -52,6 +112,9 @@ jobs:
       - name: Check provider capability matrix
         run: bun run check:capability-matrix
 
+      - name: Check generated API types
+        run: bun run check:api-types
+
       - name: Type check
         run: bun run type-check
 
@@ -69,10 +132,118 @@ jobs:
         if: runner.os != 'Windows'
         run: bun run test:install
 
+      # No Windows Defender exclusion step here on purpose. It was the named
+      # remaining suspect behind the downloadWebDist stalls (#2924), so one was
+      # added and run on windows-latest — and its own readback disproved the
+      # hypothesis: the runner image already excludes `C:\` and `D:\` at the
+      # drive root, recursively, so nothing under either was being scanned to
+      # begin with. `Add-MpPreference` also cost 5s per run to change nothing.
+      # Evidence: https://github.com/coleam00/Archon/pull/2943
       - name: Run tests
         run: bun run test
 
+  schema-upgrade:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
+    # Nothing else in CI applies migrations/000_combined.sql to a real database,
+    # and every test that touches a schema starts from an empty one. That blind
+    # spot is exactly how #2508 shipped green and then crash-looped every
+    # Postgres install created before it: `CREATE TABLE IF NOT EXISTS` is a no-op
+    # on an existing database, so a statement naming a column the additive block
+    # adds later works on a fresh install and aborts the whole single-transaction
+    # apply on an upgrade. This job applies the current schema on top of
+    # databases built by older RELEASES, which is the only place that shows up.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Baselines are release tags read with `git show <tag>:<path>`;
+          # the default shallow clone has neither the tags nor the history.
+          fetch-depth: 0
+          # The checker only reads local history — it never needs the token,
+          # so don't leave it in the worktree's git config.
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      # No `bun install`: the checker shells out to psql and uses only builtins.
+      - name: Ensure psql is available
+        run: psql --version || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - name: Upgrade from released schemas
+        run: bun run check:schema-upgrades
+
+      - name: Check SQLite vintage fixtures
+        # Regenerates packages/core/src/db/fixtures/sqlite-vintages/ in memory
+        # from release tags and fails on any drift, so new release tags carrying
+        # a new distinct SQLite schema land with their fixture.
+        run: bun run check:sqlite-vintages
+
+  postgres-parity:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
+    # The unit suite mocks the pg driver, so the Postgres dialect branch of
+    # getLiveRunOwningEnv (cleanup's lock query) only executes here, against a
+    # real server: an untyped parameter compared against text and UUID columns
+    # in one OR parses fine on SQLite and would reach every Postgres install.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The test creates and drops its own scratch database; the 'postgres'
+      # database named in the URL is only used to reach the server.
+      - name: Run Postgres parity test
+        env:
+          ARCHON_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: bun test packages/core/src/db/isolation-environments.live-run.postgres.integration.test.ts
+
   docker-build:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -117,3 +288,29 @@ jobs:
       - name: Cleanup smoke test container
         if: always()
         run: docker rm -f archon-smoke || true
+
+  test-suite:
+    name: Test Suite
+    needs: [changes, test, schema-upgrade, postgres-parity, docker-build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report test-suite outcome
+        env:
+          RUN_TESTS: ${{ needs.changes.outputs.run-tests }}
+          TEST: ${{ needs.test.result }}
+          SCHEMA_UPGRADE: ${{ needs.schema-upgrade.result }}
+          POSTGRES_PARITY: ${{ needs.postgres-parity.result }}
+          DOCKER_BUILD: ${{ needs.docker-build.result }}
+        run: |
+          if [ "$RUN_TESTS" = false ]; then
+            echo "Skipped tests for documentation-only changes."
+            exit 0
+          fi
+
+          for result in "$TEST" "$SCHEMA_UPGRADE" "$POSTGRES_PARITY" "$DOCKER_BUILD"; do
+            if [ "$result" != success ]; then
+              echo "A test-suite job finished with $result."
+              exit 1
+            fi
+          done

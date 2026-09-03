@@ -13,7 +13,7 @@ mock.module('@archon/core/db/workflow-events', () => ({
 
 import { DashboardEventPoller } from './dashboard-event-poller';
 import type { DashboardTransport } from './dashboard-event-poller';
-import { mapWorkflowEventRow } from './workflow-bridge';
+import { DASHBOARD_SOURCE_EVENT_TYPES, mapWorkflowEventRow } from './workflow-bridge';
 
 function row(over: Partial<WorkflowEventRow>): WorkflowEventRow {
   return {
@@ -84,11 +84,11 @@ describe('mapWorkflowEventRow', () => {
     expect(e).toMatchObject({ type: 'dag_node', status: 'failed', error: 'boom' });
   });
 
-  test('step_started → dag_node running (drives the dock current step)', () => {
-    const e = JSON.parse(
-      mapWorkflowEventRow(row({ event_type: 'step_started', step_name: 'plan' })) as string
-    );
-    expect(e).toMatchObject({ type: 'dag_node', status: 'running', nodeId: 'plan' });
+  test('obsolete step transitions are not interpreted or polled', () => {
+    for (const eventType of ['step_started', 'step_completed', 'step_failed']) {
+      expect(mapWorkflowEventRow(row({ event_type: eventType, step_name: 'plan' }))).toBeNull();
+      expect(DASHBOARD_SOURCE_EVENT_TYPES).not.toContain(eventType);
+    }
   });
 
   test('loop_iteration_started → dag_node running', () => {

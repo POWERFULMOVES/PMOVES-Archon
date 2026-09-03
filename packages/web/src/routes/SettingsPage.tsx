@@ -28,6 +28,7 @@ import type {
   ProviderDefaults,
   ProviderInfo,
 } from '@/lib/api';
+import { effortOptionsForAgent } from '@/experiments/console/lib/model-options';
 
 const selectClass =
   'h-9 rounded-md border border-border bg-surface-elevated text-text-primary px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring [&>option]:bg-surface-elevated [&>option]:text-text-primary';
@@ -551,11 +552,11 @@ function AssistantConfigSection({ config }: { config: SafeConfigResponse }): Rea
                       }}
                       className={selectClass}
                     >
-                      <option value="minimal">minimal</option>
-                      <option value="low">low</option>
-                      <option value="medium">medium</option>
-                      <option value="high">high</option>
-                      <option value="xhigh">xhigh</option>
+                      {effortOptionsForAgent('codex', providers ?? [])?.map(effort => (
+                        <option key={effort} value={effort}>
+                          {effort}
+                        </option>
+                      ))}
                     </select>
 
                     <label htmlFor="web-search">Web Search</label>

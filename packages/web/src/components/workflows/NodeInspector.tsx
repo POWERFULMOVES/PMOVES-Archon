@@ -6,6 +6,12 @@ import { cn } from '@/lib/utils';
 import type { DagNodeData } from './DagNodeComponent';
 import type { CommandEntry, DagNode } from '@/lib/api';
 import { useProviders } from '@/hooks/useProviders';
+import {
+  isNodeContextMode,
+  nodeContextForMode,
+  resolveNodeContextMode,
+  resumeSourceNodeId,
+} from './node-context';
 
 // Keep in sync with triggerRuleSchema.options in @archon/workflows/schemas/dag-node.ts
 // (api.generated.d.ts is type-only and cannot export runtime values)
@@ -217,6 +223,9 @@ function GeneralTab({
           onChange={(e): void => {
             const newType = e.target.value as DagNodeData['nodeType'];
             const updates: Partial<DagNodeData> = { nodeType: newType };
+            if (newType !== 'command' && newType !== 'prompt' && typeof node.context === 'object') {
+              updates.context = undefined;
+            }
             if (newType === 'command') {
               updates.promptText = undefined;
               updates.bashScript = undefined;
@@ -342,6 +351,10 @@ function ExecutionTab({
   onUpdate: (updates: Partial<DagNodeData>) => void;
 }): React.ReactElement {
   const isBash = node.nodeType === 'bash';
+  const canResume = node.nodeType === 'command' || node.nodeType === 'prompt';
+  const contextMode = resolveNodeContextMode(node.context);
+  const resumeSource = resumeSourceNodeId(node.context);
+  const resumeSourceMissing = canResume && contextMode === 'resume' && resumeSource.trim() === '';
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -363,16 +376,36 @@ function ExecutionTab({
 
           <Field label="Context">
             <select
-              value={node.context ?? ''}
+              value={contextMode}
               onChange={(e): void => {
-                onUpdate({ context: (e.target.value || undefined) as 'fresh' | undefined });
+                if (!isNodeContextMode(e.target.value)) return;
+                onUpdate({ context: nodeContextForMode(e.target.value, node.context) });
               }}
               className={selectClass}
             >
-              <option value="">Inherit</option>
+              <option value="inherit">Inherit</option>
               <option value="fresh">Fresh</option>
+              <option value="shared">Shared</option>
+              {canResume && <option value="resume">Resume</option>}
             </select>
           </Field>
+
+          {canResume && contextMode === 'resume' && (
+            <Field label="Resume Source Node">
+              <input
+                type="text"
+                value={resumeSource}
+                onChange={(e): void => {
+                  onUpdate({ context: { resume: e.target.value } });
+                }}
+                placeholder="upstream-node-id"
+                className={cn(inputClass, 'font-mono', resumeSourceMissing && 'border-error')}
+              />
+              {resumeSourceMissing && (
+                <p className="text-[10px] text-error">Resume source node is required.</p>
+              )}
+            </Field>
+          )}
         </>
       )}
 

@@ -21,6 +21,7 @@ export interface ResolvedSession {
  * Behavior:
  *  - No resumeSessionId → fresh `SessionManager.create(cwd)`.
  *  - resumeSessionId matches a session file for this cwd → `SessionManager.open(path)`.
+ *  - resumeSessionId matches and forkSession is true → `SessionManager.forkFrom(path, cwd)`.
  *  - resumeSessionId provided but not found → fresh session, `resumeFailed: true`.
  *
  * Pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/`
@@ -36,7 +37,8 @@ export interface ResolvedSession {
  */
 export async function resolvePiSession(
   cwd: string,
-  resumeSessionId: string | undefined
+  resumeSessionId: string | undefined,
+  forkSession = false
 ): Promise<ResolvedSession> {
   if (!resumeSessionId) {
     return { sessionManager: SessionManager.create(cwd), resumeFailed: false };
@@ -47,7 +49,9 @@ export async function resolvePiSession(
     const match = sessions.find(s => s.id === resumeSessionId);
     if (match) {
       return {
-        sessionManager: SessionManager.open(match.path),
+        sessionManager: forkSession
+          ? SessionManager.forkFrom(match.path, cwd)
+          : SessionManager.open(match.path),
         resumeFailed: false,
       };
     }

@@ -1,0 +1,171 @@
+name: archon-review
+description: |
+  Review a change through parallel specialist lenses and produce one evidence-based
+  verdict. On the first round, code, seams, simplify, and tests always run; errors are
+  selected for failure-path changes and docs only for shipped-doc changes. Reviews a PR when given one, otherwise the
+  working diff. Advisory and read-only: it judges, it never edits. Given the
+  previous round's report, one continuation reviewer verifies the prior findings,
+  reviews the correction delta, and follows their causal class without repeating
+  the full specialist fan-out.
+
+  When reviewing a PR, the final synthesized report is posted to it as one
+  canonical comment, edited in place on re-review.
+
+  Use when: changes need judging — "review this PR", "review my changes",
+  "is this ready to merge".
+  NOT for: fixing findings (implement), running the project's checks (validate),
+  or writing code.
+
+model: medium
+
+inputs:
+  scope:
+    default: ""
+    description: >-
+      What to review — a PR number/URL, a branch, or empty for the working diff
+      against the merge-base.
+  prior_report:
+    default: ""
+    description: >-
+      Path to the previous review round's report. When set, this round verifies
+      prior findings first and reviews only the delta since the report's recorded
+      head SHA.
+  work_order:
+    default: ""
+    description: >-
+      The accepted outcome and scope boundaries for this change. Delivery passes
+      the same work order implementation received. Standalone review may leave
+      this empty and use the PR's problem, outcome, and explicit scope instead.
+  errors:
+    default: false
+    description: Enable the silent-failure lens on a full review.
+  docs:
+    default: "auto"
+    description: >-
+      Docs-impact lens — auto selects shipped-documentation changes from the
+      reviewed diff; true or false overrides that selection.
+
+returns: synthesize
+outcome_field: ready
+
+nodes:
+  - id: mode
+    script: resolve-review-mode
+    runtime: uv
+    with:
+      prior_report: "$INPUTS.prior_report"
+
+  - id: scope
+    command: review-scope
+    context: fresh
+    depends_on: [mode]
+    output_format:
+      type: object
+      properties:
+        docs: { type: boolean }
+      required: [docs]
+
+  # ── Default-on lenses ─────────────────────────────────────────────
+  - id: code
+    command: review-code
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  - id: seams
+    command: review-seams
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  # Structure is judged on every change, never selected for one. The lens this
+  # replaces was gated behind a suggestions-only charter and measured zero yield —
+  # which measured the demotion, not the concern.
+  - id: simplify
+    command: review-simplify
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  # ── Default-on and conditional lenses ─────────────────────────────
+  - id: tests
+    command: review-tests
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  - id: errors
+    command: review-errors
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false && $INPUTS.errors == 'true'"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  - id: docs
+    command: review-docs
+    context: fresh
+    depends_on: [scope]
+    when: "$mode.output.continuation == false && $INPUTS.docs == 'true' || $mode.output.continuation == false && $INPUTS.docs == 'auto' && $scope.output.docs == true"
+    retry:
+      max_attempts: 2
+      delay_ms: 20000
+
+  # all_done lets this barrier settle after input-disabled lenses, every skipped
+  # continuation lens, or a lens whose retries were exhausted. The deciding
+  # agent can then tolerate specialist failures without also tolerating a failed
+  # mode/scope preflight: synthesize separately requires scope to have succeeded.
+  - id: review-complete
+    bash: "true"
+    depends_on: [code, seams, simplify, tests, errors, docs]
+    trigger_rule: all_done
+
+  # A failed specialist (a provider stream dying mid-review, say) must not kill
+  # the review: synthesize detects the missing
+  # report for an ENABLED lens and forces ready:false naming the gap, so
+  # degradation is disclosed, never silent, and the correction loop's recheck is
+  # the retry. `ready` is a real boolean — the load-bearing field a composing
+  # loop terminates on. Full reviews receive complete lens files; continuation
+  # reviews receive the complete prior report and correction delta.
+  #
+  # The deciding agent starts fresh and re-reads the diff. On a continuation it
+  # performs the review itself from the previous report and correction delta;
+  # that keeps the accumulated review state without paying for a cold fan-out.
+  # Returning into the scope
+  # node's session is not portable across the bundle's supported providers:
+  # Claude Code, Codex, and Pi. Bundled defaults stay on that shared capability
+  # floor even where the configured provider can resume a named upstream session.
+  #
+  # v1 note: adversarial per-finding verification happens inside this node's
+  # prompt. When in-parent runtime fan-out lands, a verify stage slots in
+  # between the lenses and this node without changing either side's contract —
+  # the findings files are the declared boundary.
+  - id: synthesize
+    command: review-synthesize
+    context: fresh
+    output_type: review-report
+    depends_on: [scope, review-complete]
+    output_format:
+      type: object
+      properties:
+        ready:
+          type: boolean
+        action:
+          type: string
+          enum: [none, correct, replan]
+        findings_summary:
+          type: string
+      required: [ready, action, findings_summary]

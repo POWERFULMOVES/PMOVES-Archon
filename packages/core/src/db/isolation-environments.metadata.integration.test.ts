@@ -9,7 +9,8 @@
  * container during Phase B smoke testing. This runs the store's read/write path
  * against a real SqliteAdapter so the round trip is exercised end-to-end: the raw
  * column comes back as a string, and the store's `normalizeEnvironmentRow` boundary
- * turns it into a real object for every consumer.
+ * turns it into a real object for every consumer — including `created_at`, which
+ * must arrive as the UTC `Date` the type promises, not zone-less TEXT.
  *
  * Runs in its own `bun test` invocation (see package.json) — it mock.module's
  * ./connection with a real adapter, conflicting with isolation-environments.test.ts's
@@ -38,7 +39,7 @@ mock.module('./connection', () => ({
   getDatabaseType: () => 'sqlite',
 }));
 
-const { create, getById, listByCodebase, updateMetadata } =
+const { create, getById, listByCodebase, updateMetadata, findLatestByCodebaseAndWorkingPath } =
   await import('./isolation-environments');
 
 // isolation_environments.codebase_id is NOT NULL with an enforced FK — seed a parent.
@@ -130,5 +131,66 @@ describe('isolation-environments metadata — real SQLite round trip', () => {
       containerName: 'archon-merge',
       volume: 'archon-merge-upper',
     });
+  });
+
+  test('SQLite stores created_at as zone-less TEXT, but the store returns a UTC-hydrated Date', async () => {
+    // Insert EXACTLY as SQLite writes it: created_at as zone-less UTC TEXT via
+    // the shape datetime('now') produces — under America/New_York a naive Date
+    // parse yields 2026-08-26T09:00 EDT (= 13:00Z), four hours after the true
+    // instant; east of UTC the sign flips.
+    const id = 'ts-env-1';
+    await db.query(
+      `INSERT INTO remote_agent_isolation_environments
+         (id, codebase_id, workflow_type, workflow_id, provider, working_path, branch_name, status, created_at)
+       VALUES ($1, 'cb-1', 'task', 'wf-ts-1', 'container', '/tmp/ts-hydrate', 'impl-ts-1', 'destroyed',
+         '2026-08-26 09:00:00')`,
+      [id]
+    );
+    // Prove the RAW column is unzoned TEXT (the naive reader's lie).
+    const raw = await db.query<{ created_at: unknown }>(
+      'SELECT created_at FROM remote_agent_isolation_environments WHERE id = $1',
+      [id]
+    );
+    expect(raw.rows[0]?.created_at).toBe('2026-08-26 09:00:00');
+
+    const fetched = await getById(id);
+    expect(fetched?.created_at).toEqual(new Date('2026-08-26T09:00:00.000Z'));
+  });
+
+  test('the historical lookup normalizes its adopted row the same way', async () => {
+    const env = await findLatestByCodebaseAndWorkingPath(
+      'cb-1',
+      '/tmp/ts-hydrate',
+      new Date('2026-09-01T00:00:00.000Z')
+    );
+    expect(env?.id).toBe('ts-env-1');
+    expect(env?.created_at).toEqual(new Date('2026-08-26T09:00:00.000Z'));
+  });
+
+  test('historical lookup selects the newest estate at or before the run cutoff', async () => {
+    const rows = [
+      ['history-old', 'wf-history-old', 'old-branch', '2026-08-25 08:00:00'],
+      ['history-intended', 'wf-history-intended', 'intended-branch', '2026-08-25 09:00:00'],
+      ['history-later', 'wf-history-later', 'later-branch', '2026-08-25 11:00:00'],
+    ] as const;
+    for (const [id, workflowId, branch, createdAt] of rows) {
+      await db.query(
+        `INSERT INTO remote_agent_isolation_environments
+           (id, codebase_id, workflow_type, workflow_id, provider, working_path,
+            branch_name, status, created_at, metadata)
+         VALUES ($1, 'cb-1', 'task', $2, 'worktree', '/tmp/shared-estate',
+                 $3, 'destroyed', $4, '{}')`,
+        [id, workflowId, branch, createdAt]
+      );
+    }
+
+    const selected = await findLatestByCodebaseAndWorkingPath(
+      'cb-1',
+      '/tmp/shared-estate',
+      new Date('2026-08-25T10:00:00.000Z')
+    );
+
+    expect(selected?.id).toBe('history-intended');
+    expect(selected?.branch_name).toBe('intended-branch');
   });
 });

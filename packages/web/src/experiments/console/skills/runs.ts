@@ -94,6 +94,19 @@ export async function rejectRun(id: string, reason: string): Promise<void> {
   });
 }
 
+/**
+ * Resolve a paused run with any of its gate's declared decisions (#2707 step 2).
+ * `approve`/`reject` produce the exact same resolution as `approveRun`/`rejectRun` —
+ * the server delegates those two ids to the same functions — so callers can use this
+ * uniformly instead of branching on decision id.
+ */
+export async function respondRun(id: string, decision: string, text?: string): Promise<void> {
+  await requestJson(`/api/workflows/runs/${encodeURIComponent(id)}/respond`, {
+    method: 'POST',
+    body: JSON.stringify(text !== undefined ? { decision, text } : { decision }),
+  });
+}
+
 export async function resumeRun(id: string): Promise<void> {
   await requestJson(`/api/workflows/runs/${encodeURIComponent(id)}/resume`, {
     method: 'POST',

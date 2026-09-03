@@ -51,6 +51,7 @@ const CHECK_ONLY = process.argv.includes('--check');
  */
 const AXES: readonly { key: keyof ProviderCapabilities; label: string }[] = [
   { key: 'sessionResume', label: 'Session resume' },
+  { key: 'sessionFork', label: 'Immutable session fork (`context.resume`)' },
   { key: 'mcp', label: 'MCP servers (`mcp:`)' },
   { key: 'hooks', label: 'Hooks (`hooks:`)' },
   { key: 'skills', label: 'Skills (`skills:`)' },
@@ -60,7 +61,6 @@ const AXES: readonly { key: keyof ProviderCapabilities; label: string }[] = [
   { key: 'envInjection', label: 'Env injection (`env:`)' },
   { key: 'costControl', label: 'Cost control (`maxBudgetUsd`)' },
   { key: 'effortControl', label: 'Effort control (`effort`)' },
-  { key: 'thinkingControl', label: 'Thinking control (`thinking`)' },
   { key: 'fallbackModel', label: 'Fallback model (`fallbackModel`)' },
   { key: 'sandbox', label: 'Sandbox (`sandbox`)' },
   { key: 'settingSources', label: 'Setting sources (`settingSources`)' },
@@ -85,13 +85,6 @@ const SKIP_KEYS = new Set<keyof ProviderCapabilities>(['knownToolNames', 'rename
  * entries (unknown provider, axis-less key, or a caveat on a ❌ cell).
  */
 const CAVEATS: readonly { provider: string; key: keyof ProviderCapabilities; note: string }[] = [
-  {
-    provider: 'codex',
-    key: 'skills',
-    note:
-      'Filesystem auto-discovery from `.agents/skills/` — per-node `skills:` lists are ' +
-      'informational; use `provider: claude` for node-scoped skills.',
-  },
   {
     provider: 'opencode',
     key: 'agents',
@@ -220,15 +213,17 @@ function buildMarkdown(providers: ProviderInfo[], caveats: ResolvedCaveat[]): st
     '',
     ':::note',
     "This page is **auto-generated** from each provider's `capabilities.ts` (the same",
-    'constants the workflow engine reads to warn when a node uses a feature its',
-    'provider ignores). Do not edit it by hand — run `bun run generate:capability-matrix`.',
+    'constants the workflow engine reads to enforce provider-specific behavior). Do not',
+    'edit it by hand — run `bun run generate:capability-matrix`.',
     'A capability change fails `bun run validate` until this page is regenerated.',
     ':::',
     '',
     'Each column is a registered provider id (the value you set as `provider:` in a',
     'workflow or `.archon/config.yaml`). A ✅ means Archon translates the corresponding',
-    'per-node YAML field for that provider; a ❌ means the field is accepted but ignored',
-    '(the dag-executor emits a visible warning when the run reaches such a node).',
+    'capability for that provider; a ❌ means the capability is unsupported. Unsupported',
+    'behavior is feature-specific: some optional fields are ignored with a warning, while',
+    'strict contracts fail closed. In particular, `context.resume` rejects an explicitly',
+    'unsupported provider at load time and an implicitly resolved one at runtime.',
     '',
     '## Providers',
     '',
@@ -243,7 +238,7 @@ function buildMarkdown(providers: ProviderInfo[], caveats: ResolvedCaveat[]): st
     ...(caveats.length > 0 ? ['## Caveats', '', caveatList, ''] : []),
     '## Legend',
     '',
-    '- **✅ / ❌** — the per-node field is wired for this provider, or accepted-but-ignored.',
+    '- **✅ / ❌** — the capability is supported or unsupported for this provider.',
     '- **✅¹ (superscript)** — supported, but with semantics that differ from the headline',
     '  meaning of the axis — see [Caveats](#caveats).',
     '- **Structured output** — `enforced` (the SDK/backend grammar-constrains decoding),',

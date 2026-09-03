@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'bun:test';
 
 import {
+  assertProducerNotFailed,
+  canonicalValueText,
   declaredFieldsFromSchema,
+  jsonValueSchema,
   OutputRefError,
+  parseWholeInputsRef,
+  parseWholeOutputRef,
   resolveNodeOutputField,
   similarNodeIds,
 } from './output-ref';
@@ -21,6 +26,78 @@ function completed(
     ...(declaredFields !== undefined ? { declaredFields } : {}),
   };
 }
+
+// #2637 — THE deterministic value→text rule: strings raw, everything else canonical
+// JSON. Pinned per JSON type so any drift from the pre-extraction inline mappings
+// (String(number|boolean), JSON.stringify(array|object|null)) fails here first.
+describe('canonicalValueText', () => {
+  it('passes strings through raw (never quoted)', () => {
+    expect(canonicalValueText('hello world')).toBe('hello world');
+    expect(canonicalValueText('')).toBe('');
+    expect(canonicalValueText('{"already":"json"}')).toBe('{"already":"json"}');
+  });
+
+  it('maps numbers and booleans to their JSON text (identical to String())', () => {
+    expect(canonicalValueText(42)).toBe('42');
+    expect(canonicalValueText(-1.5)).toBe('-1.5');
+    expect(canonicalValueText(true)).toBe('true');
+    expect(canonicalValueText(false)).toBe('false');
+  });
+
+  it('maps null, arrays, and objects to canonical JSON text', () => {
+    expect(canonicalValueText(null)).toBe('null');
+    expect(canonicalValueText([1, 'a', null])).toBe('[1,"a",null]');
+    expect(canonicalValueText({ b: 1, a: [true] })).toBe('{"b":1,"a":[true]}');
+  });
+
+  it("defensively maps JSON-unrepresentable values to '' (unreachable from parsed JSON)", () => {
+    expect(canonicalValueText(undefined)).toBe('');
+    expect(canonicalValueText(Symbol('x'))).toBe('');
+  });
+});
+
+describe('jsonValueSchema', () => {
+  it('accepts every JSON value shape and rejects undefined', () => {
+    for (const value of ['s', 0, -2.5, true, false, null, [1, 'a'], { k: { n: null } }]) {
+      expect(jsonValueSchema.safeParse(value).success).toBe(true);
+    }
+    expect(jsonValueSchema.safeParse(undefined).success).toBe(false);
+    expect(jsonValueSchema.safeParse(new Date()).success).toBe(false);
+  });
+});
+
+describe('parseWholeOutputRef', () => {
+  it('parses a whole unfielded and fielded ref, tolerating surrounding whitespace', () => {
+    expect(parseWholeOutputRef('$plan.output')).toEqual({ nodeId: 'plan' });
+    expect(parseWholeOutputRef('  $plan.output.items ')).toEqual({
+      nodeId: 'plan',
+      field: 'items',
+    });
+  });
+
+  it('returns undefined for templates, prose, and non-refs', () => {
+    expect(parseWholeOutputRef('before $plan.output')).toBeUndefined();
+    expect(parseWholeOutputRef('$plan.output and after')).toBeUndefined();
+    expect(parseWholeOutputRef('$INPUTS.name')).toBeUndefined();
+    expect(parseWholeOutputRef('literal')).toBeUndefined();
+    expect(parseWholeOutputRef('')).toBeUndefined();
+  });
+});
+
+describe('parseWholeInputsRef', () => {
+  it('parses a whole $INPUTS.<name> ref to its name, tolerating whitespace', () => {
+    expect(parseWholeInputsRef('$INPUTS.mode')).toBe('mode');
+    expect(parseWholeInputsRef('  $INPUTS.foo-bar ')).toBe('foo-bar');
+  });
+
+  it('returns undefined for templates, output refs, and non-refs', () => {
+    expect(parseWholeInputsRef('v=$INPUTS.mode')).toBeUndefined();
+    expect(parseWholeInputsRef('$INPUTS.mode!')).toBeUndefined();
+    expect(parseWholeInputsRef('$plan.output')).toBeUndefined();
+    expect(parseWholeInputsRef('literal')).toBeUndefined();
+    expect(parseWholeInputsRef('')).toBeUndefined();
+  });
+});
 
 describe('declaredFieldsFromSchema', () => {
   it('returns the property names for an object schema', () => {
@@ -63,6 +140,71 @@ describe('resolveNodeOutputField — producer did not run', () => {
     expect(() => resolveNodeOutputField({ state: 'pending', output: '' }, 'n', 'field')).toThrow(
       OutputRefError
     );
+  });
+});
+
+describe('resolveNodeOutputField — producer failed (#2713)', () => {
+  it("throws producer-failed even when the failed producer's leftover output is real, valid JSON", () => {
+    // Mirrors a loop_group's failure paths: lastIterationOutput is real, non-empty text
+    // that happens to be valid JSON — exactly the shape that let the failed producer's
+    // stale output silently resolve before this fix (run 6607bf20 / #2696).
+    const failed: NodeOutput = {
+      state: 'failed',
+      output: JSON.stringify({ ready: true }),
+      error: 'loop failed at max_iterations',
+    };
+    try {
+      resolveNodeOutputField(failed, 'corrections', 'ready');
+      throw new Error('expected throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(OutputRefError);
+      expect((e as OutputRefError).reason).toBe('producer-failed');
+      expect((e as OutputRefError).message).toContain("'corrections' failed");
+    }
+  });
+
+  it('throws producer-failed even when structuredOutput carries the field', () => {
+    const failed: NodeOutput = {
+      state: 'failed',
+      output: '',
+      error: 'boom',
+      structuredOutput: { ready: true },
+    };
+    expect(() => resolveNodeOutputField(failed, 'corrections', 'ready')).toThrow(OutputRefError);
+  });
+});
+
+// #2722 — the shared guard every whole-text $node.output reader routes through, mirroring
+// resolveNodeOutputField's own state === 'failed' guard for the fielded form.
+describe('assertProducerNotFailed', () => {
+  it.each(['completed', 'running', 'pending', 'skipped'] as const)(
+    'does not throw for a %s producer',
+    state => {
+      const nodeOutput: NodeOutput =
+        state === 'completed' || state === 'running'
+          ? { state, output: 'ok' }
+          : { state, output: '' };
+      expect(() => assertProducerNotFailed(nodeOutput, () => 'unreachable')).not.toThrow();
+    }
+  );
+
+  it("throws with the caller's message for a failed producer", () => {
+    const failed: NodeOutput = { state: 'failed', output: 'stale', error: 'boom' };
+    expect(() =>
+      assertProducerNotFailed(failed, f => `custom message referencing ${f.error}`)
+    ).toThrow('custom message referencing boom');
+  });
+
+  it('passes the narrowed failed NodeOutput to buildMessage (error accessible without a cast)', () => {
+    const failed: NodeOutput = { state: 'failed', output: '', error: 'loop failed' };
+    let seenError: string | undefined;
+    expect(() =>
+      assertProducerNotFailed(failed, f => {
+        seenError = f.error;
+        return 'x';
+      })
+    ).toThrow();
+    expect(seenError).toBe('loop failed');
   });
 });
 

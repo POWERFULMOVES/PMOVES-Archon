@@ -11,10 +11,11 @@
  */
 import { createLogger } from '@archon/paths';
 import type { DbNotificationListener } from '@archon/core/db/adapters/types';
+import { WORKFLOW_EVENT_NOTIFY_CHANNEL } from '@archon/core/db/adapters/types';
 import type { DashboardEventPoller } from './dashboard-event-poller';
 
 const log = createLogger('adapter.web.pg-notify');
-const CHANNEL = 'archon_dashboard_event';
+const CHANNEL = WORKFLOW_EVENT_NOTIFY_CHANNEL;
 const MAX_BACKOFF_MS = 30_000;
 
 export class PgNotifyListener {

@@ -1,5 +1,5 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
-import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockQuery, createQueryResult, mockPostgresDialect } from '../test/mocks/database';
 import { createMockLogger } from '../test/mocks/logger';
 
 process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
@@ -10,7 +10,7 @@ mock.module('@archon/paths', () => ({
   getCredentialKeyPath: mock(() => '/mock/.archon/credential-key'),
 }));
 
-const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
+const mockQuery = createMockQuery();
 mock.module('./connection', () => ({
   pool: { query: mockQuery },
   getDialect: () => mockPostgresDialect,
@@ -72,6 +72,9 @@ function apiKeyRow(overrides: Partial<UserProviderKeyRow> = {}): UserProviderKey
   };
 }
 
+/** Fixed future expiry so exact-equality assertions on rawCreds stay stable. */
+const OAUTH_BLOB_EXPIRES = 4102444800000; // 2100-01-01
+
 function oauthRow(overrides: Partial<UserProviderKeyRow> = {}): UserProviderKeyRow {
   const key = getEncryptionKey();
   return {
@@ -80,7 +83,12 @@ function oauthRow(overrides: Partial<UserProviderKeyRow> = {}): UserProviderKeyR
     provider: 'claude',
     kind: 'oauth',
     api_key_encrypted: null,
-    oauth_creds_encrypted: encryptToken(JSON.stringify({ access: 'oauth-bearer' }), key),
+    // Well-formed blob: `expires` must be numeric — the store rejects rows
+    // without it before calling the Pi mint path (oauth_malformed_expires).
+    oauth_creds_encrypted: encryptToken(
+      JSON.stringify({ access: 'oauth-bearer', expires: OAUTH_BLOB_EXPIRES }),
+      key
+    ),
     label: 'Claude subscription',
     created_at: new Date(),
     updated_at: new Date(),
@@ -210,9 +218,28 @@ describe('user-provider-key-store', () => {
       expect(cred).toEqual({
         kind: 'oauth',
         oauthApiKey: 'minted-oauth-key',
-        rawCreds: { access: 'oauth-bearer' },
+        rawCreds: { access: 'oauth-bearer', expires: OAUTH_BLOB_EXPIRES },
       });
       expect(mockGetOAuthApiKey).toHaveBeenCalled();
+    });
+
+    test('oauth row → null on missing/non-numeric expires, no mint attempt', async () => {
+      // The Pi mint path decides refresh purely by `Date.now() >= expires`
+      // (Archon-owned since pi-ai 0.84 — toAuth never checks expiry). A blob
+      // without a numeric `expires` would make that comparison silently
+      // false and serve a stale token as success; the store must reject it
+      // at the deserialization boundary instead (oauth_malformed_expires).
+      mockGetOAuthApiKey.mockClear();
+      const key = getEncryptionKey();
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          oauthRow({
+            oauth_creds_encrypted: encryptToken(JSON.stringify({ access: 'oauth-bearer' }), key),
+          }),
+        ])
+      );
+      expect(await getDecryptedProviderCredential('user-1', 'claude')).toBeNull();
+      expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
     });
 
     test('oauth row → null when getOAuthApiKey yields no key', async () => {
@@ -289,6 +316,35 @@ describe('user-provider-key-store', () => {
       });
       expect(mockMintOpenAi).toHaveBeenCalledTimes(1);
       expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
+    });
+
+    test('openai oauth row → null on malformed expires, no mint attempt', async (): Promise<void> => {
+      const malformedExpires = [
+        { label: 'null payload', raw: 'null', type: 'undefined' },
+        { label: 'missing', raw: '{"access":"oa"}', type: 'undefined' },
+        { label: 'non-numeric', raw: '{"access":"oa","expires":"soon"}', type: 'string' },
+        { label: 'non-finite', raw: '{"access":"oa","expires":1e400}', type: 'number' },
+      ];
+
+      for (const { label, raw, type } of malformedExpires) {
+        mockMintOpenAi.mockClear();
+        mockLogger.error.mockClear();
+        mockQuery.mockResolvedValueOnce(
+          createQueryResult([
+            oauthRow({
+              provider: 'openai',
+              oauth_creds_encrypted: encryptToken(raw, getEncryptionKey()),
+            }),
+          ])
+        );
+
+        expect(await getDecryptedProviderCredential('user-1', 'openai'), label).toBeNull();
+        expect(mockMintOpenAi, label).not.toHaveBeenCalled();
+        expect(mockLogger.error, label).toHaveBeenCalledWith(
+          { userId: 'user-1', provider: 'openai', expiresType: type },
+          'user_provider_key.oauth_malformed_expires'
+        );
+      }
     });
 
     test("legacy 'codex' rows normalize onto the openai path", async () => {
