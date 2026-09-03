@@ -344,6 +344,20 @@ export function toRunEvent(raw: RawWorkflowEvent): RunEvent {
     };
   }
 
+  // Deprecated bundled default (#2781). Mapped explicitly — the fallback would
+  // render the raw `{"workflowName":…,"notice":…}` payload, truncating away the
+  // escape-hatch sentence. Rendered as `text`, NOT `system`: the notice tells the
+  // user what to do (copy the workflow file out of the pack) and must be visible
+  // without opting into the System toggle.
+  if (et === 'workflow_deprecation_notice') {
+    const notice = readString(data, 'notice');
+    return {
+      ...base,
+      kind: 'text',
+      content: notice || '⚠️ This workflow is deprecated.',
+    };
+  }
+
   // Fallback: render anything else as a text event with the payload summary.
   return {
     ...base,

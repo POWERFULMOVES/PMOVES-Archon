@@ -1,0 +1,19 @@
+# Dry-run fixture: archon-review called directly, not through delivery. `docs` is left
+# at its `auto` default, so the docs lens is gated on the scope node's own selection —
+# the branch archon-deliver never reaches, because it always binds a resolved boolean.
+mode: '{"continuation":false}'
+scope:
+  docs: true
+code: "0 findings"
+seams: "0 findings"
+simplify: "0 findings"
+tests: "0 findings"
+docs: "0 findings"
+review-complete: "settled"
+synthesize:
+  ready: true
+  action: none
+  findings_summary: "stub: clean, docs lens included"
+fixture:
+  expect: completed
+  reached: [code, seams, simplify, tests, docs]

@@ -9,7 +9,13 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFileAsync } from '@archon/git';
-import { BUNDLED_IS_BINARY, getArchonHome, createLogger, getTelemetryStatus } from '@archon/paths';
+import {
+  BUNDLED_IS_BINARY,
+  getArchonHome,
+  createLogger,
+  getTelemetryStatus,
+  canonicalizeProjectPath,
+} from '@archon/paths';
 import {
   resolveCodexBinaryWithSource,
   type CodexBinarySource,
@@ -503,12 +509,17 @@ export async function checkFolderProject(
     getLog().debug({ err }, 'doctor.folder_project_module_load_failed');
     return { label, status: 'skip', message: 'unavailable (module load failed)' };
   }
+  // Same canonicalizer as the CLI gate and as registration, so doctor reports
+  // the project the rest of the CLI will actually resolve here — a raw cwd
+  // misses a symlinked or Windows short-name root that is registered (#2927).
+  const canonicalCwd = await canonicalizeProjectPath(cwd);
   let codebase: FolderCodebase | null;
   try {
     codebase =
-      (await deps.findCodebaseByDefaultCwd(cwd)) ?? (await deps.findCodebaseByPathPrefix(cwd));
+      (await deps.findCodebaseByDefaultCwd(canonicalCwd)) ??
+      (await deps.findCodebaseByPathPrefix(canonicalCwd));
   } catch (err) {
-    getLog().debug({ err, cwd }, 'doctor.folder_project_lookup_failed');
+    getLog().debug({ err, cwd: canonicalCwd }, 'doctor.folder_project_lookup_failed');
     return { label, status: 'skip', message: 'could not check (database unavailable)' };
   }
   if (codebase?.kind !== 'folder') {

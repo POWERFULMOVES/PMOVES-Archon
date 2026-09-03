@@ -1,6 +1,14 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettierConfig from 'eslint-config-prettier';
+import { readFileSync } from 'node:fs';
+
+const archonScriptsTsconfig = JSON.parse(
+  readFileSync(new URL('./.archon/scripts/tsconfig.json', import.meta.url), 'utf8')
+);
+const archonScriptFiles = archonScriptsTsconfig.include.map(
+  pattern => `.archon/scripts/${pattern}`
+);
 
 export default tseslint.config(
   // Global ignores (applied to all configs)
@@ -14,14 +22,20 @@ export default tseslint.config(
       '.agents/examples/**',
       'packages/docs-web/**',
       'workspace/**',
+      // Nested git worktrees are separate checkouts that lint on their own branch.
+      // Their files are outside every tsconfig project here, so typed rules crash on them.
       'worktrees/**',
+      '.worktrees/**',
       '.claude/worktrees/**',
       '.claude/skills/**',
-      '.archon/**', // User workflow/script/command content — not in any tsconfig project
+      '.archon/commands/**',
+      '.archon/maintainer-standup/**',
+      '.archon/workflows/**',
       '**/*.generated.ts', // Auto-generated source files (content inlined via JSON.stringify)
       '**/*.js',
       '*.mjs',
-      '**/*.test.ts',
+      'packages/**/*.test.ts',
+      'scripts/**/*.test.ts',
       '**/src/test/**', // Test helper files (mock factories, fixtures)
       '*.d.ts', // Root-level declaration files (not in tsconfig project scope)
       '**/*.generated.d.ts', // Auto-generated declaration files (e.g. openapi-typescript output)
@@ -43,7 +57,7 @@ export default tseslint.config(
 
   // Project-specific settings
   {
-    files: ['packages/*/src/**/*.{ts,tsx}', 'scripts/**/*.ts'],
+    files: ['packages/*/src/**/*.{ts,tsx}', 'scripts/**/*.ts', ...archonScriptFiles],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -108,6 +122,17 @@ export default tseslint.config(
       '@typescript-eslint/require-await': 'off',
       // Constructor style preference
       '@typescript-eslint/consistent-generic-constructors': 'off',
+    },
+  },
+
+  {
+    files: archonScriptFiles,
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+        project: './.archon/scripts/tsconfig.json',
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
   },
 

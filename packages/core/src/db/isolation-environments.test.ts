@@ -1,25 +1,28 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
-import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockQuery, createQueryResult, mockPostgresDialect } from '../test/mocks/database';
 import type { IsolationEnvironmentRow } from '@archon/isolation';
+import { toBranchName } from '@archon/git';
 
-const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
+const mockQuery = createMockQuery();
 
 mock.module('./connection', () => ({
   pool: {
     query: mockQuery,
   },
   getDialect: () => mockPostgresDialect,
+  getDatabaseType: (): 'postgresql' => 'postgresql',
 }));
 
 import {
   getById,
   findActiveByWorkflow,
   listByCodebase,
+  findLatestByCodebaseAndWorkingPath,
   create,
   updateStatus,
   updateMetadata,
   countActiveByCodebase,
-  getConversationsUsingEnv,
+  getLiveRunOwningEnv,
   findStaleEnvironments,
   listAllActiveWithCodebase,
 } from './isolation-environments';
@@ -163,6 +166,39 @@ describe('isolation-environments', () => {
     });
   });
 
+  describe('findLatestByCodebaseAndWorkingPath', () => {
+    test('returns a destroyed row so adoption can recover its branch', async () => {
+      const destroyed = { ...sampleEnv, status: 'destroyed' as const };
+      mockQuery.mockResolvedValueOnce(createQueryResult([destroyed]));
+
+      const result = await findLatestByCodebaseAndWorkingPath(
+        'codebase-456',
+        '/workspace/worktrees/project/issue-42',
+        new Date('2026-08-20T10:00:00.000Z')
+      );
+
+      expect(result).toEqual(destroyed);
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining('codebase_id = $1 AND working_path = $2'),
+        ['codebase-456', '/workspace/worktrees/project/issue-42', '2026-08-20T10:00:00.000Z']
+      );
+      expect((mockQuery.mock.calls[0]?.[0] as string).includes("status = 'active'")).toBe(false);
+      expect(mockQuery.mock.calls[0]?.[0]).toContain('created_at <= $3');
+    });
+
+    test('returns null when the path has no isolation history', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+
+      const result = await findLatestByCodebaseAndWorkingPath(
+        'codebase-456',
+        '/missing',
+        new Date('2026-08-20T10:00:00.000Z')
+      );
+
+      expect(result).toBeNull();
+    });
+  });
+
   describe('create', () => {
     test('creates new environment with defaults', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([sampleEnv]));
@@ -172,7 +208,7 @@ describe('isolation-environments', () => {
         workflow_type: 'issue',
         workflow_id: '42',
         working_path: '/workspace/worktrees/project/issue-42',
-        branch_name: 'issue-42',
+        branch_name: toBranchName('issue-42'),
       });
 
       expect(result).toEqual(sampleEnv);
@@ -192,7 +228,7 @@ describe('isolation-environments', () => {
         workflow_id: '42',
         provider: 'container',
         working_path: '/workspace/worktrees/project/issue-42',
-        branch_name: 'issue-42',
+        branch_name: toBranchName('issue-42'),
         created_by_platform: 'slack',
         metadata: { custom: true },
       });
@@ -223,7 +259,7 @@ describe('isolation-environments', () => {
         workflow_type: 'issue',
         workflow_id: '42',
         working_path: '/workspace/worktrees/project/issue-42',
-        branch_name: 'issue-42',
+        branch_name: toBranchName('issue-42'),
       });
 
       const [query] = mockQuery.mock.calls[0] as [string, unknown[]];
@@ -240,7 +276,7 @@ describe('isolation-environments', () => {
         workflow_type: 'issue',
         workflow_id: '42',
         working_path: '/workspace/worktrees/project/issue-42-v2',
-        branch_name: 'issue-42-v2',
+        branch_name: toBranchName('issue-42-v2'),
       });
 
       const [query] = mockQuery.mock.calls[0] as [string, unknown[]];
@@ -261,7 +297,7 @@ describe('isolation-environments', () => {
         workflow_type: 'issue',
         workflow_id: '42',
         working_path: '/workspace/worktrees/project/issue-42',
-        branch_name: 'issue-42',
+        branch_name: toBranchName('issue-42'),
         created_by_user_id: 'user-bob',
       });
 
@@ -327,25 +363,28 @@ describe('isolation-environments', () => {
     });
   });
 
-  describe('getConversationsUsingEnv', () => {
-    test('returns conversation IDs using the environment', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([{ id: 'conv-1' }, { id: 'conv-2' }]));
+  describe('getLiveRunOwningEnv', () => {
+    // Only the parameters are asserted here. This file hardcodes the Postgres
+    // dialect, so asserting SQL text would pin one branch of a dialect-parallel
+    // query; the real-SQLite and real-Postgres integration tests prove behavior
+    // on both. 'failed' must NOT appear: it is terminal but resumable, so a failed
+    // run keeps its environment (see UNCLAIMABLE_WORKFLOW_STATUSES).
+    test('excludes only the statuses no run can claim back', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([{ id: 'run-1', status: 'running' }]));
 
-      const result = await getConversationsUsingEnv('env-123');
+      const result = await getLiveRunOwningEnv('env-123');
 
-      expect(result).toEqual(['conv-1', 'conv-2']);
-      expect(mockQuery).toHaveBeenCalledWith(
-        'SELECT id FROM remote_agent_conversations WHERE isolation_env_id = $1',
-        ['env-123']
-      );
+      expect(result).toEqual({ id: 'run-1', status: 'running' });
+      const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(params).toEqual(['env-123', 'completed', 'cancelled']);
     });
 
-    test('returns empty array when no conversations use env', async () => {
+    test('returns null when the env has no live run', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([]));
 
-      const result = await getConversationsUsingEnv('unused-env');
+      const result = await getLiveRunOwningEnv('unused-env');
 
-      expect(result).toEqual([]);
+      expect(result).toBeNull();
     });
   });
 

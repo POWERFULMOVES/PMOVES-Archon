@@ -1,9 +1,27 @@
 import type { Workflow } from '../primitives/workflow';
 
+/**
+ * Source rank for the "other" group: project first, then global, then bundled,
+ * then any unrecognised source at the end (#2578). The fallback covers the
+ * widened `Workflow['source']` (`WorkflowSource | (string & {})`) without
+ * indexing a literal-keyed map with a `string` and getting `undefined`.
+ */
+function sourceRank(source: Workflow['source']): number {
+  switch (source) {
+    case 'project':
+      return 0;
+    case 'global':
+      return 1;
+    case 'bundled':
+      return 2;
+    default:
+      return 3;
+  }
+}
+
 /** Source rank for the "other" group: project first, then global, then bundled. */
 function bySourceThenName(a: Workflow, b: Workflow): number {
-  const rank = { project: 0, global: 1, bundled: 2 } as const;
-  return rank[a.source] - rank[b.source] || a.name.localeCompare(b.name);
+  return sourceRank(a.source) - sourceRank(b.source) || a.name.localeCompare(b.name);
 }
 
 /**

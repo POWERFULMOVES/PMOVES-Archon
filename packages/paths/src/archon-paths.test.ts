@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { mkdir, rm, writeFile, lstat, readlink, symlink as fsSymlink } from 'fs/promises';
+import { removeTempTree } from './test-utils';
 
 const isWindows = process.platform === 'win32';
 
@@ -11,10 +12,12 @@ import {
   isWSL,
   getWSLDistroName,
   getArchonHome,
+  getArchonTempPath,
   getArchonWorkspacesPath,
   ensureArchonWorkspacesPath,
   getArchonWorktreesPath,
   getArchonConfigPath,
+  getInstallManifestPath,
   getCredentialKeyPath,
   getHomeWorkflowsPath,
   getHomeCommandsPath,
@@ -23,6 +26,7 @@ import {
   getCommandFolderSearchPaths,
   getWorkflowFolderSearchPaths,
   expandTilde,
+  canonicalizeProjectPath,
   getAppArchonBasePath,
   getDefaultCommandsPath,
   getDefaultWorkflowsPath,
@@ -41,7 +45,12 @@ import {
   getScopeArtifactsPath,
   resolveProjectStorageKey,
   getProjectStoragePaths,
+  resolveRunStorageRoot,
   getRunArtifactsDirForKey,
+  getRunLogPathForRoot,
+  getRunWorkflowSourceDirForRoot,
+  getRunArtifactsDirForRoot,
+  getStoragePathsForRoot,
   slugifyFolderName,
   getFolderProjectRoot,
   getFolderProjectArtifactsPath,
@@ -97,6 +106,50 @@ describe('archon-paths', () => {
 
     test('returns path unchanged if no tilde', () => {
       expect(expandTilde('/absolute/path')).toBe('/absolute/path');
+    });
+  });
+
+  // The one canonicalizer for `remote_agent_codebases.default_cwd` (#2927).
+  describe('canonicalizeProjectPath', () => {
+    let canonRoot: string;
+
+    beforeEach(async () => {
+      canonRoot = join(tmpdir(), `archon-canon-${String(Date.now())}-${String(Math.random())}`);
+      await mkdir(canonRoot, { recursive: true });
+    });
+
+    afterEach(async () => {
+      await removeTempTree(canonRoot);
+    });
+
+    test('collapses two spellings of one directory to a single string', async () => {
+      // This is the whole job: exact-string lookups only find a row when the
+      // path the reader holds and the path the writer held canonicalize alike.
+      // `'junction'` is ignored on POSIX and is the Windows link type that
+      // needs no elevated privileges.
+      const target = join(canonRoot, 'project');
+      const link = join(canonRoot, 'project-link');
+      await mkdir(target);
+      await fsSymlink(target, link, 'junction');
+
+      expect(await canonicalizeProjectPath(link)).toBe(await canonicalizeProjectPath(target));
+    });
+
+    test('is idempotent', async () => {
+      const once = await canonicalizeProjectPath(canonRoot);
+      expect(await canonicalizeProjectPath(once)).toBe(once);
+    });
+
+    test('expands ~ and makes the result absolute', async () => {
+      expect(await canonicalizeProjectPath('~')).toBe(await canonicalizeProjectPath(homedir()));
+    });
+
+    test('falls back to the absolute path instead of throwing when it cannot resolve', async () => {
+      // Callers rely on always getting a string back: a reader needs a value to
+      // miss its lookup with, and `registerFolder` reports the real errno from
+      // its own `stat` rather than from here.
+      const missing = join(canonRoot, 'no-such-dir');
+      expect(await canonicalizeProjectPath(missing)).toBe(missing);
     });
   });
 
@@ -236,6 +289,36 @@ describe('archon-paths', () => {
       delete process.env.ARCHON_DOCKER;
       process.env.ARCHON_HOME = '/custom/archon';
       expect(getArchonWorktreesPath()).toBe(join('/custom/archon', 'worktrees'));
+    });
+  });
+
+  describe('getInstallManifestPath', () => {
+    test('returns install.json under the default ARCHON_HOME', () => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_HOME;
+      delete process.env.ARCHON_DOCKER;
+      expect(getInstallManifestPath()).toBe(join(homedir(), '.archon', 'install.json'));
+    });
+
+    test('respects ARCHON_HOME', () => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+      expect(getInstallManifestPath()).toBe(join('/custom/archon', 'install.json'));
+    });
+  });
+
+  describe('getArchonTempPath', () => {
+    test('returns ~/.archon/temp by default', () => {
+      delete process.env.ARCHON_HOME;
+      delete process.env.ARCHON_DOCKER;
+      expect(getArchonTempPath()).toBe(join(homedir(), '.archon', 'temp'));
+    });
+
+    test('uses ARCHON_HOME when set', () => {
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+      expect(getArchonTempPath()).toBe(join('/custom/archon', 'temp'));
     });
   });
 
@@ -596,23 +679,25 @@ describe('archon-paths', () => {
       process.env.ARCHON_HOME = '/custom/archon';
     });
 
-    test('repo key composes all four roots under owner/repo', () => {
+    test('repo key composes every root under owner/repo', () => {
       const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
       expect(getProjectStoragePaths({ kind: 'repo', owner: 'acme', repo: 'widget' })).toEqual({
         root,
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
     });
 
-    test('folder key composes all four roots under _folder/<slug>', () => {
+    test('folder key composes every root under _folder/<slug>', () => {
       const root = join('/custom/archon', 'workspaces', '_folder', 'my-ops-folder');
       expect(getProjectStoragePaths({ kind: 'folder', slug: 'my-ops-folder' })).toEqual({
         root,
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
     });
 
@@ -624,6 +709,7 @@ describe('archon-paths', () => {
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
       // Build both expectations with join() — on Windows the separators differ
       // from the POSIX literals and a hard-coded '/custom/archon' never matches.
@@ -655,6 +741,37 @@ describe('archon-paths', () => {
     });
   });
 
+  describe('resolveRunStorageRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('keeps a trusted persisted root when the codebase was renamed', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'original');
+      expect(
+        resolveRunStorageRoot(
+          { output_root: root },
+          { kind: 'repo', name: 'acme/renamed', default_cwd: '/repos/renamed' }
+        )
+      ).toBe(root);
+    });
+
+    test('re-derives an out-of-tree persisted root under the current home', () => {
+      expect(
+        resolveRunStorageRoot(
+          { output_root: '/previous/archon/home/workspaces/_local/workspace' },
+          { kind: 'repo', name: 'workspace', default_cwd: '/home/u/workspace' }
+        )
+      ).toBe(join('/custom/archon', 'workspaces', '_local', 'workspace'));
+    });
+
+    test('rejects an untrusted root when no codebase can re-derive it', () => {
+      expect(resolveRunStorageRoot({ output_root: '/etc' }, null)).toBeNull();
+    });
+  });
+
   describe('getRunArtifactsDirForKey', () => {
     beforeEach(() => {
       delete process.env.WORKSPACE_PATH;
@@ -678,6 +795,42 @@ describe('archon-paths', () => {
       expect(getRunArtifactsDirForKey({ kind: 'cwd', cwd: '/home/u/scratch' }, 'run-1')).toBe(
         join('/custom/archon', 'workspaces', '_cwd', 'scratch', 'artifacts', 'runs', 'run-1')
       );
+    });
+  });
+
+  describe('getRunLogPathForRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('composes a transcript path from a persisted project root', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      expect(getRunLogPathForRoot(root, 'run-1')).toBe(join(root, 'logs', 'run-1.jsonl'));
+    });
+
+    test('agrees with the repo-specific helper', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      expect(getRunLogPath('acme', 'widget', 'run-1')).toBe(getRunLogPathForRoot(root, 'run-1'));
+    });
+  });
+
+  describe('getRunWorkflowSourceDirForRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('composes a run source path beside, not inside, the run artifacts', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      const source = getRunWorkflowSourceDirForRoot(root, 'run-1');
+      expect(source).toBe(join(root, 'workflow-source', 'runs', 'run-1'));
+      // The failure this guards: a capture placed under `$ARTIFACTS_DIR` is handed to
+      // every node by path and listed as the run's output.
+      expect(source.startsWith(getRunArtifactsDirForRoot(root, 'run-1') + sep)).toBe(false);
+      expect(getStoragePathsForRoot(root).workflowSourceRoot).toBe(join(root, 'workflow-source'));
     });
   });
 

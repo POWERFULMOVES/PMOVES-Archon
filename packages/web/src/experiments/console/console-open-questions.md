@@ -120,8 +120,8 @@ flaky) deserves hardening.
 - **Provider/model per conversation** — not selectable in chat.
 - **Keyboard shortcuts** for chat (new chat, focus composer, approve) — the rest
   of the console is keyboard-driven; chat isn't.
-- **`currentNode` only, no `n/total`** in the dock — the dashboard run has step
-  counts the `Run` primitive doesn't capture; add for a real progress sense.
+- ~~**Concurrent active nodes in the dock**~~ — shipped. A declared `n/total` remains unavailable;
+  observed lifecycle events do not define a truthful total for active or dynamic workflows.
 - **Working-pill `· <activity>`** depends on the last tool call landing in the
   message metadata mid-turn; verify it populates for fast/parallel tool use.
 - **Responsive / mobile** — unconsidered.

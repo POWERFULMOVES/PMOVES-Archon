@@ -1,8 +1,10 @@
 /**
  * Core type definitions for the Remote Coding Agent platform
  */
-import type { WorkflowDefinition } from '@archon/workflows/schemas/workflow';
+import type { ResolvedWorkflow } from '@archon/workflows/schemas/workflow';
 import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
+import type { RunModelOverrides } from '@archon/workflows/model-validation';
+import type { WorkflowRunConfigInput } from '@archon/workflows/schemas/run-config';
 
 // MessageChunk + TokenUsage are used by IPlatformAdapter below.
 import type { MessageChunk, TokenUsage } from '@archon/providers/types';
@@ -54,6 +56,28 @@ export interface HandleMessageContext {
    * own auth flows are wired.
    */
   readonly userId?: string;
+  /**
+   * Declared workflow inputs supplied by the caller (#2554), keyed by input name.
+   *
+   * Set ONLY by the `POST /api/workflows/:name/run` route, whose body carries an
+   * `inputs` map. It rides the context rather than the message text so a supplied value
+   * is never confused with `$ARGUMENTS`, and so chat platforms — which have no channel
+   * for it and never populate this field — keep their existing behaviour unchanged
+   * (#2555 tracks giving them one).
+   */
+  readonly workflowInputs?: Readonly<Record<string, string>>;
+  /** Sparse tier/@alias rebindings supplied by the workflow run route (#2481). */
+  readonly workflowModelOverrides?: RunModelOverrides;
+  /** Validated inline config content supplied by the workflow run route. */
+  readonly workflowRunConfig?: WorkflowRunConfigInput;
+  /**
+   * Between-run continuation (#2747): the terminal run this run adopts or
+   * supersedes. Rides the context like `workflowInputs` so it can never be
+   * confused with message text. Provenance is recorded engine-side; lane
+   * resolution is the dispatching surface's job.
+   */
+  readonly workflowAdoptRunId?: string;
+  readonly workflowSupersedesRunId?: string;
 }
 
 export interface CommandResult {
@@ -62,11 +86,18 @@ export interface CommandResult {
   modified?: boolean; // Indicates if conversation state was modified
   workflow?: {
     // If set, orchestrator should execute this workflow
-    definition: WorkflowDefinition;
+    definition: ResolvedWorkflow;
     args: string;
     force?: boolean;
     resumeRunId?: string;
     resumeRun?: WorkflowRun;
+    /**
+     * The continuation graph already resolved from that run's recorded source.
+     *
+     * Carried so dispatch does not repeat the digest verification and discovery the
+     * handler just paid for. A value, not a flag: it cannot claim work it did not do.
+     */
+    resolvedContinuation?: ResolvedWorkflow;
     /** Keys the engine dropped from this workflow's YAML (#2213). */
     parseWarnings?: readonly string[];
   };
@@ -171,9 +202,5 @@ export function isWebAdapter(adapter: IPlatformAdapter): adapter is IWebPlatform
 // Re-export workflow schema types for config-types.ts compatibility
 import type { ModelReasoningEffort, WebSearchMode } from '@archon/workflows/schemas/workflow';
 export type { ModelReasoningEffort, WebSearchMode };
-import type {
-  EffortLevel,
-  ThinkingConfig,
-  SandboxSettings,
-} from '@archon/workflows/schemas/dag-node';
-export type { EffortLevel, ThinkingConfig, SandboxSettings };
+import type { EffortLevel, SandboxSettings } from '@archon/workflows/schemas/dag-node';
+export type { EffortLevel, SandboxSettings };

@@ -11,7 +11,9 @@ import {
   execFileAsync,
   hasUncommittedChanges,
   toWorktreePath,
+  getDefaultBranch,
   getUniqueCommitCount,
+  isPatchEquivalent,
 } from '@archon/git';
 import { getIsolationProvider } from '@archon/isolation';
 import {
@@ -115,11 +117,26 @@ export async function isolationCleanupCommand(daysStale = 7): Promise<void> {
 
   const provider = getIsolationProvider();
   let cleaned = 0;
+  let skipped = 0;
   let failed = 0;
 
   for (const env of staleEnvs) {
     console.log(`\nCleaning: ${env.branch_name ?? env.workflow_id}`);
     console.log(`  Path: ${env.working_path}`);
+
+    // Same lock the cleanup-service sweeps use: a run that can still claim the
+    // environment blocks removal, even when the conversation recency filter
+    // marks the env stale.
+    const liveRun = await isolationDb.getLiveRunOwningEnv(env.id);
+    if (liveRun) {
+      getLog().info(
+        { envId: env.id, runId: liveRun.id, runStatus: liveRun.status },
+        'skip_stale_live_run'
+      );
+      console.log(`  Status: Skipped — run ${liveRun.id.slice(0, 8)} is ${liveRun.status}`);
+      skipped++;
+      continue;
+    }
 
     try {
       await provider.destroy(env.working_path, {
@@ -138,7 +155,9 @@ export async function isolationCleanupCommand(daysStale = 7): Promise<void> {
     }
   }
 
-  console.log(`\nCleanup complete: ${String(cleaned)} cleaned, ${String(failed)} failed`);
+  console.log(
+    `\nCleanup complete: ${String(cleaned)} cleaned, ${String(skipped)} skipped, ${String(failed)} failed`
+  );
 
   // Reap orphaned container environments (terminal / run-less, older than the
   // threshold). Paused runs' containers are deliberately skipped (awaited state).
@@ -292,34 +311,27 @@ export async function isolationCompleteCommand(
         getLog().warn({ err, branch }, 'isolation.complete_pr_check_failed');
       }
 
-      // Check 4: commits that would become unreachable after branch deletion
+      // Check 4: commits that would become unreachable after branch deletion.
       let remote = 'origin';
+      let uniqueCommitCount: number | undefined;
+      let repoConfig: Awaited<ReturnType<typeof loadRepoConfig>> | undefined;
       try {
-        const repoConfig = await loadRepoConfig(env.codebase_default_cwd);
+        repoConfig = await loadRepoConfig(env.codebase_default_cwd);
         remote = repoConfig.worktree?.remote?.trim() || remote;
-        const uniqueCommitCount = await getUniqueCommitCount(
+        uniqueCommitCount = await getUniqueCommitCount(
           toRepoPath(env.codebase_default_cwd),
           toBranchName(branch),
           remote
         );
-        if (uniqueCommitCount > 0) {
-          blockers.push(`${String(uniqueCommitCount)} commit(s) unique to this branch`);
-        }
       } catch (error) {
         const err = error as Error;
         getLog().warn({ err, branch }, 'isolation.complete_unique_commit_check_failed');
-        // Fail CLOSED. This check exists to stop a branch being deleted while it
-        // holds commits reachable from nowhere else; treating an unanswerable
-        // check as "no unique commits" would let exactly the loss it guards
-        // against proceed on any git failure — permissions, a corrupt ref, a
-        // timeout. An unnecessary blocker costs the operator one --force; a
-        // wrong skip costs them the commits.
         blockers.push(
           `could not determine unique commits (${err.message}) — refusing to delete unverified`
         );
       }
 
-      // Check 5: unpushed commits (not yet on remote)
+      // Check 5: unpushed commits and remote-deleted branches.
       try {
         const unpushedResult = await execFileAsync(
           'git',
@@ -330,12 +342,57 @@ export async function isolationCompleteCommand(
         if (unpushedLines.length > 0) {
           blockers.push(`${unpushedLines.length} commit(s) not pushed to remote`);
         }
+        if (uniqueCommitCount !== undefined && uniqueCommitCount > 0) {
+          blockers.push(`${String(uniqueCommitCount)} commit(s) unique to this branch`);
+        }
       } catch (error) {
         const err = error as Error;
-        // origin/<branch> doesn't exist means branch was never pushed
+        // git gives the same "unknown revision" for a ref GitHub deleted after a
+        // squash merge and for one that was never pushed. The safety decision is the
+        // same either way — is the content on the base? — but the operator's message
+        // must not assert a deletion that may never have happened.
         if (err.message.includes('unknown revision') || err.message.includes('bad revision')) {
-          blockers.push('branch has never been pushed to remote');
+          if (uniqueCommitCount !== undefined && uniqueCommitCount > 0) {
+            try {
+              const configuredBase = repoConfig?.worktree?.baseBranch?.trim();
+              const baseBranch = configuredBase
+                ? toBranchName(configuredBase)
+                : await getDefaultBranch(toRepoPath(env.codebase_default_cwd), remote);
+              const remoteBaseRef = `${remote}/${baseBranch}`;
+              if (
+                await isPatchEquivalent(
+                  toRepoPath(env.codebase_default_cwd),
+                  toBranchName(branch),
+                  remoteBaseRef,
+                  { throwOnExpectedError: true }
+                )
+              ) {
+                console.log(
+                  `  Note: no ${remote}/${branch} on the remote; content is already on ` +
+                    `${remoteBaseRef} (squash-merged, or merged locally and never pushed).`
+                );
+              } else {
+                blockers.push(
+                  `no ${remote}/${branch} on the remote (deleted or never pushed) ` +
+                    `and content not found on ${remoteBaseRef}`
+                );
+              }
+            } catch (patchCheckError) {
+              const patchCheckErr = patchCheckError as Error;
+              getLog().warn(
+                { err: patchCheckErr, branch },
+                'isolation.complete_remote_deleted_branch_check_failed'
+              );
+              blockers.push(
+                `could not verify whether ${branch}'s content is already on the base branch ` +
+                  `(${patchCheckErr.message})`
+              );
+            }
+          }
         } else {
+          if (uniqueCommitCount !== undefined && uniqueCommitCount > 0) {
+            blockers.push(`${String(uniqueCommitCount)} commit(s) unique to this branch`);
+          }
           getLog().warn({ err, branch }, 'isolation.complete_unpushed_check_failed');
         }
       }

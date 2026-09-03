@@ -101,7 +101,10 @@ function serializeDagNode(node: DagNode, baseIndent: number): string {
     lines.push(`${pad}  model: ${node.model}`);
   }
   if (node.context) {
-    lines.push(`${pad}  context: ${node.context}`);
+    const serializedContext = serializeValue(node.context, baseIndent + 2);
+    lines.push(
+      `${pad}  context:${serializedContext.startsWith('\n') ? '' : ' '}${serializedContext}`
+    );
   }
   if (node.output_format) {
     lines.push(`${pad}  output_format: ${serializeValue(node.output_format, baseIndent + 2)}`);

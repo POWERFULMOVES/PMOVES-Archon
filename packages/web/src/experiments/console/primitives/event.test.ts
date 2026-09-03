@@ -195,6 +195,32 @@ describe('toRunEvent — approvals (server writes approval_requested/approval_re
   });
 });
 
+describe('toRunEvent — deprecation notice (#2781)', () => {
+  test('workflow_deprecation_notice renders data.notice as text', () => {
+    const e = toRunEvent(
+      raw({
+        event_type: 'workflow_deprecation_notice',
+        data: {
+          workflowName: 'archon-fix',
+          notice: 'This workflow is deprecated. Switch to the sdlc pack instead.',
+        },
+      })
+    );
+    expect(e.kind).toBe('text');
+    if (e.kind !== 'text') throw new Error('unreachable');
+    expect(e.content).toBe('This workflow is deprecated. Switch to the sdlc pack instead.');
+  });
+
+  test('a notice-less payload falls back to a generic line, never raw JSON', () => {
+    const e = toRunEvent(
+      raw({ event_type: 'workflow_deprecation_notice', data: { workflowName: 'archon-fix' } })
+    );
+    expect(e.kind).toBe('text');
+    if (e.kind !== 'text') throw new Error('unreachable');
+    expect(e.content).toBe('⚠️ This workflow is deprecated.');
+  });
+});
+
 describe('toRunEvent — error & workflow lifecycle', () => {
   test('error prefers the `error` key over `message`', () => {
     const e = toRunEvent(

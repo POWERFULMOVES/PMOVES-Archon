@@ -104,8 +104,10 @@ export function serializeToolResult(result: unknown): string {
  */
 export function usageToTokens(usage: Usage): TokenUsage {
   return {
-    input: usage.input,
+    input: usage.input + usage.cacheRead + usage.cacheWrite,
     output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
     total: usage.totalTokens,
     cost: usage.cost.total,
   };

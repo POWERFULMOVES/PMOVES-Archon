@@ -141,7 +141,7 @@ function tarHeader(name: string, size: number, typeflag: '0' | '5', mode: number
 }
 
 /** Concatenate blocks into one buffer. */
-function concatBytes(blocks: Uint8Array[]): Uint8Array {
+function concatBytes(blocks: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const total = blocks.reduce((sum, block) => sum + block.length, 0);
   const out = new Uint8Array(total);
   let offset = 0;
@@ -163,17 +163,19 @@ function concatBytes(blocks: Uint8Array[]): Uint8Array {
 const FIXTURE_INDEX_HTML = '<html>ok</html>';
 
 /** `web/` + `web/index.html`, tarred and gzipped — the shape `archon serve` downloads. */
-function buildWebTarball(indexHtml: string): Uint8Array {
+function buildWebTarball(indexHtml: string): Uint8Array<ArrayBuffer> {
   const body = new TextEncoder().encode(indexHtml);
   const padding = new Uint8Array((512 - (body.length % 512)) % 512);
-  return Bun.gzipSync(
-    concatBytes([
-      tarHeader('web/', 0, '5', 0o755),
-      tarHeader('web/index.html', body.length, '0', 0o644),
-      body,
-      padding,
-      new Uint8Array(1024), // two zero blocks terminate the archive
-    ])
+  return new Uint8Array(
+    Bun.gzipSync(
+      concatBytes([
+        tarHeader('web/', 0, '5', 0o755),
+        tarHeader('web/index.html', body.length, '0', 0o644),
+        body,
+        padding,
+        new Uint8Array(1024), // two zero blocks terminate the archive
+      ])
+    )
   );
 }
 
@@ -210,11 +212,22 @@ describe('downloadWebDist', () => {
     consoleLogSpy.mockRestore();
   });
 
+  // The spawn-shape and cleanup assertions ride along here rather than in tests
+  // of their own: each call to downloadWebDist costs a real `tar` spawn, and
+  // spawn count on windows is the whole reason this file gets attention.
   it('verifies against the embedded hash without fetching checksums.txt', async () => {
     fetchSpy.mockImplementation(async () => new Response(tarballBytes));
     const targetDir = join(tmpRoot, 'target-embedded-ok');
+    const spawnSpy = spyOn(Bun, 'spawn');
+    let extractorStdin: unknown;
 
-    await downloadWebDist('9.9.9', targetDir, tarballHash);
+    try {
+      await downloadWebDist('9.9.9', targetDir, tarballHash);
+      // Read before restoring — mockRestore() clears the recorded calls.
+      extractorStdin = (spawnSpy.mock.calls[0]?.[1] as { stdin?: unknown } | undefined)?.stdin;
+    } finally {
+      spawnSpy.mockRestore();
+    }
 
     // Content, not just existence — a truncated or corrupt fixture still yields
     // an index.html and a `tar` exit 0, so only this assertion catches it.
@@ -222,6 +235,13 @@ describe('downloadWebDist', () => {
     // Only the tarball is fetched — checksums.txt must NOT be requested.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('archon-web.tar.gz');
+    // `tar` must inherit a file descriptor. Passing the bytes as `stdin` instead
+    // leaves the parent owning a channel it has to pump and close, and a stalled
+    // pump blocks `tar` forever — the windows hang in #2924. A BunFile is a Blob;
+    // a Uint8Array is not, which is exactly the regression this catches.
+    expect(extractorStdin).toBeInstanceOf(Blob);
+    // The staged archive is ~2 MB in production — it must not survive extraction.
+    expect(existsSync(`${targetDir}.tmp.tar.gz`)).toBe(false);
   });
 
   it('hard-fails on embedded hash mismatch with a clear error', async () => {
@@ -235,6 +255,26 @@ describe('downloadWebDist', () => {
     expect(existsSync(targetDir)).toBe(false);
     // Still no checksums.txt fetch on the embedded path.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // The mismatch test above cannot reach this path: verification runs before
+  // anything is staged, so it never leaves temp state behind. Checksum-valid
+  // bytes that are not a gzip stream are the only cheap way in — staging happens,
+  // then `tar` exits non-zero.
+  it('leaves nothing behind when tar exits non-zero', async () => {
+    const notAnArchive = new TextEncoder().encode('checksum-valid, but not gzip');
+    const hasher = new Bun.CryptoHasher('sha256');
+    hasher.update(notAnArchive);
+    fetchSpy.mockImplementation(async () => new Response(notAnArchive));
+    const targetDir = join(tmpRoot, 'target-tar-failure');
+
+    await expect(downloadWebDist('9.9.9', targetDir, hasher.digest('hex'))).rejects.toThrow(
+      'tar extraction failed'
+    );
+
+    expect(existsSync(`${targetDir}.tmp.tar.gz`)).toBe(false);
+    expect(existsSync(`${targetDir}.tmp`)).toBe(false);
+    expect(existsSync(targetDir)).toBe(false);
   });
 
   it('falls back to remote checksums.txt when the embedded hash is empty', async () => {
@@ -251,8 +291,8 @@ describe('downloadWebDist', () => {
     expect(readFileSync(join(targetDir, 'index.html'), 'utf8')).toBe(FIXTURE_INDEX_HTML);
     // Remote path fetches both checksums.txt and the tarball.
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const urls = fetchSpy.mock.calls.map(call => String(call[0]));
-    expect(urls.some(u => u.includes('checksums.txt'))).toBe(true);
+    const urls = fetchSpy.mock.calls.map((call: Parameters<typeof fetch>) => String(call[0]));
+    expect(urls.some((url: string) => url.includes('checksums.txt'))).toBe(true);
   });
 });
 

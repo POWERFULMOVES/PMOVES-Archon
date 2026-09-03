@@ -13,6 +13,8 @@ import { useEntity, invalidate } from '../store/cache';
 import { K } from '../store/keys';
 import * as skill from '../skills';
 import { orderWithRecommended } from '../lib/recommended';
+import { missingRequiredInputs, collectSuppliedInputs } from '../lib/workflow-inputs';
+import { collectRunModelOverrides, type RunModelOverrideRow } from '../lib/run-model-overrides';
 
 interface DraftRunCardProps {
   projectId: string;
@@ -81,6 +83,12 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
   const [dragOver, setDragOver] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Values for the selected workflow's declared `inputs:` (#2554), keyed by input name.
+  // Cleared whenever the selected workflow changes so one workflow's values can never
+  // be submitted against another's declaration.
+  const [inputValues, setInputValues] = useState<Record<string, string>>({});
+  const [modelOverrideRows, setModelOverrideRows] = useState<RunModelOverrideRow[]>([]);
+  const nextModelOverrideId = useRef(1);
 
   // Pre-fill from `?rerun=1&workflow=…&message=…` query params (set by the
   // ↻ rerun button on RecentRunRow). Reacts to searchParams so the card
@@ -144,6 +152,18 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
     if (pick !== undefined) setWorkflowName(pick.name);
   }, [sortedWorkflows, workflowName]);
 
+  // Declared inputs of the selected workflow (#2554). Empty for the overwhelming
+  // majority of workflows, which declare none and render exactly as before.
+  const declaredInputs = sortedWorkflows.find(w => w.name === workflowName)?.inputs ?? [];
+  const missingRequired = missingRequiredInputs(declaredInputs, inputValues);
+
+  // Switching workflows discards values collected for the previous one — they were
+  // typed against a different declaration and would be rejected as undeclared keys.
+  useEffect(() => {
+    setInputValues({});
+    setModelOverrideRows([]);
+  }, [workflowName]);
+
   // Global `N` keybind: expand + open the workflow picker so the user can
   // pick a workflow without first reaching for the mouse.
   useEffect(() => {
@@ -189,8 +209,21 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
       setError('Pick a workflow first.');
       return;
     }
+    if (missingRequired.length > 0) {
+      setError(
+        `Fill in ${missingRequired.map(n => `"${n}"`).join(', ')} before starting this run.`
+      );
+      return;
+    }
     setError(null);
     setSubmitting(true);
+    const suppliedInputs = collectSuppliedInputs(declaredInputs, inputValues);
+    const collectedModelOverrides = collectRunModelOverrides(modelOverrideRows);
+    if (!collectedModelOverrides.ok) {
+      setError(collectedModelOverrides.error);
+      setSubmitting(false);
+      return;
+    }
     try {
       writeLastWorkflow(workflowName);
       await skill.startRun({
@@ -198,12 +231,18 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
         workflow: workflowName,
         message: context,
         files: files.length > 0 ? files : undefined,
+        // startRun already treats an empty map as "nothing supplied".
+        inputs: suppliedInputs,
+        tiers: collectedModelOverrides.overrides.tiers,
+        aliases: collectedModelOverrides.overrides.aliases,
       });
       // Dispatch is fire-and-forget — the orchestrator creates the run row
       // asynchronously. Nudge the runs feed so the new card appears as soon
       // as the row exists, instead of waiting for the next 3s poll tick.
       setContext('');
       setFiles([]);
+      setInputValues({});
+      setModelOverrideRows([]);
       setMode('collapsed');
       invalidate('runs');
     } catch (err: unknown) {
@@ -216,6 +255,8 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
   const collapse = (): void => {
     setMode('collapsed');
     setFiles([]);
+    setInputValues({});
+    setModelOverrideRows([]);
     setError(null);
   };
 
@@ -358,6 +399,127 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
           </button>
         </div>
 
+        {/* Declared inputs (#2554) — only for workflows that declare a signature.
+            Values are validated server-side against the same contract a composing
+            `with:` map goes through, before any worktree, clone, or AI cost. */}
+        {declaredInputs.length > 0 ? (
+          <div className="mt-3 space-y-2.5 rounded-[10px] border border-border bg-surface-inset px-3 py-2.5">
+            <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-tertiary">
+              Inputs
+            </p>
+            {declaredInputs.map(declared => (
+              <label key={declared.name} className="block">
+                <span className="flex items-baseline gap-1.5 font-mono text-[11px] text-text-secondary">
+                  {declared.name}
+                  {declared.required ? (
+                    <span className="text-[color:var(--brand-magenta)]" title="Required">
+                      *
+                    </span>
+                  ) : null}
+                </span>
+                {declared.description !== null ? (
+                  <span className="mt-0.5 block text-[11px] leading-snug text-text-tertiary">
+                    {declared.description}
+                  </span>
+                ) : null}
+                <input
+                  type="text"
+                  value={inputValues[declared.name] ?? ''}
+                  onChange={e => {
+                    const { value } = e.target;
+                    setInputValues(prev => ({ ...prev, [declared.name]: value }));
+                    if (error !== null) setError(null);
+                  }}
+                  placeholder={declared.default ?? (declared.required ? 'required' : 'optional')}
+                  disabled={submitting}
+                  className="mt-1 w-full rounded-[8px] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-accent-bright/50 focus:outline-none focus:ring-[3px] focus:ring-accent-bright/10 disabled:opacity-50"
+                />
+              </label>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mt-3 rounded-[10px] border border-border bg-surface-inset px-3 py-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-tertiary">
+                Model bindings
+              </p>
+              <p className="mt-0.5 text-[11px] text-text-tertiary">
+                {modelOverrideRows.length === 0
+                  ? 'As authored'
+                  : 'Only the named tiers and aliases change for this run.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const id = nextModelOverrideId.current;
+                nextModelOverrideId.current += 1;
+                setModelOverrideRows(prev => [...prev, { id, name: '', spec: '' }]);
+              }}
+              disabled={submitting}
+              className="shrink-0 rounded border border-border px-2.5 py-1 font-mono text-[11px] text-text-secondary transition-colors hover:border-border-bright hover:text-text-primary disabled:opacity-40"
+            >
+              + binding
+            </button>
+          </div>
+          {modelOverrideRows.length > 0 ? (
+            <div className="mt-2 space-y-2">
+              {modelOverrideRows.map(row => (
+                <div key={row.id} className="flex items-center gap-2">
+                  <input
+                    value={row.name}
+                    onChange={e => {
+                      const name = e.target.value;
+                      setModelOverrideRows(prev =>
+                        prev.map(candidate =>
+                          candidate.id === row.id ? { ...candidate, name } : candidate
+                        )
+                      );
+                      if (error !== null) setError(null);
+                    }}
+                    placeholder="large or @planner"
+                    aria-label="Tier or alias"
+                    disabled={submitting}
+                    className="w-[150px] rounded-[8px] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-accent-bright/50 focus:outline-none disabled:opacity-50"
+                  />
+                  <span className="font-mono text-[11px] text-text-tertiary">=</span>
+                  <input
+                    value={row.spec}
+                    onChange={e => {
+                      const spec = e.target.value;
+                      setModelOverrideRows(prev =>
+                        prev.map(candidate =>
+                          candidate.id === row.id ? { ...candidate, spec } : candidate
+                        )
+                      );
+                      if (error !== null) setError(null);
+                    }}
+                    placeholder="openai/gpt-5.6"
+                    aria-label="Model spec"
+                    disabled={submitting}
+                    className="min-w-0 flex-1 rounded-[8px] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-accent-bright/50 focus:outline-none disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setModelOverrideRows(prev =>
+                        prev.filter(candidate => candidate.id !== row.id)
+                      );
+                    }}
+                    disabled={submitting}
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-error/10 hover:text-error disabled:opacity-40"
+                    aria-label={`Remove model binding ${row.name || String(row.id)}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
         {/* Body: context textarea */}
         <div className="mt-3">
           <textarea
@@ -463,7 +625,12 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
             <button
               type="button"
               onClick={() => void submit()}
-              disabled={submitting || workflowName.length === 0}
+              disabled={submitting || workflowName.length === 0 || missingRequired.length > 0}
+              title={
+                missingRequired.length > 0
+                  ? `Fill in ${missingRequired.join(', ')} first`
+                  : undefined
+              }
               className="brand-bar flex items-center gap-1.5 rounded-[9px] px-[15px] py-[9px] text-[13px] font-bold text-white shadow-[0_6px_18px_-8px_color-mix(in_oklch,var(--brand-magenta),transparent_30%)] transition-all hover:-translate-y-px hover:brightness-110 active:brightness-95 disabled:translate-y-0 disabled:opacity-50 disabled:shadow-none"
             >
               {submitting ? 'Starting…' : 'Start run'}
@@ -472,6 +639,14 @@ export function DraftRunCard({ projectId, projectCwd }: DraftRunCardProps): Reac
               </span>
             </button>
           </div>
+
+          {/* Say WHY the button is disabled — a dead control with no reason is the
+              failure mode this replaces. */}
+          {error === null && missingRequired.length > 0 ? (
+            <p className="mt-1 font-mono text-[11px] text-text-tertiary">
+              needs {missingRequired.join(', ')}
+            </p>
+          ) : null}
 
           {error !== null ? <p className="mt-1 font-mono text-[11px] text-error">{error}</p> : null}
         </div>

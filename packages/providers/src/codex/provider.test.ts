@@ -1,7 +1,9 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, type Mock } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import type { Codex as SdkCodex, Thread as SdkThread, Usage } from '@openai/codex-sdk';
+import type { MessageChunk } from '../types';
 import { createMockLogger } from '../test/mocks/logger';
 
 const mockLogger = createMockLogger();
@@ -10,10 +12,27 @@ mock.module('@archon/paths', () => ({
 }));
 
 /** Default usage matching Codex SDK's Usage type (required on TurnCompletedEvent) */
-const defaultUsage = { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 };
+const defaultUsage = {
+  input_tokens: 10,
+  cached_input_tokens: 0,
+  cache_write_input_tokens: 0,
+  output_tokens: 5,
+  reasoning_output_tokens: 0,
+} satisfies Usage;
+
+type MockRunStreamed = (
+  ...args: Parameters<SdkThread['runStreamed']>
+) => Promise<{ events: AsyncGenerator<unknown, void, unknown> }>;
+type MockThread = { id: string | null; runStreamed: Mock<MockRunStreamed> };
+type MockStartThread = (...args: Parameters<SdkCodex['startThread']>) => MockThread;
+type MockResumeThread = (...args: Parameters<SdkCodex['resumeThread']>) => MockThread;
+type MockCodexConstructor = (...args: ConstructorParameters<typeof SdkCodex>) => {
+  startThread: Mock<MockStartThread>;
+  resumeThread: Mock<MockResumeThread>;
+};
 
 // Create mock runStreamed first (before it's referenced)
-const mockRunStreamed = mock(() =>
+const mockRunStreamed = mock<MockRunStreamed>((_input, _options) =>
   Promise.resolve({
     events: (async function* () {
       yield { type: 'turn.completed', usage: defaultUsage };
@@ -22,17 +41,17 @@ const mockRunStreamed = mock(() =>
 );
 
 // Create a mock thread object factory
-const createMockThread = (id: string) => ({
+const createMockThread = (id: string | null): MockThread => ({
   id,
   runStreamed: mockRunStreamed,
 });
 
 // Create mock functions for Codex SDK that use createMockThread
-const mockStartThread = mock(() => createMockThread('new-thread-id'));
-const mockResumeThread = mock(() => createMockThread('resumed-thread-id'));
+const mockStartThread = mock<MockStartThread>(() => createMockThread('new-thread-id'));
+const mockResumeThread = mock<MockResumeThread>(() => createMockThread('resumed-thread-id'));
 
 // Mock Codex class
-const MockCodex = mock(() => ({
+const MockCodex = mock<MockCodexConstructor>(() => ({
   startThread: mockStartThread,
   resumeThread: mockResumeThread,
 }));
@@ -42,7 +61,7 @@ mock.module('@openai/codex-sdk', () => ({
   Codex: MockCodex,
 }));
 
-import { CodexProvider, resetCodexSingleton } from './provider';
+import { CodexProvider, classifyCodexError, resetCodexSingleton } from './provider';
 
 describe('CodexProvider', () => {
   let client: CodexProvider;
@@ -75,16 +94,16 @@ describe('CodexProvider', () => {
       const caps = client.getCapabilities();
       expect(caps).toEqual({
         sessionResume: true,
+        sessionFork: false,
         mcp: true,
         hooks: false,
-        skills: true,
+        skills: false,
         agents: false,
         toolRestrictions: false,
         structuredOutput: 'enforced',
         envInjection: true,
         costControl: false,
-        effortControl: false,
-        thinkingControl: false,
+        effortControl: true,
         fallbackModel: false,
         sandbox: false,
         settingSources: false,
@@ -95,6 +114,168 @@ describe('CodexProvider', () => {
   });
 
   describe('sendQuery', () => {
+    test.each([
+      ['omitted', undefined],
+      ['empty', []],
+      ['non-empty', ['prp-issue']],
+    ])(
+      'disables automatic skill instructions for workflow nodes when skills are %s',
+      async (_label, skills) => {
+        for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+          nodeConfig: { nodeId: 'investigate', ...(skills === undefined ? {} : { skills }) },
+        })) {
+          // consume
+        }
+
+        expect(MockCodex).toHaveBeenCalledWith(
+          expect.objectContaining({
+            config: { skills: { include_instructions: false } },
+          })
+        );
+      }
+    );
+
+    test('leaves direct non-workflow Codex calls on the native skill setting', async () => {
+      for await (const _ of client.sendQuery('test prompt', '/workspace')) {
+        // consume
+      }
+
+      expect(MockCodex).toHaveBeenCalledTimes(1);
+      expect(MockCodex.mock.calls[0]?.[0]).not.toHaveProperty('config');
+    });
+
+    test('uses the workflow skill-catalog override when resuming a thread', async () => {
+      for await (const _ of client.sendQuery('test prompt', '/workspace', 'existing-thread', {
+        nodeConfig: { nodeId: 'investigate' },
+      })) {
+        // consume
+      }
+
+      expect(MockCodex).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: { skills: { include_instructions: false } },
+        })
+      );
+      expect(mockResumeThread).toHaveBeenCalledWith(
+        'existing-thread',
+        expect.objectContaining({ workingDirectory: '/workspace' })
+      );
+    });
+
+    test('warns and retries a resumed MCP thread without catalog suppression when the binary rejects the key', async () => {
+      const testDir = await mkdtemp(join(tmpdir(), 'codex-provider-skill-fallback-'));
+      await writeFile(
+        join(testDir, 'mcp.json'),
+        JSON.stringify({ figma: { type: 'http', url: 'http://127.0.0.1:3845/mcp' } })
+      );
+      let calls = 0;
+      mockRunStreamed.mockImplementation(() => {
+        calls++;
+        const call = calls;
+        return Promise.resolve({
+          events: (async function* () {
+            if (call === 1) {
+              throw new Error(
+                'Error loading config: unknown field `include_instructions` in `skills`'
+              );
+            }
+            yield { type: 'turn.completed', usage: defaultUsage };
+          })(),
+        });
+      });
+
+      const chunks: MessageChunk[] = [];
+      try {
+        for await (const chunk of client.sendQuery('test prompt', testDir, 'existing-thread', {
+          nodeConfig: { nodeId: 'investigate', mcp: 'mcp.json' },
+        })) {
+          chunks.push(chunk);
+        }
+      } finally {
+        await rm(testDir, { recursive: true, force: true });
+      }
+
+      expect(MockCodex).toHaveBeenCalledTimes(2);
+      expect(MockCodex.mock.calls[0]?.[0]).toMatchObject({
+        config: {
+          skills: { include_instructions: false },
+          mcp_servers: { figma: expect.objectContaining({ url: 'http://127.0.0.1:3845/mcp' }) },
+        },
+      });
+      const initialConfig = MockCodex.mock.calls[0]?.[0]?.config;
+      const fallbackConfig = MockCodex.mock.calls[1]?.[0]?.config;
+      expect(initialConfig).toBeDefined();
+      const { skills: _skills, ...initialConfigWithoutSkills } = initialConfig ?? {};
+      expect(fallbackConfig).toEqual(initialConfigWithoutSkills);
+      expect(mockResumeThread).toHaveBeenCalledTimes(2);
+      expect(mockResumeThread).toHaveBeenNthCalledWith(
+        2,
+        'existing-thread',
+        expect.objectContaining({ workingDirectory: testDir })
+      );
+      expect(chunks[0]).toEqual({
+        type: 'system',
+        content: expect.stringContaining('Continuing with native skill discovery enabled'),
+      });
+      expect(chunks.at(-1)).toMatchObject({
+        type: 'result',
+        sessionId: 'resumed-thread-id',
+        resumed: true,
+      });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ nodeId: 'investigate' }),
+        'codex.workflow_skill_catalog_suppression_unsupported'
+      );
+    });
+
+    test('does not replay a turn when a catalog config error arrives after provider output', async () => {
+      mockRunStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield {
+            type: 'item.completed',
+            item: { id: 'message-1', type: 'agent_message', text: 'already emitted' },
+          };
+          throw new Error('Error loading config: unknown field `include_instructions` in `skills`');
+        })(),
+      });
+
+      const chunks: MessageChunk[] = [];
+      await expect(
+        (async (): Promise<void> => {
+          for await (const chunk of client.sendQuery('test prompt', '/workspace', undefined, {
+            nodeConfig: { nodeId: 'investigate' },
+          })) {
+            chunks.push(chunk);
+          }
+        })()
+      ).rejects.toThrow('include_instructions');
+
+      expect(chunks).toContainEqual({ type: 'assistant', content: 'already emitted' });
+      expect(MockCodex).toHaveBeenCalledTimes(1);
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'codex.workflow_skill_catalog_suppression_unsupported'
+      );
+    });
+
+    test('does not treat unrelated Codex failures as catalog compatibility errors', async () => {
+      mockRunStreamed.mockRejectedValue(new Error('authentication failed'));
+
+      expect(
+        (async (): Promise<void> => {
+          for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+            nodeConfig: { nodeId: 'investigate' },
+          })) {
+            // consume
+          }
+        })()
+      ).rejects.toThrow('Codex auth error');
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'codex.workflow_skill_catalog_suppression_unsupported'
+      );
+    });
+
     test('yields text events from agent_message items', async () => {
       mockRunStreamed.mockResolvedValue({
         events: (async function* () {
@@ -102,7 +283,10 @@ describe('CodexProvider', () => {
             type: 'item.completed',
             item: { type: 'agent_message', text: 'Hello from Codex!' },
           };
-          yield { type: 'turn.completed', usage: defaultUsage };
+          yield {
+            type: 'turn.completed',
+            usage: { ...defaultUsage, cached_input_tokens: 7, cache_write_input_tokens: 3 },
+          };
         })(),
       });
 
@@ -116,7 +300,7 @@ describe('CodexProvider', () => {
       expect(chunks[1]).toEqual({
         type: 'result',
         sessionId: 'new-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 7, cacheWrite: 3 },
       });
     });
 
@@ -145,7 +329,7 @@ describe('CodexProvider', () => {
       expect(chunks[chunks.length - 1]).toEqual({
         type: 'result',
         sessionId: 'evt-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
       });
     });
 
@@ -789,7 +973,7 @@ describe('CodexProvider', () => {
       expect(chunks[2]).toEqual({
         type: 'result',
         sessionId: 'new-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
       });
     });
 
@@ -884,7 +1068,7 @@ describe('CodexProvider', () => {
       expect(chunks[1]).toEqual({
         type: 'result',
         sessionId: 'fallback-thread',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
         // A requested resume that fell back to a fresh thread is reported as cold.
         resumed: false,
       });
@@ -943,7 +1127,7 @@ describe('CodexProvider', () => {
       for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
         model: 'gpt-5.6-sol',
         assistantConfig: {
-          modelReasoningEffort: 'medium',
+          modelReasoningEffort: 'ultra',
           webSearchMode: 'live',
           additionalDirectories: ['/other/repo'],
         },
@@ -954,12 +1138,73 @@ describe('CodexProvider', () => {
       expect(mockStartThread).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-5.6-sol',
-          modelReasoningEffort: 'medium',
+          modelReasoningEffort: 'ultra',
           webSearchMode: 'live',
           additionalDirectories: ['/other/repo'],
         })
       );
     });
+
+    // #2556: `effort:` is Archon's one reasoning-depth spelling. Codex reads it
+    // off nodeConfig like every other effort-capable provider and translates it
+    // to the SDK's `modelReasoningEffort` here, instead of the engine having to
+    // know which field Codex wants.
+    test('applies nodeConfig.effort as modelReasoningEffort', async () => {
+      mockRunStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: defaultUsage };
+        })(),
+      });
+
+      for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+        nodeConfig: { nodeId: 'n1', effort: 'high' },
+      })) {
+        // consume
+      }
+
+      expect(mockStartThread).toHaveBeenCalledWith(
+        expect.objectContaining({ modelReasoningEffort: 'high' })
+      );
+    });
+
+    test('nodeConfig.effort beats assistants.codex.modelReasoningEffort', async () => {
+      mockRunStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: defaultUsage };
+        })(),
+      });
+
+      for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+        assistantConfig: { modelReasoningEffort: 'low' },
+        nodeConfig: { nodeId: 'n1', effort: 'minimal' },
+      })) {
+        // consume
+      }
+
+      expect(mockStartThread).toHaveBeenCalledWith(
+        expect.objectContaining({ modelReasoningEffort: 'minimal' })
+      );
+    });
+
+    test.each(['max', 'ultra', 'persistent'] as const)(
+      'passes `effort: %s` to the SDK natively',
+      async effort => {
+        mockRunStreamed.mockResolvedValue({
+          events: (async function* () {
+            yield { type: 'turn.completed', usage: defaultUsage };
+          })(),
+        });
+
+        for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+          nodeConfig: { nodeId: 'n1', effort },
+        })) {
+          // consume
+        }
+        expect(mockStartThread).toHaveBeenCalledWith(
+          expect.objectContaining({ modelReasoningEffort: effort })
+        );
+      }
+    );
 
     test('normalizes outputFormat schema (adds additionalProperties:false) before sending as outputSchema', async () => {
       mockRunStreamed.mockResolvedValue({
@@ -1072,8 +1317,8 @@ describe('CodexProvider', () => {
       // the forwarding once-listener (covered by separate tests below).
       const call = mockRunStreamed.mock.calls[0];
       expect(call[0]).toBe('test prompt');
-      expect(call[1].signal).toBeInstanceOf(AbortSignal);
-      expect(call[1].signal).not.toBe(controller.signal);
+      expect(call[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(call[1]?.signal).not.toBe(controller.signal);
     });
 
     test('passes a per-attempt AbortSignal in TurnOptions even when caller provides none', async () => {
@@ -1188,7 +1433,7 @@ describe('CodexProvider', () => {
         });
 
         for await (const _ of client.sendQuery('test prompt', testDir, undefined, {
-          nodeConfig: { mcp: 'mcp.json' },
+          nodeConfig: { nodeId: 'notify', mcp: 'mcp.json' },
         })) {
           // consume
         }
@@ -1196,6 +1441,7 @@ describe('CodexProvider', () => {
         expect(MockCodex).toHaveBeenCalledWith(
           expect.objectContaining({
             config: expect.objectContaining({
+              skills: { include_instructions: false },
               mcp_servers: expect.objectContaining({
                 figma: expect.objectContaining({
                   url: 'http://127.0.0.1:3845/mcp',
@@ -1503,7 +1749,7 @@ describe('CodexProvider', () => {
       expect(chunks[0]).toEqual({
         type: 'result',
         sessionId: 'new-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
       });
       expect(mockLogger.error).toHaveBeenCalledWith({ message: 'Transient blip' }, 'stream_error');
     });
@@ -1553,7 +1799,7 @@ describe('CodexProvider', () => {
       expect(chunks[0]).toEqual({
         type: 'result',
         sessionId: 'new-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
       });
       // Logged but not surfaced as failure
       expect(mockLogger.error).toHaveBeenCalledWith(
@@ -1617,7 +1863,7 @@ describe('CodexProvider', () => {
         expect(chunks[1]).toEqual({
           type: 'result',
           sessionId: 'new-thread-id',
-          tokens: { input: 10, output: 5 },
+          tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
         });
       } finally {
         await rm(testDir, { recursive: true, force: true });
@@ -1784,7 +2030,7 @@ describe('CodexProvider', () => {
       expect(chunks[0]).toEqual({
         type: 'result',
         sessionId: 'new-thread-id',
-        tokens: { input: 10, output: 5 },
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
       });
     });
 
@@ -2228,10 +2474,11 @@ describe('sendQuery decomposition behaviors', () => {
       }
     };
 
-    const err = await consumeGenerator().catch((e: unknown) => e as Error);
-    expect(err).toBeInstanceOf(Error);
+    const thrown = await consumeGenerator().catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(Error);
+    if (!(thrown instanceof Error)) throw new Error('Expected consumeGenerator to throw');
     // Must contain the enriched classification prefix
-    expect(err.message).toContain('Codex crash');
+    expect(thrown.message).toContain('Codex crash');
   }, 5_000);
 
   test('todo_list dedup state resets between retry attempts', async () => {
@@ -2287,7 +2534,8 @@ describe('sendQuery decomposition behaviors', () => {
     // spawn() captures the signal at its own call) but misleading here.
     const signalsAtCallTime: Array<{ signal: AbortSignal; aborted: boolean }> = [];
     let callCount = 0;
-    mockRunStreamed.mockImplementation((_prompt: unknown, opts: { signal?: AbortSignal }) => {
+    mockRunStreamed.mockImplementation((_prompt, opts) => {
+      if (!opts) throw new Error('Expected per-attempt options');
       const s = opts.signal!;
       signalsAtCallTime.push({ signal: s, aborted: s.aborted });
       callCount++;
@@ -2330,7 +2578,8 @@ describe('sendQuery decomposition behaviors', () => {
     const callerController = new AbortController();
 
     let capturedSignal: AbortSignal | undefined;
-    mockRunStreamed.mockImplementation((_prompt, opts: { signal?: AbortSignal }) => {
+    mockRunStreamed.mockImplementation((_prompt, opts) => {
+      if (!opts) throw new Error('Expected per-attempt options');
       capturedSignal = opts.signal;
       return Promise.resolve({
         events: (async function* () {
@@ -2372,7 +2621,7 @@ describe('sendQuery decomposition behaviors', () => {
   // The fix removes the explicit abort() — the per-attempt controller is short-lived
   // and goes out of scope naturally.
   test('successful attempt does not throw from stale abort cleanup (#1735)', async () => {
-    mockRunStreamed.mockImplementation((_prompt, opts: { signal?: AbortSignal }) => {
+    mockRunStreamed.mockImplementation((_prompt, _opts) => {
       return Promise.resolve({
         events: (async function* () {
           yield {
@@ -2406,4 +2655,51 @@ describe('sendQuery decomposition behaviors', () => {
       process.removeListener('uncaughtException', handler);
     }
   }, 5_000);
+});
+
+describe('classifyCodexError (#2509 R7)', () => {
+  // AUTH_PATTERNS is this classifier's sole gate to 'auth', and 'auth' is what
+  // makes classifyAndEnrichCodexError wrap a message as `Codex auth error:` —
+  // the prefix error-formatter.ts trusts unconditionally. A bare "401"/"403"
+  // used to be enough to classify as 'auth', so any mid-turn error whose text
+  // merely contained those digits (a port, a timeout in ms) was misrouted to
+  // "run codex login" and had its retry disabled.
+  test('does not classify a bare "401"/"403" substring as auth', () => {
+    expect(classifyCodexError('connect ECONNREFUSED 127.0.0.1:401')).not.toBe('auth');
+    expect(classifyCodexError('timeout after 401ms')).not.toBe('auth');
+    expect(classifyCodexError('proxy responded with 403')).not.toBe('auth');
+  });
+
+  test('still classifies genuine auth signals as auth', () => {
+    expect(classifyCodexError('Unauthorized')).toBe('auth');
+    expect(classifyCodexError('authentication failed')).toBe('auth');
+    expect(classifyCodexError('invalid token provided')).toBe('auth');
+    expect(classifyCodexError('Your credit balance is too low to access the API')).toBe('auth');
+    // Real-world provider shape: a 401 co-occurring with the word "Unauthorized" —
+    // the word carries the signal, not the digits.
+    expect(classifyCodexError('exceeded retry limit, last status: 401 Unauthorized')).toBe('auth');
+  });
+
+  test('resolves a crash-pattern message carrying a stray digit to the retryable "crash" class, not silently to "unknown" (#2509 R13)', () => {
+    // Not classifying as 'auth' isn't sufficient on its own — shouldRetry =
+    // errorClass === 'rate_limit' || errorClass === 'crash', so a crash-shaped
+    // message must specifically land on 'crash' (retryable), not fall through
+    // to 'unknown' (also non-retryable), or a future reordering of
+    // SUBPROCESS_CRASH_PATTERNS/AUTH_PATTERNS could silently regress retry
+    // eligibility without any test catching it.
+    expect(classifyCodexError('exited with code 401')).toBe('crash');
+  });
+
+  test('does not classify a bare "429" substring as rate_limit (#2509 R11)', () => {
+    expect(classifyCodexError('connect ECONNREFUSED 127.0.0.1:4291')).not.toBe('rate_limit');
+    expect(
+      classifyCodexError('operation timed out after 4293ms while establishing connection')
+    ).not.toBe('rate_limit');
+  });
+
+  test('still classifies genuine rate-limit signals as rate_limit', () => {
+    expect(classifyCodexError('rate limit exceeded')).toBe('rate_limit');
+    expect(classifyCodexError('too many requests, please slow down')).toBe('rate_limit');
+    expect(classifyCodexError('server overloaded')).toBe('rate_limit');
+  });
 });

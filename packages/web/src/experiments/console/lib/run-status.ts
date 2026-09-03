@@ -6,6 +6,8 @@
  * Status classes are kept separate from accent/primary classes: a primary CTA
  * must never collide with the "running" signal.
  */
+import type { Run } from '../primitives/run';
+
 export type RunStatus = 'running' | 'paused' | 'failed' | 'completed' | 'cancelled';
 
 export const statusLabel: Record<RunStatus, string> = {
@@ -16,6 +18,12 @@ export const statusLabel: Record<RunStatus, string> = {
   cancelled: 'Cancelled',
 };
 
+export function runStatusLabel(run: Run): string {
+  if (run.status !== 'paused' || run.wait == null) return statusLabel[run.status];
+  if (run.wait.kind === 'attention') return 'Waiting for action';
+  return run.wait.kind === 'event' ? 'Waiting for event' : 'Waiting until scheduled time';
+}
+
 /**
  * Status → class mappings.
  *
@@ -23,13 +31,14 @@ export const statusLabel: Record<RunStatus, string> = {
  *   running   → blue  (active; pulsing strip)
  *   paused    → amber (waiting for human; pulsing dot)
  *   failed    → red
- *   completed → green (positive close; muted strip, no pulse)
+ *   completed → green (execution reached completion; muted strip, no pulse)
  *   cancelled → grey  (muted, user-stopped)
  *
  * The running blue uses an ad-hoc arbitrary value because the spike's theme
  * introduces `--running` as a new token that isn't in the production
  * `@theme inline` map. Completed reuses the production `--success` (green)
- * at lower opacity so it signals "finished OK" without shouting.
+ * at lower opacity so it signals lifecycle completion without replacing the
+ * separate workflow-authored outcome.
  */
 export const statusStripClass: Record<RunStatus, string> = {
   running:

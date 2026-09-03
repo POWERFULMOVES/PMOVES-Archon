@@ -226,10 +226,8 @@ const ROW_WORKFLOW_STATUS: Record<string, 'running' | 'completed' | 'failed' | '
 /** DB event_type → node-level status, emitted as a `dag_node` SSE event. */
 const ROW_NODE_STATUS: Record<string, 'running' | 'completed' | 'failed' | 'skipped'> = {
   node_started: 'running',
-  step_started: 'running',
   loop_iteration_started: 'running',
   node_completed: 'completed',
-  step_completed: 'completed',
   loop_iteration_completed: 'completed',
   node_failed: 'failed',
   loop_iteration_failed: 'failed',

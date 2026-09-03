@@ -13,7 +13,9 @@ mock.module('@archon/paths', () => ({
 }));
 
 // Mock @archon/core/db/messages
-const mockAddMessage = mock(() => Promise.resolve());
+const mockAddMessage = mock<
+  (...args: Parameters<(typeof import('@archon/core/db/messages'))['addMessage']>) => Promise<void>
+>(async () => {});
 mock.module('@archon/core/db/messages', () => ({
   addMessage: mockAddMessage,
 }));
@@ -346,6 +348,63 @@ describe('MessagePersistence', () => {
         toolCalls?: { duration?: number }[];
       };
       expect(metadata?.toolCalls?.[0]?.duration).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('flush — category persisted in metadata (#2576)', () => {
+    test('persists workflow_result category so reloaded history renders the result card', async () => {
+      // Console's ChatStream gates the workflow-result card on `message.category === 'workflow_result'`.
+      // Before the fix the web adapter dropped `category` at flush time, so the gate was always false
+      // after a reload — exactly the regression the issue reports.
+      persistence.setConversationDbId('conv-1', 'db-uuid-1');
+      const workflowResult = { workflowName: 'review', runId: 'run-123' };
+      persistence.appendText('conv-1', 'result payload', {
+        category: 'workflow_result',
+        workflowResult,
+      });
+
+      await persistence.flush('conv-1');
+
+      expect(mockAddMessage).toHaveBeenCalledTimes(1);
+      const metadata = mockAddMessage.mock.calls[0][3] as {
+        category?: string;
+        workflowResult?: { workflowName: string; runId: string };
+      };
+      expect(metadata?.category).toBe('workflow_result');
+      expect(metadata?.workflowResult).toEqual(workflowResult);
+    });
+
+    test('persists workflow_status category alongside content', async () => {
+      persistence.setConversationDbId('conv-1', 'db-uuid-1');
+      persistence.appendText('conv-1', '🚀 starting', { category: 'workflow_status' });
+
+      await persistence.flush('conv-1');
+
+      expect(mockAddMessage).toHaveBeenCalledTimes(1);
+      const metadata = mockAddMessage.mock.calls[0][3] as { category?: string };
+      expect(metadata?.category).toBe('workflow_status');
+    });
+
+    test('persists workflow_dispatch_status category', async () => {
+      persistence.setConversationDbId('conv-1', 'db-uuid-1');
+      persistence.appendText('conv-1', '✅ done', { category: 'workflow_dispatch_status' });
+
+      await persistence.flush('conv-1');
+
+      const metadata = mockAddMessage.mock.calls[0][3] as { category?: string };
+      expect(metadata?.category).toBe('workflow_dispatch_status');
+    });
+
+    test('omits category key entirely when segment has no category (CLI parity)', async () => {
+      // Mirrors the CLI adapter's conditional spread shape: only set the key when present.
+      persistence.setConversationDbId('conv-1', 'db-uuid-1');
+      persistence.appendText('conv-1', 'plain text');
+
+      await persistence.flush('conv-1');
+
+      expect(mockAddMessage).toHaveBeenCalledTimes(1);
+      const metadata = mockAddMessage.mock.calls[0][3] as Record<string, unknown>;
+      expect('category' in metadata).toBe(false);
     });
   });
 });

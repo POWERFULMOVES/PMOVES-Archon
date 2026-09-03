@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Renovate owns dependency updates for this repository because Dependabot cannot.",
+    "GitHub lists Bun as supported for version updates but NOT for security updates, so the",
+    "config-free security-update path falls back to the npm_and_yarn updater, which cannot read",
+    "bun.lock and fails with dependency_file_not_supported. No .github/dependabot.yml fixes that;",
+    "there is no ecosystem entry that unlocks Dependabot security updates for Bun. Renovate has a",
+    "dedicated bun manager instead, which reads the text bun.lock and the packages/* workspaces.",
+    "Leave Dependabot ALERTS and the dependency graph ENABLED even though Dependabot SECURITY",
+    "UPDATES are turned off: vulnerabilityAlerts reads that feed. osvVulnerabilityAlerts is a",
+    "second input that does not depend on this repository's alert setting - it queries a local OSV",
+    "database - so the two are complementary rather than one being indispensable.",
+    "",
+    "baseBranchPatterns is a product-history guard, not a style preference. Archon was rewritten",
+    "(#957) and the Python-era product was archived rather than deleted. It still lives on",
+    "archive/v1-stable and archive/v1-task-management-rag, which carry python/pyproject.toml,",
+    "archon-ui-main/package.json and their own Dockerfiles - manifests of a product that no longer",
+    "exists. Naming the working branch is what keeps Renovate off them; leaving the key out would",
+    "make that depend on the repository's default-branch setting instead."
+  ],
+  "extends": ["config:recommended"],
+  "baseBranchPatterns": ["dev"],
+  "lockFileMaintenance": {
+    "description": [
+      "Off by Renovate default, and the reason this file exists. 18 of this repository's 24",
+      "vulnerable packages are transitive - nothing declares them, so they can never be the subject",
+      "of a per-package PR however the alerting is configured. They move only when their parents",
+      "move, and regenerating the lockfile is what moves parents."
+    ],
+    "enabled": true
+  },
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "description": [
+        "An override reaches the installed tree WITHOUT passing the range check that governs every",
+        "other route, so a major bump here can force a dependent past its own declared range with",
+        "no error. Live at this commit: msw@2.12.10 declares path-to-regexp ^6.3.0 while the",
+        "override resolves 8.4.2. Patch and minor still flow - that is the class this file exists",
+        "to automate. Note this covers a major that is itself a security fix; those are rare",
+        "(vulnerabilityFixStrategy defaults to 'lowest') and become a human decision too."
+      ],
+      "matchDepTypes": ["overrides"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
+}

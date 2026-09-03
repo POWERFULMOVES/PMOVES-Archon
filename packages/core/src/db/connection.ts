@@ -25,6 +25,19 @@ let database: IDatabase | null = null;
 let dialect: SqlDialect | null = null;
 
 /**
+ * Where the SQLite registry lives when DATABASE_URL is unset.
+ *
+ * Exported because a caller that needs to know whether the registry EXISTS must
+ * test the same path this module opens — deriving it independently means a future
+ * relocation silently answers about the wrong file. `scripts/migrate-state-dir.ts`
+ * is that caller: it skips a read-only lookup when the file is absent, and a stale
+ * path there would send a migration to the wrong destination without erroring.
+ */
+export function getSqliteDbPath(): string {
+  return join(getArchonHome(), 'archon.db');
+}
+
+/**
  * Get or create the database connection
  * Auto-detects PostgreSQL vs SQLite based on DATABASE_URL
  */
@@ -38,7 +51,7 @@ export function getDatabase(): IDatabase {
     database = new PostgresAdapter(process.env.DATABASE_URL);
     dialect = postgresDialect;
   } else {
-    const dbPath = join(getArchonHome(), 'archon.db');
+    const dbPath = getSqliteDbPath();
     getLog().info({ dbPath }, 'db.connection_sqlite_selected');
     database = new SqliteAdapter(dbPath);
     dialect = sqliteDialect;

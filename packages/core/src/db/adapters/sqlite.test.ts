@@ -2,10 +2,12 @@ import { describe, test, expect, afterEach } from 'bun:test';
 import { SqliteAdapter } from './sqlite';
 import { getSchemaSQL } from '../bundled-schema';
 import { APP_VERSION, readSchemaVersion } from '../schema-version';
-import { Database } from 'bun:sqlite';
+import { Database, type Statement } from 'bun:sqlite';
 import { unlinkSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'node:os';
+import { tmpdir } from 'os';
+import { mkdtemp } from 'fs/promises';
+import { trackTempRoots } from '@archon/paths/test-utils';
 
 let currentDbPath = '';
 
@@ -26,6 +28,22 @@ async function insertCodebase(db: SqliteAdapter, id: string): Promise<void> {
   ]);
 }
 
+const trackTempRoot = trackTempRoots();
+
+/**
+ * A fresh on-disk database path for one upgrade fixture, reclaimed after the test.
+ *
+ * A real file, not a `file:...?mode=memory&cache=shared` URI: bun:sqlite opens without
+ * `SQLITE_OPEN_URI`, so SQLite reads such a URI as a literal filename and creates it in
+ * the process cwd — which is how these fixtures used to leave `file:archon-test-sqlite-*`
+ * files under `packages/core/`. The adapter has no URI requirement, and the fixture only
+ * needs a database that survives being reopened.
+ */
+async function upgradeFixturePath(): Promise<string> {
+  const root = trackTempRoot(await mkdtemp(join(tmpdir(), 'archon-core-sqlite-upgrade-')));
+  return join(root, 'archon.db');
+}
+
 /**
  * Produce a database in the state it had BEFORE event_order existed: current
  * schema in every other respect, with the column, its index and its trigger
@@ -34,19 +52,8 @@ async function insertCodebase(db: SqliteAdapter, id: string): Promise<void> {
  * database missing exactly this one column.
  */
 async function makeDbWithoutEventOrder(): Promise<string> {
-  // OS temp dir, not the repo: on Windows bun:sqlite does not always release the
-  // file handle synchronously, so cleanup can hit EBUSY. A stranded file in
-  // tmpdir is harmless and self-cleaning; a stranded file in packages/ is repo
-  // pollution that shows up in everyone's `git status`.
-  const path = join(
-    tmpdir(),
-    `archon-test-sqlite-legacy-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
-  );
-  const seed = new SqliteAdapter(path); // writes the current schema
-  // MUST await: close() is async, and on Windows an unreleased SQLite handle
-  // locks the file, so the Database opened below fails. Harmless on POSIX,
-  // which is why the first version of this test passed locally and failed CI.
-  await seed.close();
+  const path = await upgradeFixturePath();
+  await new SqliteAdapter(path).close(); // writes the current schema
   const raw = new Database(path);
   try {
     raw.run('DROP TRIGGER IF EXISTS remote_agent_workflow_events_assign_order');
@@ -60,10 +67,6 @@ async function makeDbWithoutEventOrder(): Promise<string> {
 
 function columnsOf(path: string, table: string): string[] {
   const raw = new Database(path);
-  // Finalize the statement before closing. On Windows an un-finalized prepared
-  // statement keeps the file handle open past close(), so the afterEach unlink
-  // fails with EBUSY — which is what this test hit on windows-latest while
-  // passing on POSIX.
   const stmt = raw.prepare(`PRAGMA table_info('${table}')`);
   try {
     return (stmt.all() as { name: string }[]).map(c => c.name);
@@ -74,27 +77,6 @@ function columnsOf(path: string, table: string): string[] {
 }
 
 describe('SqliteAdapter upgrade path', () => {
-  let legacyPath = '';
-  afterEach(() => {
-    if (legacyPath) {
-      try {
-        unlinkSync(legacyPath);
-      } catch (e: unknown) {
-        // Tolerate exactly two cases, and nothing else:
-        //   ENOENT — already gone, fine.
-        //   EBUSY  — Windows only. bun:sqlite does not reliably release the file
-        //            handle synchronously on close(), even with statements
-        //            finalized. The fixture is a uniquely-named file in tmpdir,
-        //            so a stranded one is harmless. Tolerated rather than
-        //            swallowed: any other errno still fails the test loudly,
-        //            which is what caught the real leak in the first place.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code !== 'ENOENT' && code !== 'EBUSY') throw e;
-      }
-      legacyPath = '';
-    }
-  });
-
   // Regression: the event_order index and trigger were briefly created inside
   // createSchema(). Both reference a column absent from any database predating
   // it, and CREATE INDEX on a missing column aborts the entire createSchema()
@@ -102,16 +84,16 @@ describe('SqliteAdapter upgrade path', () => {
   // column, never ran. Every existing SQLite install was bricked on upgrade,
   // and the migration that would fix it could never execute.
   test('converges a database that predates event_order', async () => {
-    legacyPath = await makeDbWithoutEventOrder();
-    expect(columnsOf(legacyPath, 'remote_agent_workflow_events')).not.toContain('event_order');
+    const path = await makeDbWithoutEventOrder();
+    expect(columnsOf(path, 'remote_agent_workflow_events')).not.toContain('event_order');
 
     // Must not throw, and must converge.
-    const upgraded = new SqliteAdapter(legacyPath);
+    const upgraded = new SqliteAdapter(path);
     await upgraded.close();
 
-    expect(columnsOf(legacyPath, 'remote_agent_workflow_events')).toContain('event_order');
+    expect(columnsOf(path, 'remote_agent_workflow_events')).toContain('event_order');
 
-    const raw = new Database(legacyPath);
+    const raw = new Database(path);
     const stmt = raw.prepare('SELECT name FROM sqlite_master WHERE name IN (?, ?)');
     let objects: string[];
     try {
@@ -127,6 +109,25 @@ describe('SqliteAdapter upgrade path', () => {
 
     expect(objects).toContain('idx_workflow_events_run_order');
     expect(objects).toContain('remote_agent_workflow_events_assign_order');
+  });
+
+  test('adds the authored outcome column idempotently to an existing workflow-runs table', async () => {
+    const path = await upgradeFixturePath();
+    await new SqliteAdapter(path).close();
+    const raw = new Database(path);
+    try {
+      raw.run('ALTER TABLE remote_agent_workflow_runs DROP COLUMN outcome');
+    } finally {
+      raw.close();
+    }
+    expect(columnsOf(path, 'remote_agent_workflow_runs')).not.toContain('outcome');
+
+    const upgraded = new SqliteAdapter(path);
+    await upgraded.close();
+    const reopened = new SqliteAdapter(path);
+    await reopened.close();
+
+    expect(columnsOf(path, 'remote_agent_workflow_runs')).toContain('outcome');
   });
 });
 
@@ -418,6 +419,78 @@ describe('SqliteAdapter', () => {
       const probe = raw_query(
         dbPath,
         'SELECT COUNT(*) AS n FROM remote_agent_conversations WHERE user_id IS NOT NULL'
+      );
+      expect(probe).toEqual([{ n: 0 }]);
+    });
+
+    /**
+     * Same failure shape, three more columns. `hidden` and `deleted_at` on
+     * conversations and `parent_conversation_id` on workflow_runs are added by
+     * migrateColumns(), so a database created before they existed does not have
+     * them — yet createSchema(), which runs FIRST, was indexing all three. The
+     * adapter constructor threw "no such column: parent_conversation_id" and the
+     * database could not be opened at all. The indexes now live in
+     * migrateColumns() next to their ALTER TABLE.
+     */
+    test('opens a database that predates hidden / deleted_at / parent_conversation_id', () => {
+      const dbPath = join(
+        import.meta.dir,
+        `.test-sqlite-preidx-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
+      );
+      currentDbPath = dbPath;
+
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TABLE remote_agent_codebases (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          name TEXT NOT NULL,
+          default_cwd TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE remote_agent_conversations (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          platform_type TEXT NOT NULL,
+          platform_conversation_id TEXT NOT NULL,
+          codebase_id TEXT,
+          cwd TEXT,
+          isolation_env_id TEXT,
+          last_activity_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE remote_agent_workflow_runs (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          workflow_name TEXT NOT NULL,
+          conversation_id TEXT,
+          codebase_id TEXT,
+          status TEXT DEFAULT 'pending',
+          user_message TEXT,
+          metadata TEXT DEFAULT '{}',
+          last_activity_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      raw.close();
+
+      db = new SqliteAdapter(dbPath);
+
+      const conversationCols = raw_pragma(dbPath, 'remote_agent_conversations');
+      expect(conversationCols).toContain('hidden');
+      expect(conversationCols).toContain('deleted_at');
+
+      const workflowRunCols = raw_pragma(dbPath, 'remote_agent_workflow_runs');
+      expect(workflowRunCols).toContain('parent_conversation_id');
+
+      // The upgrade must also land the indexes, not merely survive.
+      const indexes = raw_indexes(dbPath);
+      expect(indexes).toContain('idx_conversations_hidden');
+      expect(indexes).toContain('idx_conversations_codebase');
+      expect(indexes).toContain('idx_workflow_runs_parent_conv');
+
+      const probe = raw_query(
+        dbPath,
+        'SELECT COUNT(*) AS n FROM remote_agent_workflow_runs WHERE parent_conversation_id IS NOT NULL'
       );
       expect(probe).toEqual([{ n: 0 }]);
     });
@@ -716,6 +789,71 @@ describe('SqliteAdapter', () => {
       expect(raw_pragma(currentDbPath, 'remote_agent_workflow_runs')).toContain('output_root');
       expect(getSchemaSQL()).toContain('output_root');
     });
+
+    test('authored outcome is nullable and constrained identically in both schema sources', async () => {
+      db = createTestDb();
+      await insertCodebase(db, 'cb-outcome');
+      await db.query(
+        `INSERT INTO remote_agent_conversations
+           (id, platform_type, platform_conversation_id, codebase_id)
+         VALUES ($1, $2, $3, $4)`,
+        ['conv-outcome', 'web', 'thread-outcome', 'cb-outcome']
+      );
+      await db.query(
+        `INSERT INTO remote_agent_workflow_runs
+           (id, conversation_id, workflow_name, user_message, outcome)
+         VALUES ($1, $2, $3, $4, $5)`,
+        ['run-outcome', 'conv-outcome', 'verify', 'test', 'succeeded']
+      );
+      const rows = await db.query<{ outcome: string | null }>(
+        'SELECT outcome FROM remote_agent_workflow_runs WHERE id = $1',
+        ['run-outcome']
+      );
+      expect(rows.rows[0]?.outcome).toBe('succeeded');
+      await expect(
+        db.query(
+          `INSERT INTO remote_agent_workflow_runs
+             (id, conversation_id, workflow_name, user_message, outcome)
+           VALUES ($1, $2, $3, $4, $5)`,
+          ['run-bad-outcome', 'conv-outcome', 'verify', 'test', 'unknown']
+        )
+      ).rejects.toThrow();
+      expect(getSchemaSQL()).toContain("CHECK (outcome IN ('succeeded', 'failed'))");
+    });
+
+    test('run-scoped session handles cascade with their workflow run in both schema shapes', async (): Promise<void> => {
+      db = createTestDb();
+      await insertCodebase(db, 'cb-session-cascade');
+      await db.query(
+        `INSERT INTO remote_agent_conversations
+           (id, platform_type, platform_conversation_id, codebase_id)
+         VALUES ($1, $2, $3, $4)`,
+        ['conv-session-cascade', 'web', 'thread-session-cascade', 'cb-session-cascade']
+      );
+      await db.query(
+        `INSERT INTO remote_agent_workflow_runs
+           (id, conversation_id, workflow_name, user_message)
+         VALUES ($1, $2, $3, $4)`,
+        ['run-session-cascade', 'conv-session-cascade', 'lineage', 'test']
+      );
+      await db.query(
+        `INSERT INTO remote_agent_workflow_run_node_sessions
+           (workflow_run_id, node_id, provider, provider_session_id)
+         VALUES ($1, $2, $3, $4)`,
+        ['run-session-cascade', 'scope', 'claude', 'session-secret']
+      );
+
+      await db.query('DELETE FROM remote_agent_workflow_runs WHERE id = $1', [
+        'run-session-cascade',
+      ]);
+      const rows = await db.query<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM remote_agent_workflow_run_node_sessions'
+      );
+      expect(Number(rows.rows[0]?.count)).toBe(0);
+      expect(getSchemaSQL()).toMatch(
+        /remote_agent_workflow_run_node_sessions[\s\S]*workflow_run_id UUID NOT NULL REFERENCES remote_agent_workflow_runs\(id\) ON DELETE CASCADE/
+      );
+    });
   });
 
   /**
@@ -937,3 +1075,73 @@ function raw_query(dbPath: string, sql: string): unknown[] {
     raw.close();
   }
 }
+
+describe('SqliteAdapter native-resource finalization (#2875)', () => {
+  let adapter: SqliteAdapter | undefined;
+
+  afterEach(async () => {
+    if (adapter) {
+      await adapter.close();
+      adapter = undefined;
+    }
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        unlinkSync(currentDbPath + suffix);
+      } catch {
+        /* may not exist */
+      }
+    }
+  });
+
+  test('finalizes every statement it prepares by the time close() resolves', async () => {
+    const originalPrepare = Database.prototype.prepare;
+    let prepared = 0;
+    let finalized = 0;
+    Object.defineProperty(Database.prototype, 'prepare', {
+      configurable: true,
+      value(this: Database, ...args: Parameters<typeof originalPrepare>) {
+        const stmt: Statement = originalPrepare.apply(this, args);
+        prepared++;
+        const nativeFinalize = stmt.finalize.bind(stmt);
+        stmt.finalize = () => {
+          finalized++;
+          return nativeFinalize();
+        };
+        return stmt;
+      },
+    });
+
+    try {
+      adapter = createTestDb();
+      await insertCodebase(adapter, 'cb-finalize');
+      await adapter.query('SELECT id FROM remote_agent_codebases WHERE id = $1', ['cb-finalize']);
+
+      // A statement that prepares cleanly but fails on execution (primary key
+      // violation) must still be finalized (this is the finally-branch of the fix).
+      await expect(insertCodebase(adapter, 'cb-finalize')).rejects.toThrow();
+
+      await adapter.close();
+      adapter = undefined;
+
+      expect(prepared).toBeGreaterThan(0);
+      expect(finalized).toBe(prepared);
+    } finally {
+      Object.defineProperty(Database.prototype, 'prepare', {
+        configurable: true,
+        value: originalPrepare,
+      });
+    }
+  });
+
+  test('close() leaves the database file immediately deletable', async () => {
+    adapter = createTestDb();
+    await insertCodebase(adapter, 'cb-delete');
+    await adapter.query('SELECT id FROM remote_agent_codebases WHERE id = $1', ['cb-delete']);
+    await adapter.close();
+    adapter = undefined;
+
+    // Passes trivially where POSIX unlink tolerates open handles, but on
+    // windows-latest this fails with EBUSY while any statement is unfinalized.
+    unlinkSync(currentDbPath);
+  });
+});

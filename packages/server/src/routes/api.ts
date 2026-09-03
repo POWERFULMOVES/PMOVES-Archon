@@ -9,7 +9,7 @@ import type { WebAdapter } from '../adapters/web';
 import { boundMetadataToolOutputs } from '../adapters/web/truncate';
 import { rm, readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
-import { normalize, join, sep, basename } from 'path';
+import { normalize, join, sep, basename, dirname, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import type { Context } from 'hono';
 import type {
@@ -62,6 +62,9 @@ import {
   setUserDefault,
 } from '@archon/core';
 import type { UserTiersPatch, UserAliasesPatch, AliasesPatch } from '@archon/core';
+import { parseWorkflowRunConfig } from '@archon/core/config';
+import type { WorkflowRunConfigInput } from '@archon/workflows/schemas/run-config';
+import type { EffortLevel } from '@archon/workflows/schemas/effort';
 import { findRepoRoot, removeWorktree, toRepoPath, toWorktreePath } from '@archon/git';
 import {
   createLogger,
@@ -72,9 +75,8 @@ import {
   getArchonWorkspacesPath,
   getHomeCommandsPath,
   getHomeWorkflowsPath,
-  resolveProjectStorageKey,
-  getRunArtifactsDirForKey,
   getRunArtifactsDirForRoot,
+  resolveRunStorageRoot,
   isInsideArchonHome,
   getArchonHome,
   isDocker,
@@ -84,7 +86,10 @@ import {
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
 } from '@archon/paths';
-import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discovery';
+import {
+  discoverWorkflowsWithConfig,
+  isValidWorkflowFolderSegment,
+} from '@archon/workflows/workflow-discovery';
 import { parseWorkflow } from '@archon/workflows/loader';
 import { isValidCommandName, isValidWorkflowName } from '@archon/workflows/command-validation';
 import { BUNDLED_WORKFLOWS, BUNDLED_COMMANDS, isBinaryBuild } from '@archon/workflows/defaults';
@@ -93,17 +98,165 @@ import {
   TERMINAL_WORKFLOW_STATUSES,
   isApprovalContext,
   isGateResolved,
+  isWorkflowWaitContext,
+  runAttention,
 } from '@archon/workflows/schemas/workflow-run';
 import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import type { MessageRow } from '@archon/core/schemas/message';
 import type { DashboardWorkflowRun } from '@archon/core/schemas/workflow-run';
 import { findMarkdownFilesRecursive } from '@archon/core/utils/commands';
+import { resumeWorkflowRunFromServer } from '../services/workflow-resume-service';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
   if (!cachedLog) cachedLog = createLogger('api');
   return cachedLog;
+}
+
+interface RawWorkflowFile {
+  absolutePath: string;
+  filename: string;
+  packaged: boolean;
+  parsed: ReturnType<typeof parseWorkflow>;
+}
+
+async function tryReadWorkflowAt(dir: string, name: string): Promise<RawWorkflowFile | null> {
+  const acceptedNames = new Set(name.includes('/') ? [name, basename(name)] : [name]);
+  for (const ext of ['yaml', 'yml']) {
+    const filename = `${name}.${ext}`;
+    const absolutePath = join(dir, filename);
+    try {
+      const content = await readFile(absolutePath, 'utf-8');
+      const parsed = parseWorkflow(content, filename);
+      if (parsed.workflow !== null && !acceptedNames.has(parsed.workflow.name)) continue;
+      return { absolutePath, filename, packaged: false, parsed };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return null;
+}
+
+async function findPackagedWorkflowAt(
+  workflowsRoot: string,
+  name: string
+): Promise<RawWorkflowFile | null> {
+  let packs: string[];
+  try {
+    packs = await readdir(workflowsRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+
+  let match: RawWorkflowFile | null = null;
+  for (const pack of packs.sort((a, b) => a.localeCompare(b))) {
+    if (!isValidWorkflowFolderSegment(pack)) continue;
+    const packPath = join(workflowsRoot, pack);
+    try {
+      if (!(await stat(packPath)).isDirectory()) continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+
+    let workflowFolders: string[];
+    try {
+      workflowFolders = await readdir(packPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const workflowFolder of workflowFolders.sort((a, b) => a.localeCompare(b))) {
+      if (!isValidWorkflowFolderSegment(workflowFolder)) continue;
+      const workflowPath = join(packPath, workflowFolder);
+      try {
+        if (!(await stat(workflowPath)).isDirectory()) continue;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+
+      let workflowEntries: string[];
+      try {
+        workflowEntries = await readdir(workflowPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      const yamlFiles = workflowEntries
+        .filter(entry => entry.endsWith('.yaml') || entry.endsWith('.yml'))
+        .sort((a, b) => a.localeCompare(b));
+      if (yamlFiles.length !== 1) continue;
+
+      const yamlFilename = yamlFiles[0];
+      const absolutePath = join(workflowPath, yamlFilename);
+      let content: string;
+      try {
+        content = await readFile(absolutePath, 'utf-8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      const parsed = parseWorkflow(content, yamlFilename);
+      const yamlStem = yamlFilename.replace(/\.ya?ml$/, '');
+      const isMalformedTarget =
+        parsed.workflow === null && (yamlStem === name || workflowFolder === name);
+      if (parsed.workflow?.name !== name && !isMalformedTarget) continue;
+      if (match !== null) {
+        throw new Error(`Multiple packaged workflows declare the name '${name}'`);
+      }
+      match = {
+        absolutePath,
+        filename: `${pack}/${workflowFolder}/${yamlFilename}`,
+        packaged: true,
+        parsed,
+      };
+    }
+  }
+  return match;
+}
+
+async function findWorkflowAt(
+  workflowsRoot: string,
+  name: string
+): Promise<RawWorkflowFile | null> {
+  return (
+    (await tryReadWorkflowAt(workflowsRoot, name)) ??
+    (await findPackagedWorkflowAt(workflowsRoot, name))
+  );
+}
+
+function isBundledWorkflowsRoot(workflowsRoot: string): boolean {
+  return resolve(workflowsRoot) === resolve(dirname(getDefaultWorkflowsPath()));
+}
+
+function findBundledWorkflow(
+  name: string
+): { filename: string; parsed: ReturnType<typeof parseWorkflow> } | null {
+  const direct = BUNDLED_WORKFLOWS[name];
+  if (direct !== undefined) {
+    const filename = `${name}.yaml`;
+    const parsed = parseWorkflow(direct, filename);
+    if (parsed.error !== null || parsed.workflow?.name === name) {
+      return { filename, parsed };
+    }
+  }
+
+  let match: {
+    filename: string;
+    parsed: ReturnType<typeof parseWorkflow>;
+  } | null = null;
+  for (const [filenameStem, content] of Object.entries(BUNDLED_WORKFLOWS)) {
+    if (filenameStem === name) continue;
+    const filename = `${filenameStem}.yaml`;
+    const parsed = parseWorkflow(content, filename);
+    if (parsed.workflow?.name !== name) continue;
+    if (match !== null) throw new Error(`Multiple bundled workflows declare the name '${name}'`);
+    match = { filename, parsed };
+  }
+  return match;
 }
 import * as conversationDb from '@archon/core/db/conversations';
 import * as codebaseDb from '@archon/core/db/codebases';
@@ -117,6 +270,8 @@ import {
   abandonWorkflow,
   approveWorkflow,
   rejectWorkflow,
+  respondToWorkflow,
+  assertRespondable,
   resetWorkflowNodeSessions,
 } from '@archon/core/operations/workflow-operations';
 import { getAuth, isWebAuthEnabled, getSignupMode, isApiGateEnabled } from '../auth';
@@ -140,6 +295,7 @@ import {
   workflowRunsQuerySchema,
   approveWorkflowRunBodySchema,
   rejectWorkflowRunBodySchema,
+  respondWorkflowRunBodySchema,
   resetWorkflowNodeSessionsParamsSchema,
   resetWorkflowNodeSessionsQuerySchema,
   resetWorkflowNodeSessionsResponseSchema,
@@ -179,9 +335,11 @@ import {
 } from './schemas/config.schemas';
 import {
   TIER_NAMES,
+  isTierName,
   isEffortValidForProvider,
   validEffortsForProvider,
 } from '@archon/workflows/model-validation';
+import type { RunModelOverrides } from '@archon/workflows/model-validation';
 import {
   providerListResponseSchema,
   piModelListResponseSchema,
@@ -253,36 +411,16 @@ type WorkflowSource = 'project' | 'bundled' | 'global';
  * no-remote local repo (bare basename) — so artifact browsing was silently dead
  * for two of the three project kinds Archon can register.
  *
- * Order mirrors the executor: a persisted `output_root` wins outright (a
- * codebase renamed since the run must not orphan its artifacts, #1192);
- * otherwise the shared `resolveProjectStorageKey` derives the key. Returns null
- * only when there is no codebase row to derive from at all — callers surface
- * that as an explicit 404 rather than an empty success.
- *
- * The `cwd` argument is `codebase.default_cwd` here, while the executor passes
- * the RUN's cwd (which inside a worktree is the worktree path). That only
- * differs for the `{ kind: 'cwd' }` fallback, and every run since #2200
- * persists `output_root`, so this path never re-derives for a modern run.
+ * The shared root resolver owns trusted persisted-root precedence and
+ * relocation fallback; this route only composes the artifact directory.
  */
 function resolveRunArtifactDir(
   run: { output_root?: string | null },
   codebase: { kind?: string | null; name: string; default_cwd: string } | null,
   runId: string
 ): string | null {
-  // The containment check belongs INSIDE this branch, not after it. A persisted
-  // root is a cache of where the run wrote, not an authority: move ARCHON_HOME
-  // (machine migration, restored backup, the documented ARCHON_DATA split) and
-  // every stamped root is suddenly out-of-tree. Guarding after the fact would
-  // hard-400 every historical run even when its artifacts sit re-derivable and
-  // physically present under the new home — and `output_root` is write-once via
-  // COALESCE, so the app could never clear the column to recover. Falling
-  // through to re-derivation keeps the tree relocatable, which is how it behaved
-  // before the column existed. Matches `continue.ts`.
-  if (run.output_root && isInsideArchonHome(run.output_root)) {
-    return getRunArtifactsDirForRoot(run.output_root, runId);
-  }
-  if (!codebase?.name) return null;
-  return getRunArtifactsDirForKey(resolveProjectStorageKey(codebase, codebase.default_cwd), runId);
+  const root = resolveRunStorageRoot(run, codebase);
+  return root ? getRunArtifactsDirForRoot(root, runId) : null;
 }
 
 // =========================================================================
@@ -695,9 +833,15 @@ const runWorkflowRoute = createRoute({
   tags: ['Workflows'],
   summary: 'Run a workflow via the orchestrator (JSON or multipart with file uploads)',
   description:
-    'Accepts `application/json` with `{ conversationId, message }` or ' +
-    '`multipart/form-data` with `conversationId`, `message`, and optional file ' +
-    'attachments (max 5 files, 10 MB each).',
+    'Accepts `application/json` with `{ conversationId, message, inputs?, config?, tiers?, aliases? }` or ' +
+    '`multipart/form-data` with `conversationId`, `message`, optional `inputs` and `config` fields ' +
+    'holding their objects JSON-encoded, optional `tiers` and `aliases` JSON object fields, ' +
+    'and optional file attachments (max 5 files, ' +
+    "10 MB each). `inputs` supplies values for the workflow's declared `inputs:` " +
+    '(#2554); it is validated against the declaration before any worktree, clone, or AI ' +
+    'cost, so a missing required input or an undeclared key is refused up front. `config` ' +
+    'supplies a sparse runtime layer; `tiers` and `aliases` rebind named model presets above it. ' +
+    'Caller-supplied filesystem config paths are rejected.',
   request: {
     params: z.object({ name: z.string() }),
   },
@@ -818,6 +962,39 @@ const resumeWorkflowRunRoute = createRoute({
   },
 });
 
+const signalWorkflowWaitBodySchema = z.object({
+  event: z.string().min(1),
+  resumeAt: z.string().datetime(),
+  payload: z.unknown().optional(),
+});
+
+const signalWorkflowWaitRoute = createRoute({
+  method: 'post',
+  path: '/api/workflows/runs/{runId}/signal',
+  tags: ['Workflows'],
+  summary: 'Signal the exact external event awaited by a paused workflow run',
+  request: {
+    params: z.object({ runId: z.string() }),
+    body: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: signalWorkflowWaitBodySchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: workflowRunActionResponseSchema } },
+      description: 'Signal accepted; the scheduler will resume the workflow shortly',
+    },
+    400: jsonError('Run is not waiting on this event'),
+    404: jsonError('Not found'),
+    500: jsonError('Server error'),
+  },
+});
+
 const abandonWorkflowRunRoute = createRoute({
   method: 'post',
   path: '/api/workflows/runs/{runId}/abandon',
@@ -868,6 +1045,26 @@ const rejectWorkflowRunRoute = createRoute({
     200: {
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
       description: 'Rejected',
+    },
+    400: jsonError('Bad request'),
+    404: jsonError('Not found'),
+    500: jsonError('Server error'),
+  },
+});
+
+const respondWorkflowRunRoute = createRoute({
+  method: 'post',
+  path: '/api/workflows/runs/{runId}/respond',
+  tags: ['Workflows'],
+  summary: "Resolve a paused workflow run with any of the gate's declared decisions",
+  request: {
+    params: z.object({ runId: z.string() }),
+    body: { content: { 'application/json': { schema: respondWorkflowRunBodySchema } } },
+  },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: workflowRunActionResponseSchema } },
+      description: 'Responded',
     },
     400: jsonError('Bad request'),
     404: jsonError('Not found'),
@@ -1402,6 +1599,80 @@ export function registerApiRoutes(
   }
 
   /**
+   * Validate a run request's declared-inputs map (#2554): a flat object whose every
+   * value is a string, which is exactly the shape `readSubrunMetadata` will accept back
+   * off the run row. Refuse anything else here rather than let it be persisted into a
+   * shape the engine silently reads as absent.
+   *
+   * An empty object resolves to `undefined` so a caller sending `{}` is treated as
+   * having supplied nothing, taking every declared default.
+   */
+  function parseRunInputsField(
+    raw: unknown
+  ): { ok: true; inputs?: Record<string, string> } | { ok: false; error: string } {
+    if (raw === undefined || raw === null) return { ok: true };
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: 'inputs must be an object mapping input names to strings' };
+    }
+    const entries = Object.entries(raw as Record<string, unknown>);
+    const badKey = entries.find(([, value]) => typeof value !== 'string')?.[0];
+    if (badKey !== undefined) {
+      return { ok: false, error: `inputs value for '${badKey}' must be a string` };
+    }
+    return {
+      ok: true,
+      inputs: entries.length > 0 ? (raw as Record<string, string>) : undefined,
+    };
+  }
+
+  function parseRunModelOverridesFields(
+    rawTiers: unknown,
+    rawAliases: unknown
+  ): { ok: true; overrides?: RunModelOverrides } | { ok: false; error: string } {
+    const parseMap = (
+      raw: unknown,
+      label: 'tiers' | 'aliases'
+    ): { ok: true; value?: Record<string, string> } | { ok: false; error: string } => {
+      if (raw === undefined || raw === null) return { ok: true };
+      if (typeof raw !== 'object' || Array.isArray(raw)) {
+        return { ok: false, error: `${label} must be an object mapping names to model specs` };
+      }
+      const entries = Object.entries(raw as Record<string, unknown>);
+      for (const [name, spec] of entries) {
+        if (typeof spec !== 'string' || spec.trim().length === 0) {
+          return { ok: false, error: `${label} value for '${name}' must be a non-empty string` };
+        }
+        if (label === 'tiers' && !isTierName(name)) {
+          return {
+            ok: false,
+            error: `Invalid tier '${name}'. Supported tiers: ${TIER_NAMES.join(', ')}`,
+          };
+        }
+        if (label === 'aliases' && !name.startsWith('@')) {
+          return { ok: false, error: `Alias '${name}' must start with '@'` };
+        }
+      }
+      return {
+        ok: true,
+        value: entries.length > 0 ? (raw as Record<string, string>) : undefined,
+      };
+    };
+
+    const tiers = parseMap(rawTiers, 'tiers');
+    if (!tiers.ok) return tiers;
+    const aliases = parseMap(rawAliases, 'aliases');
+    if (!aliases.ok) return aliases;
+    if (!tiers.value && !aliases.value) return { ok: true };
+    return {
+      ok: true,
+      overrides: {
+        ...(tiers.value ? { tiers: tiers.value } : {}),
+        ...(aliases.value ? { aliases: aliases.value } : {}),
+      } as RunModelOverrides,
+    };
+  }
+
+  /**
    * Validate that a caller-supplied `cwd` is rooted at a registered codebase path.
    * This prevents path traversal — callers cannot read/write outside known project roots.
    */
@@ -1799,7 +2070,7 @@ export function registerApiRoutes(
   /** Validate a tier/alias entry's provider + effort. Returns an error message or null. */
   function validatePresetEntry(
     label: string,
-    entry: { provider: string; model: string; effort?: string }
+    entry: { provider: string; model: string; effort?: EffortLevel }
   ): string | null {
     if (!isRegisteredProvider(entry.provider)) {
       return `Unknown provider '${entry.provider}' for ${label}. Available: ${getProviderInfoList()
@@ -1826,11 +2097,10 @@ export function registerApiRoutes(
     return null;
   }
 
-  /** Clean a validated entry — drop `thinking` (no UI/CLI surface), keep effort. */
-  function toCleanEntry(entry: { provider: string; model: string; effort?: string }): {
+  function toCleanEntry(entry: { provider: string; model: string; effort?: EffortLevel }): {
     provider: string;
     model: string;
-    effort?: string;
+    effort?: EffortLevel;
   } {
     return {
       provider: entry.provider,
@@ -2181,28 +2451,33 @@ export function registerApiRoutes(
    * `workflowRunCommand({ resume: true })`; this is the web-side equivalent.
    *
    * Returns `true` when a resume dispatch was initiated, `false` otherwise (no
-   * parent conversation on the run, parent conversation deleted, parent was on
-   * a non-web platform, or dispatch threw). Failures are non-fatal: the gate
-   * decision is recorded regardless; when this returns `false` the response
-   * text instructs the user to re-run the workflow command.
+   * usable path to resume the run — see below — parent conversation deleted,
+   * parent was on a non-web platform, or dispatch threw). Failures are
+   * non-fatal: the gate decision is recorded regardless; when this returns
+   * `false` the response text instructs the user to re-run the workflow
+   * command.
    *
-   * **Cross-adapter guard**: only web-sourced parents qualify.
+   * **No parent conversation at all** (`parent_conversation_id` is `NULL` —
+   * every CLI-launched run): falls back to `resumeWorkflowRunFromServer`, which
+   * executes the run directly with no conversation involved (#2008).
+   *
+   * **Cross-adapter guard**: a run WITH a parent conversation only
+   * auto-resumes through the web dispatch when that parent is web-sourced.
    * `dispatchToOrchestrator` is wired to the web adapter + its lock manager,
    * so a Slack / Telegram / GitHub / Discord run being approved from the
    * dashboard must not route through it — the Slack thread would never see
    * the resumed output. Non-web parents skip auto-resume and the originating
-   * platform's own re-run flow applies.
+   * platform's own re-run flow applies; this branch is unchanged by #2008.
    */
   async function tryAutoResumeAfterGate(
     run: WorkflowRun,
-    action: 'approve' | 'reject',
+    action: 'approve' | 'reject' | 'respond',
     // Identity of the user who approved/rejected the gate. The resumed chat
     // turn executes as THIS user (sender-first, #1976/#1982) — without it the
     // dispatch would fall back to the conversation creator's prefs/credentials.
     // Undefined on solo installs (no web identity) → creator fallback applies.
     gateActorUserId?: string
   ): Promise<boolean> {
-    if (!run.parent_conversation_id) return false;
     // Literal event names per action — greppable for ops tooling. Keeping the
     // branch explicit rather than templating avoids the earlier 3-segment
     // `api.workflow_*.dispatched` shape that broke `{domain}.{action}_{state}`.
@@ -2214,14 +2489,40 @@ export function registerApiRoutes(
               'api.workflow_approve_auto_resume_skipped_no_platform_conv' as const,
             skippedNonWebParent: 'api.workflow_approve_auto_resume_skipped_non_web_parent' as const,
             failed: 'api.workflow_approve_auto_resume_failed' as const,
+            headlessDispatched: 'api.workflow_approve_auto_resume_headless_dispatched' as const,
+            headlessSkipped: 'api.workflow_approve_auto_resume_headless_skipped' as const,
           }
-        : {
-            dispatched: 'api.workflow_reject_auto_resume_dispatched' as const,
-            skippedNoPlatformConv:
-              'api.workflow_reject_auto_resume_skipped_no_platform_conv' as const,
-            skippedNonWebParent: 'api.workflow_reject_auto_resume_skipped_non_web_parent' as const,
-            failed: 'api.workflow_reject_auto_resume_failed' as const,
-          };
+        : action === 'reject'
+          ? {
+              dispatched: 'api.workflow_reject_auto_resume_dispatched' as const,
+              skippedNoPlatformConv:
+                'api.workflow_reject_auto_resume_skipped_no_platform_conv' as const,
+              skippedNonWebParent:
+                'api.workflow_reject_auto_resume_skipped_non_web_parent' as const,
+              failed: 'api.workflow_reject_auto_resume_failed' as const,
+              headlessDispatched: 'api.workflow_reject_auto_resume_headless_dispatched' as const,
+              headlessSkipped: 'api.workflow_reject_auto_resume_headless_skipped' as const,
+            }
+          : {
+              dispatched: 'api.workflow_respond_auto_resume_dispatched' as const,
+              skippedNoPlatformConv:
+                'api.workflow_respond_auto_resume_skipped_no_platform_conv' as const,
+              skippedNonWebParent:
+                'api.workflow_respond_auto_resume_skipped_non_web_parent' as const,
+              failed: 'api.workflow_respond_auto_resume_failed' as const,
+              headlessDispatched: 'api.workflow_respond_auto_resume_headless_dispatched' as const,
+              headlessSkipped: 'api.workflow_respond_auto_resume_headless_skipped' as const,
+            };
+    if (!run.parent_conversation_id) {
+      // No parent conversation to dispatch a chat message through at all —
+      // every CLI-launched run (#2008). Execute directly instead of skipping.
+      const headlessResumed = await resumeWorkflowRunFromServer(run, gateActorUserId);
+      getLog().info(
+        { runId: run.id, workflowName: run.workflow_name },
+        headlessResumed ? events.headlessDispatched : events.headlessSkipped
+      );
+      return headlessResumed;
+    }
     try {
       const parentConv = await conversationDb.getConversationById(run.parent_conversation_id);
       const platformConvId = parentConv?.platform_conversation_id;
@@ -3014,7 +3315,11 @@ export function registerApiRoutes(
 
       return c.json({
         workflows: result.workflows.map(ws => ({
-          workflow: ws.workflow,
+          // Display shows what the AUTHOR wrote. Composition collapses workflow-level
+          // node config onto the nodes and removes it (#1764), so the declared values are
+          // layered back over the definition for this listing only — the console reads
+          // `workflow.provider` to label a card, and execution never reads this response.
+          workflow: Object.assign({}, ws.workflow, ws.declared),
           source: ws.source,
           // Keys the engine dropped from this YAML (#2213) — the console is the
           // surface most authors edit workflows on, so it has to carry them.
@@ -3036,8 +3341,8 @@ export function registerApiRoutes(
   // POST /api/workflows/:name/run - Run a workflow via the orchestrator
   //
   // Accepts either:
-  //   - application/json: { conversationId, message }
-  //   - multipart/form-data: conversationId + message + files[] (≤5, ≤10MB each)
+  //   - application/json: { conversationId, message, inputs?, tiers?, aliases? }
+  //   - multipart/form-data: those maps JSON-encoded + files[] (≤5, ≤10MB each)
   //
   // Multipart matches /api/conversations/:id/message so the console's draft
   // run input can attach screenshots / stack traces / paste-blobs the same
@@ -3051,6 +3356,12 @@ export function registerApiRoutes(
 
     let message: string;
     let conversationId: string;
+    let workflowInputs: Record<string, string> | undefined;
+    let workflowModelOverrides: RunModelOverrides | undefined;
+    let workflowRunConfig: WorkflowRunConfigInput | undefined;
+    // Between-run continuation (#2747): run-id only — no name-based newest-wins.
+    let adoptRunId: string | undefined;
+    let supersedesRunId: string | undefined;
     let savedFiles: AttachedFile[] = [];
     let uploadDir = '';
 
@@ -3076,6 +3387,80 @@ export function registerApiRoutes(
       message = rawMessage;
       conversationId = rawConv;
 
+      if (body.configPath !== undefined) {
+        return apiError(c, 400, 'configPath is not supported; send validated config content');
+      }
+
+      // Declared inputs (#2554). A form field can only be a string, so the map travels
+      // JSON-encoded. A malformed field is refused rather than ignored — silently
+      // dropping it would start the run without the values the caller thought it sent.
+      const rawInputs = body.inputs;
+      if (rawInputs !== undefined) {
+        if (typeof rawInputs !== 'string') {
+          return apiError(c, 400, 'inputs must be a JSON-encoded object of string values');
+        }
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(rawInputs);
+        } catch (parseErr: unknown) {
+          getLog().warn({ err: parseErr, workflowName }, 'run_workflow.inputs_parse_failed');
+          return apiError(c, 400, 'inputs must be a JSON-encoded object of string values');
+        }
+        const parsed = parseRunInputsField(decoded);
+        if (!parsed.ok) return apiError(c, 400, parsed.error);
+        workflowInputs = parsed.inputs;
+      }
+
+      const decodeObjectField = (
+        raw: string | File | (string | File)[] | undefined,
+        label: 'tiers' | 'aliases'
+      ): { ok: true; value?: unknown } | { ok: false; error: string } => {
+        if (raw === undefined) return { ok: true };
+        if (typeof raw !== 'string') {
+          return { ok: false, error: `${label} must be a JSON-encoded object` };
+        }
+        try {
+          return { ok: true, value: JSON.parse(raw) as unknown };
+        } catch (parseErr: unknown) {
+          getLog().warn(
+            { err: parseErr, workflowName, field: label },
+            'run_workflow.model_overrides_parse_failed'
+          );
+          return { ok: false, error: `${label} must be a JSON-encoded object` };
+        }
+      };
+      const decodedTiers = decodeObjectField(body.tiers, 'tiers');
+      if (!decodedTiers.ok) return apiError(c, 400, decodedTiers.error);
+      const decodedAliases = decodeObjectField(body.aliases, 'aliases');
+      if (!decodedAliases.ok) return apiError(c, 400, decodedAliases.error);
+      const parsedOverrides = parseRunModelOverridesFields(
+        decodedTiers.value,
+        decodedAliases.value
+      );
+      if (!parsedOverrides.ok) return apiError(c, 400, parsedOverrides.error);
+      workflowModelOverrides = parsedOverrides.overrides;
+
+      if (body.config !== undefined) {
+        if (typeof body.config !== 'string') {
+          return apiError(c, 400, 'config must be a JSON-encoded object');
+        }
+        let decodedConfig: unknown;
+        try {
+          decodedConfig = JSON.parse(body.config) as unknown;
+        } catch (parseErr: unknown) {
+          getLog().warn({ err: parseErr, workflowName }, 'run_workflow.config_parse_failed');
+          return apiError(c, 400, 'config must be a JSON-encoded object');
+        }
+        try {
+          workflowRunConfig = parseWorkflowRunConfig(decodedConfig, {
+            kind: 'http',
+            label: 'inline',
+          });
+        } catch (error) {
+          return apiError(c, 400, (error as Error).message);
+        }
+      }
+
       const rawFiles = body.files;
       const fileList: (string | File)[] = Array.isArray(rawFiles)
         ? rawFiles
@@ -3097,7 +3482,17 @@ export function registerApiRoutes(
         );
       }
     } else {
-      let body: { conversationId?: unknown; message?: unknown };
+      let body: {
+        conversationId?: unknown;
+        message?: unknown;
+        inputs?: unknown;
+        tiers?: unknown;
+        aliases?: unknown;
+        config?: unknown;
+        configPath?: unknown;
+        adopt_run_id?: unknown;
+        supersedes_run_id?: unknown;
+      };
       try {
         body = await c.req.json();
       } catch (parseErr: unknown) {
@@ -3109,6 +3504,40 @@ export function registerApiRoutes(
       }
       if (typeof body.message !== 'string' || !body.message) {
         return apiError(c, 400, 'message must be a non-empty string');
+      }
+      if (body.configPath !== undefined) {
+        return apiError(c, 400, 'configPath is not supported; send validated config content');
+      }
+      const parsed = parseRunInputsField(body.inputs);
+      if (!parsed.ok) return apiError(c, 400, parsed.error);
+      workflowInputs = parsed.inputs;
+      for (const [field, target] of [
+        ['adopt_run_id', 'adopt'],
+        ['supersedes_run_id', 'supersede'],
+      ] as const) {
+        const raw = body[field];
+        if (raw === undefined) continue;
+        if (typeof raw !== 'string' || !raw) {
+          return apiError(c, 400, `${field} must be a non-empty run id`);
+        }
+        if (target === 'adopt') adoptRunId = raw;
+        else supersedesRunId = raw;
+      }
+      if (adoptRunId && supersedesRunId) {
+        return apiError(c, 400, 'adopt_run_id and supersedes_run_id are mutually exclusive');
+      }
+      const parsedOverrides = parseRunModelOverridesFields(body.tiers, body.aliases);
+      if (!parsedOverrides.ok) return apiError(c, 400, parsedOverrides.error);
+      workflowModelOverrides = parsedOverrides.overrides;
+      if (body.config !== undefined) {
+        try {
+          workflowRunConfig = parseWorkflowRunConfig(body.config, {
+            kind: 'http',
+            label: 'inline',
+          });
+        } catch (error) {
+          return apiError(c, 400, (error as Error).message);
+        }
       }
       conversationId = body.conversationId;
       message = body.message;
@@ -3158,9 +3587,19 @@ export function registerApiRoutes(
         }
       }
 
+      // Declared inputs ride the context, never `fullMessage` — encoding them into the
+      // command string would make a supplied value indistinguishable from $ARGUMENTS
+      // and would amount to inventing a chat grammar as a side effect (#2554/#2555).
       const fullMessage = `/workflow run ${workflowName} ${message}`;
-      const extraContext: Omit<HandleMessageContext, 'isolationHints'> =
-        savedFiles.length > 0 ? { userId, attachedFiles: savedFiles } : { userId };
+      const extraContext: Omit<HandleMessageContext, 'isolationHints'> = {
+        userId,
+        ...(savedFiles.length > 0 ? { attachedFiles: savedFiles } : {}),
+        ...(workflowInputs ? { workflowInputs } : {}),
+        ...(workflowModelOverrides ? { workflowModelOverrides } : {}),
+        ...(workflowRunConfig ? { workflowRunConfig } : {}),
+        ...(adoptRunId ? { workflowAdoptRunId: adoptRunId } : {}),
+        ...(supersedesRunId ? { workflowSupersedesRunId: supersedesRunId } : {}),
+      };
       const filesToCleanup = savedFiles.length > 0 ? { files: savedFiles, uploadDir } : undefined;
       const result = await dispatchToOrchestrator(
         conversationId,
@@ -3256,11 +3695,24 @@ export function registerApiRoutes(
       // directly instead of hitting the disambiguation prompt (#2075).
       // Mirrors the approve/reject auto-resume path.
       if (!run.parent_conversation_id) {
-        return apiError(
-          c,
-          400,
-          `This run was created outside the web UI. Use \`archon workflow resume ${runId}\` from the CLI to resume it.`
+        // No parent conversation to dispatch a chat message through at all —
+        // every CLI-launched run (#2008). Execute directly instead of 400ing.
+        const headlessResumed = await resumeWorkflowRunFromServer(run, await resolveWebUserId(c));
+        if (!headlessResumed) {
+          return apiError(
+            c,
+            400,
+            `This run was created outside the web UI. Use \`archon workflow resume ${runId}\` from the CLI to resume it.`
+          );
+        }
+        getLog().info(
+          { runId, workflowName: run.workflow_name },
+          'api.workflow_run_resume_headless_dispatched'
         );
+        return c.json({
+          success: true,
+          message: `Resuming workflow: ${run.workflow_name}`,
+        });
       }
       const parentConv = await conversationDb.getConversationById(run.parent_conversation_id);
       if (!parentConv?.platform_conversation_id || parentConv.platform_type !== 'web') {
@@ -3291,6 +3743,30 @@ export function registerApiRoutes(
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_resume_failed');
       return apiError(c, 500, 'Failed to resume workflow run');
+    }
+  });
+
+  registerOpenApiRoute(signalWorkflowWaitRoute, async c => {
+    const runId = c.req.param('runId') ?? '';
+    const { event, resumeAt, payload } = getValidatedBody(c, signalWorkflowWaitBodySchema);
+    try {
+      const run = await workflowDb.getWorkflowRun(runId);
+      if (!run) return apiError(c, 404, 'Workflow run not found');
+      const wait = isWorkflowWaitContext(run.metadata?.wait) ? run.metadata.wait : undefined;
+      if (wait?.kind !== 'event' || wait.event !== event || wait.resumeAt !== resumeAt) {
+        return apiError(c, 400, `Run is not waiting on event '${event}'`);
+      }
+      const { signaled } = await workflowDb.signalWorkflowWait(runId, wait, payload);
+      if (!signaled) {
+        return apiError(c, 400, `Run is not waiting on event '${event}'`);
+      }
+      return c.json({
+        success: true,
+        message: `Signaled '${event}'. The workflow will resume shortly.`,
+      });
+    } catch (error) {
+      getLog().error({ err: error, runId, event }, 'signal_workflow_wait_api_failed');
+      return apiError(c, 500, 'Failed to signal workflow wait');
     }
   });
 
@@ -3331,6 +3807,67 @@ export function registerApiRoutes(
     }
   });
 
+  /**
+   * The approve / reject / respond routes' shared precondition, expressed as one
+   * `runAttention` read mapped to this surface's 400s. Returns null when the route may
+   * go on to resolve the gate.
+   *
+   * `requireReadableGate` mirrors the core split (`assertApprovable` vs
+   * `assertRejectable`): approve refuses a run whose gate metadata cannot be read,
+   * while reject and respond still resolve it — they fall back to
+   * `approval?.nodeId ?? 'unknown'` for the audit event.
+   *
+   * The operations throw the same conclusions; mapping them here gives the console the
+   * message instead of an opaque 500.
+   */
+  function pausedGateBlocker(
+    run: WorkflowRun,
+    childRedirectAdvice: string,
+    requireReadableGate: boolean
+  ): string | null {
+    const attention = runAttention(run);
+    const approvalRaw = run.metadata.approval;
+    const approval = isApprovalContext(approvalRaw) ? approvalRaw : undefined;
+    switch (attention?.kind) {
+      case 'action_required':
+        return 'Run is paused for an outside action. Complete it, then resume the run; abandon it if it should not continue.';
+      case 'blocked_on_child':
+        // Not an approvable gate — the parent resumes automatically when the child
+        // completes. Send the caller to the run where the decision actually lives.
+        return `Run is paused waiting on sub-run ${attention.childRunId}. ${childRedirectAdvice}`;
+      case 'unreadable':
+        if (attention.reason === 'malformed_gate') {
+          return requireReadableGate ? 'Workflow run is paused but missing approval context' : null;
+        }
+        if (attention.reason === 'unrecognized_gate_type') {
+          return `Workflow run has an unrecognized gate type '${String(approval?.type)}' — this Archon build cannot resolve it`;
+        }
+        return `Workflow run cannot be resolved: ${attention.detail}`;
+      case undefined:
+        // Post-#2075 the run stays 'paused' after a resolution, so status alone no
+        // longer distinguishes "awaiting a response" from "awaiting resume".
+        if (approval && isGateResolved(approval)) {
+          return `Workflow run was already ${String(approval.resolved)} — resume in progress`;
+        }
+        // Paused with no gate at all — a durable `wait:`. There is nothing to approve.
+        return requireReadableGate ? 'Workflow run is paused but missing approval context' : null;
+      case 'awaiting_response':
+        // The gate is open and this route may go on to resolve it.
+        return null;
+      case 'terminal':
+        // Unreachable: every route checks `status !== 'paused'` before calling this.
+        return null;
+      default: {
+        // Exhaustive by construction, so a fifth `RunAttention` kind becomes a compile
+        // error here instead of a silently swallowed one — which is how this route
+        // would reintroduce the opaque 500 the precondition exists to remove. The
+        // other three consumers of the union already fail to compile the same way.
+        const unreachable: never = attention;
+        throw new Error(`pausedGateBlocker: unhandled attention ${JSON.stringify(unreachable)}`);
+      }
+    }
+  }
+
   // POST /api/workflows/runs/:runId/approve - Approve a paused workflow run
   registerOpenApiRoute(approveWorkflowRunRoute, async c => {
     const runId = c.req.param('runId') ?? '';
@@ -3342,29 +3879,13 @@ export function registerApiRoutes(
       if (run.status !== 'paused') {
         return apiError(c, 400, `Cannot approve workflow in '${run.status}' status`);
       }
-      const approvalRaw = run.metadata.approval;
-      const approval = isApprovalContext(approvalRaw) ? approvalRaw : undefined;
-      if (!approval?.nodeId) {
-        return apiError(c, 400, 'Workflow run is paused but missing approval context');
-      }
-      if (approval.type === 'child_workflow') {
-        // Not an approvable gate — the parent resumes automatically when the child
-        // completes. approveWorkflow throws the same redirect; map it to a 400
-        // here so the console gets the message instead of an opaque 500.
-        return apiError(
-          c,
-          400,
-          `Run is paused waiting on sub-run ${approval.childRunId ?? '<unknown>'}. Approve or reject the child run instead.`
-        );
-      }
-      if (isGateResolved(approval)) {
-        // Post-#2075 the run stays 'paused' after approval, so status alone no
-        // longer distinguishes "awaiting the human" from "awaiting resume".
-        return apiError(
-          c,
-          400,
-          `Workflow run was already ${String(approval.resolved)} — resume in progress`
-        );
+      const approveBlocker = pausedGateBlocker(
+        run,
+        'Approve or reject the child run instead.',
+        true
+      );
+      if (approveBlocker) {
+        return apiError(c, 400, approveBlocker);
       }
       // Distinguish "no body sent" (legitimate bare approve) from "body sent but
       // unparseable" (client bug). Since #2074 a bare approve FINALIZES a
@@ -3406,7 +3927,7 @@ export function registerApiRoutes(
         success: true,
         message: autoResumed
           ? `Workflow approved: ${run.workflow_name}. Resuming workflow.`
-          : `Workflow approved: ${run.workflow_name}. Run \`archon workflow resume ${runId}\` from the CLI to continue, or send a new message in the originating conversation.`,
+          : `Workflow approved: ${run.workflow_name}. Run \`archon workflow resume ${runId}\` from the CLI to continue, or resume it from the originating conversation.`,
       });
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_approve_failed');
@@ -3425,23 +3946,13 @@ export function registerApiRoutes(
       if (run.status !== 'paused') {
         return apiError(c, 400, `Cannot reject workflow in '${run.status}' status`);
       }
-      const approvalRaw = run.metadata.approval;
-      const approval = isApprovalContext(approvalRaw) ? approvalRaw : undefined;
-      if (approval?.type === 'child_workflow') {
-        // Mirror of the approve route's guard — rejectWorkflow throws the same
-        // redirect; map it to a 400 with the child pointer.
-        return apiError(
-          c,
-          400,
-          `Run is paused waiting on sub-run ${approval.childRunId ?? '<unknown>'}. Reject the child run instead, or abandon this run to discard the whole tree.`
-        );
-      }
-      if (approval && isGateResolved(approval)) {
-        return apiError(
-          c,
-          400,
-          `Workflow run was already ${String(approval.resolved)} — resume in progress`
-        );
+      const rejectBlocker = pausedGateBlocker(
+        run,
+        'Reject the child run instead, or abandon this run to discard the whole tree.',
+        false
+      );
+      if (rejectBlocker) {
+        return apiError(c, 400, rejectBlocker);
       }
       // Mirror of the approve route's malformed-body guard: a swallowed parse
       // failure would silently drop the reviewer's reason.
@@ -3474,21 +3985,116 @@ export function registerApiRoutes(
         });
       }
 
-      // Auto-resume: dispatch to the orchestrator so the on_reject prompt runs
-      // without requiring the user to re-run the workflow command. Mirrors
-      // what `workflowRejectCommand` does in the CLI. Same cross-adapter
-      // guard as approve — only web parents auto-resume.
+      // Auto-resume: dispatch to the orchestrator so the resolution actually
+      // takes effect (legacy on_reject rework, or #2707 step 1's new-mode
+      // structured resolution) without requiring the user to re-run the
+      // workflow command. Mirrors what `workflowRejectCommand` does in the
+      // CLI. Same cross-adapter guard as approve — only web parents auto-resume.
       const autoResumed = await tryAutoResumeAfterGate(run, 'reject', await resolveWebUserId(c));
+      const resumeHint = `run \`archon workflow resume ${runId}\` from the CLI to trigger it`;
 
       return c.json({
         success: true,
-        message: autoResumed
-          ? `Workflow rejected: ${run.workflow_name}. Running on-reject prompt.`
-          : `Workflow rejected: ${run.workflow_name}. On-reject prompt will run when the run resumes — run \`archon workflow resume ${runId}\` from the CLI to trigger it.`,
+        message: result.newMode
+          ? autoResumed
+            ? `Workflow rejected: ${run.workflow_name}. Continuing.`
+            : `Workflow rejected: ${run.workflow_name}. The run will continue when it resumes — ${resumeHint}.`
+          : autoResumed
+            ? `Workflow rejected: ${run.workflow_name}. Running on-reject prompt.`
+            : `Workflow rejected: ${run.workflow_name}. On-reject prompt will run when the run resumes — ${resumeHint}.`,
       });
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_reject_failed');
       return apiError(c, 500, 'Failed to reject workflow run');
+    }
+  });
+
+  // POST /api/workflows/runs/:runId/respond - Resolve a paused workflow run with any
+  // declared decision (#2707 step 2). 'approve'/'reject' produce the exact same
+  // resolution as the dedicated routes above — respondToWorkflow delegates those two
+  // ids to the same approveWorkflow/rejectWorkflow functions.
+  registerOpenApiRoute(respondWorkflowRunRoute, async c => {
+    const runId = c.req.param('runId') ?? '';
+    try {
+      const run = await workflowDb.getWorkflowRun(runId);
+      if (!run) {
+        return apiError(c, 404, 'Workflow run not found');
+      }
+      if (run.status !== 'paused') {
+        return apiError(c, 400, `Cannot respond to workflow in '${run.status}' status`);
+      }
+      const respondBlocker = pausedGateBlocker(
+        run,
+        'Respond on the child run instead, or abandon this run to discard the whole tree.',
+        false
+      );
+      if (respondBlocker) {
+        return apiError(c, 400, respondBlocker);
+      }
+      const rawBody = await c.req.text();
+      let body: { decision?: string; text?: string } = {};
+      if (rawBody.trim().length > 0) {
+        try {
+          body = JSON.parse(rawBody) as { decision?: string; text?: string };
+        } catch (parseError) {
+          getLog().warn({ err: parseError, runId }, 'api.respond_body_parse_failed');
+          return apiError(
+            c,
+            400,
+            'Request body is not valid JSON — send {"decision": "...", "text": "..."}'
+          );
+        }
+      }
+      if (!body.decision) {
+        return apiError(c, 400, 'Request body must include a non-empty "decision"');
+      }
+      const decision = body.decision;
+
+      // Pre-validate a non-default decision so an undeclared id is a 400 naming the
+      // gate's actual options, not an opaque 500 — mirrors the approve/reject routes'
+      // pre-checks above. 'approve'/'reject' skip this: assertRespondable enforces
+      // decisionsAuthored, which legacy gates (the ones those two ids also serve)
+      // never set — see assertRespondable's doc comment for why it is not consulted
+      // for those two ids.
+      if (decision !== 'approve' && decision !== 'reject') {
+        try {
+          assertRespondable(run, decision);
+        } catch (validationError) {
+          return apiError(c, 400, (validationError as Error).message);
+        }
+      }
+
+      // Mirrors the dedicated /reject route's default: an empty/omitted text becomes
+      // 'Rejected' rather than reaching a new-mode gate's structured output as ''.
+      // Only for decision === 'reject' — every other decision (including 'approve',
+      // which stays optional/undefined) is unaffected.
+      const text = body.text ?? (decision === 'reject' ? 'Rejected' : undefined);
+      const result = await respondToWorkflow(runId, decision, text);
+
+      if ('cancelled' in result && result.cancelled) {
+        return c.json({
+          success: true,
+          message: result.maxAttemptsReached
+            ? `Workflow rejected and cancelled (max attempts reached): ${run.workflow_name}`
+            : `Workflow rejected: ${run.workflow_name}`,
+        });
+      }
+
+      // Auto-resume: dispatch to the orchestrator so the resolution actually takes
+      // effect, mirroring approve/reject. Same cross-adapter guard — only web
+      // parents auto-resume.
+      const autoResumed = await tryAutoResumeAfterGate(run, 'respond', await resolveWebUserId(c));
+      const resumeHint = `run \`archon workflow resume ${runId}\` from the CLI to trigger it`;
+
+      return c.json({
+        success: true,
+        message: autoResumed
+          ? `Workflow responded '${decision}': ${run.workflow_name}. Continuing.`
+          : `Workflow responded '${decision}': ${run.workflow_name}. The run will continue when it resumes — ${resumeHint}.`,
+      });
+    } catch (error) {
+      getLog().error({ err: error, runId }, 'api.workflow_run_respond_failed');
+      return apiError(c, 500, 'Failed to respond to workflow run');
     }
   });
 
@@ -3568,6 +4174,14 @@ export function registerApiRoutes(
       // Default visibility stays open (everyone sees everyone's runs).
       const mine = c.req.query('mine') === 'true';
       const userId = mine ? (await resolveAuthContext(c))?.userId : undefined;
+
+      // Open-work inbox (#2747): a status-derived query, not a stored flag —
+      // terminal failed runs with no adopter/successor. Mutually exclusive with
+      // the other filters by contract; the inbox wins when combined.
+      if (c.req.query('open') === 'true') {
+        const openRuns = await workflowDb.findOpenWorkRuns({ codebaseId, limit });
+        return c.json({ runs: openRuns.map(toApiWorkflowRun) });
+      }
 
       const runs = await workflowDb.listWorkflowRuns({
         conversationId,
@@ -3682,24 +4296,6 @@ export function registerApiRoutes(
       return apiError(c, 400, 'Invalid workflow name');
     }
 
-    // Try `.yaml` then `.yml`, mirroring `loadWorkflowsFromDir` in
-    // workflow-discovery.ts so by-name lookup matches the list endpoint.
-    // Returns null if neither extension exists (caller tries the next source).
-    const tryReadWorkflowAt = async (
-      dir: string
-    ): Promise<{ filename: string; content: string } | null> => {
-      for (const ext of ['yaml', 'yml']) {
-        const filename = `${name}.${ext}`;
-        try {
-          const content = await readFile(join(dir, filename), 'utf-8');
-          return { filename, content };
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-      }
-      return null;
-    };
-
     try {
       const cwd = c.req.query('cwd');
       let workingDir = cwd;
@@ -3715,10 +4311,13 @@ export function registerApiRoutes(
       // 1. Try user-defined workflow in cwd.
       if (workingDir) {
         const [workflowFolder] = getWorkflowFolderSearchPaths();
+        const projectWorkflowsRoot = join(workingDir, workflowFolder);
         try {
-          const hit = await tryReadWorkflowAt(join(workingDir, workflowFolder));
-          if (hit) {
-            const result = parseWorkflow(hit.content, hit.filename);
+          const hit = await findWorkflowAt(projectWorkflowsRoot, name);
+          const isSourceBundledPackage =
+            hit?.packaged === true && isBundledWorkflowsRoot(projectWorkflowsRoot);
+          if (hit && !isSourceBundledPackage) {
+            const result = hit.parsed;
             if (result.error) {
               return apiError(c, 500, `Workflow file is invalid: ${result.error.error}`);
             }
@@ -3737,9 +4336,9 @@ export function registerApiRoutes(
       // 2. Fall back to home-scoped workflow (`~/.archon/workflows/`).
       // Mirrors the discovery order in `discoverWorkflowsWithConfig`.
       try {
-        const hit = await tryReadWorkflowAt(getHomeWorkflowsPath());
+        const hit = await findWorkflowAt(getHomeWorkflowsPath(), name);
         if (hit) {
-          const result = parseWorkflow(hit.content, hit.filename);
+          const result = hit.parsed;
           if (result.error) {
             return apiError(c, 500, `Home workflow file is invalid: ${result.error.error}`);
           }
@@ -3755,25 +4354,26 @@ export function registerApiRoutes(
       }
 
       // 3. Fall back to bundled defaults.
-      if (Object.hasOwn(BUNDLED_WORKFLOWS, name)) {
-        const bundledFilename = `${name}.yaml`;
-        const bundledContent = BUNDLED_WORKFLOWS[name];
-        const result = parseWorkflow(bundledContent, bundledFilename);
+      const bundled = findBundledWorkflow(name);
+      if (bundled !== null) {
+        const result = bundled.parsed;
         if (result.error) {
           return apiError(c, 500, `Bundled workflow is invalid: ${result.error.error}`);
         }
         return c.json({
           workflow: result.workflow,
-          filename: bundledFilename,
+          filename: bundled.filename,
           source: 'bundled' as WorkflowSource,
         });
       }
 
       if (!isBinaryBuild()) {
         try {
-          const hit = await tryReadWorkflowAt(getDefaultWorkflowsPath());
+          const hit =
+            (await tryReadWorkflowAt(getDefaultWorkflowsPath(), name)) ??
+            (await findPackagedWorkflowAt(dirname(getDefaultWorkflowsPath()), name));
           if (hit) {
-            const result = parseWorkflow(hit.content, hit.filename);
+            const result = hit.parsed;
             if (result.error) {
               return apiError(c, 500, `Default workflow is invalid: ${result.error.error}`);
             }
@@ -3849,11 +4449,16 @@ export function registerApiRoutes(
           ? getHomeWorkflowsPath()
           : join(workingDir, getWorkflowFolderSearchPaths()[0]);
       await mkdir(dirPath, { recursive: true });
-      const filePath = join(dirPath, `${name}.yaml`);
+      const existing = await findWorkflowAt(dirPath, name);
+      if (existing?.packaged === true && isBundledWorkflowsRoot(dirPath)) {
+        return apiError(c, 400, `Cannot overwrite bundled default workflow: ${name}`);
+      }
+      const filePath = existing?.absolutePath ?? join(dirPath, `${name}.yaml`);
+      const filename = existing?.filename ?? `${name}.yaml`;
       await writeFile(filePath, yamlContent, 'utf-8');
       return c.json({
         workflow: parsed.workflow,
-        filename: `${name}.yaml`,
+        filename,
         source,
       });
     } catch (error) {
@@ -3873,11 +4478,6 @@ export function registerApiRoutes(
     const targetSource = c.req.query('source');
     if (targetSource && targetSource !== 'project' && targetSource !== 'global') {
       return apiError(c, 400, 'Invalid workflow source');
-    }
-
-    // Refuse to delete bundled defaults
-    if (targetSource !== 'global' && Object.hasOwn(BUNDLED_WORKFLOWS, name)) {
-      return apiError(c, 400, `Cannot delete bundled default workflow: ${name}`);
     }
 
     const cwd = c.req.query('cwd');
@@ -3901,6 +4501,20 @@ export function registerApiRoutes(
         ? getHomeWorkflowsPath()
         : join(workingDir, getWorkflowFolderSearchPaths()[0]);
 
+    try {
+      const packaged = await findPackagedWorkflowAt(dir, name);
+      if (packaged !== null) {
+        if (isBundledWorkflowsRoot(dir)) {
+          return apiError(c, 400, `Cannot delete bundled default workflow: ${name}`);
+        }
+        await rm(dirname(packaged.absolutePath), { recursive: true });
+        return c.json({ deleted: true, name });
+      }
+    } catch (err) {
+      getLog().error({ err, name }, 'workflow.delete_failed');
+      return apiError(c, 500, 'Failed to delete workflow');
+    }
+
     // Remove both `.yaml` and `.yml` variants (discovery accepts either), so a
     // twin file can't stay active after a reported deletion.
     let deleted = false;
@@ -3917,6 +4531,16 @@ export function registerApiRoutes(
     }
     if (deleted) {
       return c.json({ deleted: true, name });
+    }
+    if (targetSource !== 'global') {
+      try {
+        if (findBundledWorkflow(name) !== null) {
+          return apiError(c, 400, `Cannot delete bundled default workflow: ${name}`);
+        }
+      } catch (err) {
+        getLog().error({ err, name }, 'workflow.delete_failed');
+        return apiError(c, 500, 'Failed to delete workflow');
+      }
     }
     return apiError(c, 404, `Workflow not found: ${name}`);
   });
@@ -4288,7 +4912,6 @@ export function registerApiRoutes(
         }
         const errMsg = validatePresetEntry(`tier '${tier}'`, entry);
         if (errMsg) return apiError(c, 400, errMsg);
-        // Clean RawAliasEntry — drops `thinking` (no UI/CLI surface yet).
         tiers[tier] = toCleanEntry(entry);
       }
 

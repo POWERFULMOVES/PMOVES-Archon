@@ -275,6 +275,13 @@ Only user-defined workflows can be deleted. Bundled defaults cannot be removed.
 | POST | `/api/workflows/runs/{runId}/reject` | Reject a paused workflow (400 if paused blocked on a `workflow:` child — reject the child) |
 | DELETE | `/api/workflows/runs/{runId}` | Delete a terminal run and its events |
 
+Run responses expose `status` and `outcome` as separate fields. `status` is the execution
+lifecycle. `outcome` is the workflow-authored verdict (`"succeeded"`, `"failed"`, or `null`) and
+is never derived by the API from status or output text. Contradictory combinations are valid: for
+example, `{"status":"completed","outcome":"failed"}` means execution finished but the workflow
+rejected its result. `null` means no verdict has been authored, including undeclared and historical
+runs. The list, detail, by-worker, and dashboard run endpoints preserve both fields.
+
 #### Run a Workflow
 
 ```bash
@@ -290,6 +297,64 @@ curl -X POST http://localhost:3090/api/workflows/archon-assist/run \
   -F "files=@stacktrace.txt" \
   -F "files=@screenshot.png"
 ```
+
+**Supplying declared inputs.** A workflow that declares [`inputs:`](/guides/authoring-workflows/#running-a-workflow-that-declares-inputs) takes their values through an optional `inputs` map — a flat object of string values. Omit a name to take its declared `default:`.
+
+```bash
+# JSON: inputs is a nested object
+curl -X POST http://localhost:3090/api/workflows/review-block/run \
+  -H "Content-Type: application/json" \
+  -d '{"message": "review it", "conversationId": "conv-123",
+       "inputs": {"diff": "...", "style": "terse"}}'
+
+# multipart: form fields are strings, so the same map travels JSON-encoded
+curl -X POST http://localhost:3090/api/workflows/review-block/run \
+  -F "conversationId=conv-123" \
+  -F "message=review it" \
+  -F 'inputs={"diff":"...","style":"terse"}' \
+  -F "files=@context.md"
+```
+
+Values are validated against the workflow's declaration before any worktree, clone, or AI cost: a missing **required** input and an **undeclared** name are both refused up front, through the same contract a composing `with:` map goes through. `400` if `inputs` is not an object of strings (or, on multipart, not valid JSON). An empty object is the same as omitting the field.
+
+**Rebinding models for one run.** Optional `tiers` and `aliases` maps change only the named tier or existing `@alias` for this invocation. Every other binding keeps its normal user → repo → global → built-in value.
+
+```bash
+# JSON: only `large` changes
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -H "Content-Type: application/json" \
+  -d '{"message":"fix #2481","conversationId":"conv-123",
+       "tiers":{"large":"openai/gpt-5.6"},
+       "aliases":{"@reviewer":"codex/gpt-5.6-sol"}}'
+
+# multipart: each map is one JSON-encoded form field
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -F "conversationId=conv-123" \
+  -F "message=fix #2481" \
+  -F 'tiers={"large":"openai/gpt-5.6"}'
+```
+
+Tier keys are `small`, `medium`, and `large`; alias keys start with `@`. A model spec can name an Archon agent/model, a Pi vendor/model, an unqualified model under the binding's current provider, or another tier/alias preset. Literal model pins in the workflow remain unchanged. To replace all default tiers, author all three mappings explicitly. The run's `metadata.model_bindings` records the effective non-secret bindings for attribution and the sparse resolved overrides for reuse on resume.
+
+**Loading inline config for one run.** Optional `config` content uses the same sparse runtime keys as a CLI run config file. JSON sends it as an object; multipart sends the object JSON-encoded in one form field. Explicit `tiers` and `aliases` fields are the final model layer and replace only matching names from `config`.
+
+```bash
+# JSON content
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -H "Content-Type: application/json" \
+  -d '{"message":"fix #2482","conversationId":"conv-123",
+       "config":{"tiers":{"large":{"provider":"pi","model":"minimax/MiniMax-M3"}},
+                 "env":{"BENCH_MODE":"1"}},
+       "tiers":{"large":"openai/gpt-5.6"}}'
+
+# multipart content
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -F "conversationId=conv-123" \
+  -F "message=fix #2482" \
+  -F 'config={"docs":{"path":"handbook"},"workflows":{"quotaMaxAttempts":3}}'
+```
+
+Supported inline keys are `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, and `env`. Unknown or ineffective keys fail with `400` and name the key. `configPath` is always rejected: HTTP callers cannot ask the server to read a filesystem path. Run metadata stores sealed replay content plus redacted source/key attribution, and resume uses the original layer without accepting replacement content.
 
 #### List Run Artifacts
 
@@ -349,6 +414,13 @@ Returns `{ commands: [{ name, source: "bundled" | "project" }] }`.
 | GET | `/api/dashboard/runs` | List enriched workflow runs for the dashboard |
 
 Query parameters include status filters, date ranges, and pagination. Used by the Command Center UI.
+
+Each run includes `active_nodes`, ordered by unresolved `node_started` event order. Completion,
+failure, and both skip lifecycle events remove a node; a retrying start adds it again. Concurrent
+nodes remain separate entries. The compatibility fields `current_step_name` and
+`current_step_status` are populated only when exactly one node is active, and are `null` for zero
+or multiple active nodes. `total_steps` is `null`; observed lifecycle events do not define the
+workflow's total node count. This state describes node lifecycle, not process-owner liveness.
 
 ---
 

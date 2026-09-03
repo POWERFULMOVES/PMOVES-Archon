@@ -1,6 +1,8 @@
-// CONTRACT LAYER — no SDK imports, no runtime deps.
+// CONTRACT LAYER — no SDK imports, no runtime deps beyond SDK-free foundations.
 // @archon/workflows and @archon/core import from this subpath (@archon/providers/types).
-// HARD RULE: This file must never import SDK packages or other @archon/* packages.
+// HARD RULE: This file must never import SDK packages.
+
+import type { EffortRung } from '@archon/paths/effort';
 
 // ─── Provider Config Defaults ──────────────────────────────────────────────
 // Canonical definitions — @archon/core/config/config-types.ts imports from here.
@@ -26,8 +28,7 @@ export interface ClaudeProviderDefaults {
 export interface CodexProviderDefaults {
   [key: string]: unknown;
   model?: string;
-  /** Structurally matches @archon/workflows ModelReasoningEffort */
-  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: EffortRung;
   /** Structurally matches @archon/workflows WebSearchMode */
   webSearchMode?: 'disabled' | 'cached' | 'live';
   additionalDirectories?: string[];
@@ -47,7 +48,7 @@ export interface CopilotProviderDefaults {
    * mirrors `CodexProviderDefaults.modelReasoningEffort` so users get one
    * consistent key across cross-provider configs.
    */
-  modelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: EffortRung;
   /**
    * Absolute path to the Copilot CLI binary. Required in compiled Archon
    * builds when `COPILOT_BIN_PATH` env var is not set. Dev-mode builds let
@@ -158,6 +159,9 @@ export interface OpencodeProviderDefaults {
 /** Generic per-provider defaults bag used by config surfaces and UI. */
 export type ProviderDefaults = Record<string, unknown>;
 
+/** Strict parser for an explicitly selected, run-scoped provider config layer. */
+export type ProviderRunConfigParser = (raw: ProviderDefaults) => ProviderDefaults;
+
 /** Provider-keyed defaults map. Built-ins may refine individual entries. */
 export type ProviderDefaultsMap = Record<string, ProviderDefaults>;
 
@@ -165,10 +169,61 @@ export type ProviderDefaultsMap = Record<string, ProviderDefaults>;
  * Token usage statistics from AI provider responses.
  */
 export interface TokenUsage {
+  /** Gross prompt input, including cache reads and writes reported separately. */
   input: number;
   output: number;
+  /** Provider-reported cached input. Absent means unsupported or unknown; zero is known. */
+  cacheRead?: number;
+  /** Provider-reported cache-creation input. Absent means unsupported or unknown; zero is known. */
+  cacheWrite?: number;
+  /**
+   * Set only by aggregation ({@link mergeTokenUsage}), never by a provider. When true the
+   * cache axes on this usage are a FLOOR: at least one contributing usage did not report
+   * that axis, so true cache use is at least the reported total and
+   * `input - cacheRead - cacheWrite` is an UPPER bound on full-price input rather than an
+   * exact figure. Absent means the cache totals are complete, or that no axis is present
+   * at all (#2662).
+   */
+  cachePartial?: true;
+  /** Total of gross input, output, and any provider-reported reasoning tokens. */
   total?: number;
   cost?: number;
+}
+
+/**
+ * Sum usages into one aggregate, keeping every cache figure that was actually reported.
+ *
+ * `input` and `output` always sum across every entry. Each cache axis sums over only the
+ * entries that define it and is emitted when at least one did, so a silent contributor
+ * NARROWS the total instead of erasing it; `cachePartial` then marks the result as a floor.
+ * Withholding the axis entirely, as this once did, left gross `input` standing beside no
+ * cache context at all and read as "nothing was cached" (#2662).
+ *
+ * An axis no entry reports stays absent, which already encodes "unknown" — that case is not
+ * flagged. The two axes are decided independently.
+ *
+ * Pure by design: callers own validation and logging, because their contexts differ (persisted
+ * JSON in @archon/core, non-finite guarding in @archon/workflows). Entries are expected to have
+ * finite `input`/`output` already; `total` and `cost` are not aggregated here.
+ */
+export function mergeTokenUsage(usages: readonly TokenUsage[]): TokenUsage | undefined {
+  if (usages.length === 0) return undefined;
+  const merged: TokenUsage = {
+    input: usages.reduce((sum, usage) => sum + usage.input, 0),
+    output: usages.reduce((sum, usage) => sum + usage.output, 0),
+  };
+  // A contribution that is itself a floor keeps the whole aggregate a floor.
+  let partial = usages.some(usage => usage.cachePartial === true);
+  for (const axis of ['cacheRead', 'cacheWrite'] as const) {
+    const reporters = usages.filter(usage => usage[axis] !== undefined);
+    if (reporters.length === 0) continue;
+    merged[axis] = reporters.reduce((sum, usage) => sum + (usage[axis] ?? 0), 0);
+    if (reporters.length < usages.length) partial = true;
+  }
+  if (partial && (merged.cacheRead !== undefined || merged.cacheWrite !== undefined)) {
+    merged.cachePartial = true;
+  }
+  return merged;
 }
 
 /** Concrete model identifier reported by a provider after a request completes. */
@@ -437,9 +492,20 @@ export interface AgentRequestOptions {
   systemPrompt?: SystemPromptInput;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
   env?: Record<string, string>;
+  /**
+   * Names in `env` whose values Archon injected as credentials rather than
+   * loading from project configuration. Custom provider configuration must not
+   * be allowed to select them.
+   */
+  protectedEnvKeys?: readonly string[];
   maxBudgetUsd?: number;
   fallbackModel?: string;
-  /** Session fork flag — when true, copies prior session history before appending. */
+  /**
+   * Request an immutable fork of `resumeSessionId`. Exact-fork callers such as
+   * named workflow resume must first verify `sessionFork === true`. Legacy session
+   * reuse may still send this flag to resume-only providers, where behavior is
+   * provider-specific and immutability is not guaranteed.
+   */
   forkSession?: boolean;
   /** When false, skip writing session transcript to disk. */
   persistSession?: boolean;
@@ -522,8 +588,7 @@ export interface NodeConfig {
    * across the @archon/providers/types contract boundary.
    */
   pi?: Pick<PiProviderDefaults, 'enableExtensions' | 'interactive' | 'extensionFlags'>;
-  effort?: string;
-  thinking?: unknown;
+  effort?: EffortRung;
   sandbox?: unknown;
   betas?: string[];
   output_format?: Record<string, unknown>;
@@ -577,6 +642,11 @@ export interface SendQueryOptions extends AgentRequestOptions {
  */
 export interface ProviderCapabilities {
   sessionResume: boolean;
+  /**
+   * Given a session ID, create a new session containing the source history
+   * while leaving the source unchanged. Omission means unsupported.
+   */
+  sessionFork?: boolean;
   mcp: boolean;
   hooks: boolean;
   skills: boolean;
@@ -614,7 +684,6 @@ export interface ProviderCapabilities {
   envInjection: boolean;
   costControl: boolean;
   effortControl: boolean;
-  thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
   /**
@@ -706,6 +775,13 @@ export interface ProviderRegistration {
    * GET /api/auth/providers are derived from these declarations.
    */
   credentials: ProviderCredentialCatalog;
+
+  /**
+   * Validate and normalize provider defaults selected for one workflow run.
+   * Ordinary config remains defensive and tolerant; explicit run config must
+   * reject values the provider would otherwise silently discard.
+   */
+  parseRunConfig: ProviderRunConfigParser;
 }
 
 /**
@@ -717,6 +793,8 @@ export interface ProviderInfo {
   displayName: string;
   capabilities: ProviderCapabilities;
   builtIn: boolean;
+  /** The shared ladder when this provider accepts `effort:`; absent otherwise. */
+  effortLevels?: readonly EffortRung[];
 }
 
 /**

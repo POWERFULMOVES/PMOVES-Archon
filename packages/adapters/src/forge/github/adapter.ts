@@ -15,10 +15,11 @@ import {
   toError,
   getLinkedIssueNumbers,
   onConversationClosed,
-  ConversationLockManager,
+  type ConversationLockManager,
   DeliveryDeduplicator,
   AppNotInstalledError,
   installCredentialHelper,
+  resolveGitHubTokenFromEnv,
 } from '@archon/core';
 import {
   ensureProjectStructure,
@@ -54,6 +55,52 @@ const MAX_LENGTH = 65000; // GitHub comment limit (~65,536, leave buffer for saf
 /** Hidden marker added to bot comments to prevent self-triggering loops */
 const BOT_RESPONSE_MARKER = '<!-- archon-bot-response -->';
 
+type ConversationLocker = Pick<ConversationLockManager, 'acquireLock'>;
+
+type CreateCommentArgs = NonNullable<Parameters<Octokit['rest']['issues']['createComment']>[0]>;
+type ListCommentsArgs = NonNullable<Parameters<Octokit['rest']['issues']['listComments']>[0]>;
+type ListComment = Awaited<ReturnType<Octokit['rest']['issues']['listComments']>>['data'][number];
+type ListCommentUser = Pick<NonNullable<ListComment['user']>, 'login'>;
+type RepositoryData = Awaited<ReturnType<Octokit['rest']['repos']['get']>>['data'];
+type PullRequestData = Awaited<ReturnType<Octokit['rest']['pulls']['get']>>['data'];
+type PullRequestHead = Pick<PullRequestData['head'], 'ref' | 'sha'> & {
+  repo: Pick<NonNullable<PullRequestData['head']['repo']>, 'full_name'> | null;
+};
+
+interface GitHubApi {
+  rest: {
+    issues: {
+      createComment(args: CreateCommentArgs): Promise<unknown>;
+      listComments(args: ListCommentsArgs): Promise<{
+        data: { body?: ListComment['body'] | null; user?: ListCommentUser | null }[];
+      }>;
+    };
+    repos: {
+      get(
+        args: NonNullable<Parameters<Octokit['rest']['repos']['get']>[0]>
+      ): Promise<{ data: Pick<RepositoryData, 'default_branch'> }>;
+    };
+    pulls: {
+      get(args: NonNullable<Parameters<Octokit['rest']['pulls']['get']>[0]>): Promise<{
+        data: {
+          head: PullRequestHead;
+          base: { repo: Pick<PullRequestData['base']['repo'], 'full_name'> };
+        };
+      }>;
+    };
+  };
+}
+
+type GitHubAppAuth = Extract<GitHubAuth, { kind: 'app' }>;
+type GitHubAdapterAuth =
+  | Exclude<GitHubAuth, { kind: 'app' }>
+  | {
+      kind: 'app';
+      provider: Omit<GitHubAppAuth['provider'], 'getOctokitForInstallation'> & {
+        getOctokitForInstallation(owner: string, repo: string): Promise<GitHubApi>;
+      };
+    };
+
 export class GitHubAdapter implements IPlatformAdapter {
   /**
    * PAT-mode Octokit: a singleton constructed at startup. Null in App mode —
@@ -61,12 +108,12 @@ export class GitHubAdapter implements IPlatformAdapter {
    * Octokit from the auth provider. Tests reach in via `@ts-expect-error` and
    * assign a mock object to this field.
    */
-  private octokit: Octokit | null;
-  private readonly auth: GitHubAuth;
+  private octokit: GitHubApi | null;
+  private readonly auth: GitHubAdapterAuth;
   private webhookSecret: string;
   private allowedUsers: string[];
   private botMention: string;
-  private lockManager: ConversationLockManager;
+  private lockManager: ConversationLocker;
   /**
    * Ingest idempotency: drops repeat deliveries of one logical comment event
    * (dual repo+App subscriptions, LB double-forwards, redeliveries) before
@@ -91,9 +138,9 @@ export class GitHubAdapter implements IPlatformAdapter {
   private readonly userOctokitCache = new Map<string, { octokit: Octokit; expiresAt: number }>();
 
   constructor(
-    auth: GitHubAuth,
+    auth: GitHubAdapterAuth,
     webhookSecret: string,
-    lockManager: ConversationLockManager,
+    lockManager: ConversationLocker,
     botMention?: string,
     options?: {
       retryDelayMs?: (attempt: number) => number;
@@ -148,7 +195,7 @@ export class GitHubAdapter implements IPlatformAdapter {
    * the constructor-created singleton; in App mode it's a per-installation
    * Octokit fetched from the auth provider (which caches by installation id).
    */
-  private async resolveOctokit(owner: string, repo: string): Promise<Octokit> {
+  private async resolveOctokit(owner: string, repo: string): Promise<GitHubApi> {
     if (this.auth.kind === 'pat') {
       // Non-null in PAT mode by construction; tests overwrite this field directly.
       if (!this.octokit) {
@@ -178,7 +225,7 @@ export class GitHubAdapter implements IPlatformAdapter {
   private async withTokenRefresh<T>(
     owner: string,
     repo: string,
-    fn: (octokit: Octokit) => Promise<T>
+    fn: (octokit: GitHubApi) => Promise<T>
   ): Promise<T> {
     const octokit = await this.resolveOctokit(owner, repo);
     try {
@@ -692,14 +739,14 @@ export class GitHubAdapter implements IPlatformAdapter {
         throw err;
       }
     } else {
-      ghToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+      ghToken = resolveGitHubTokenFromEnv();
     }
     const repoUrl = `https://github.com/${owner}/${repo}.git`;
 
     const cloneResult = await cloneRepository(
       repoUrl,
       toRepoPath(repoPath),
-      ghToken ? { token: ghToken } : undefined
+      ghToken ? { credentials: { username: ghToken, password: '' } } : undefined
     );
 
     if (!cloneResult.ok) {
@@ -726,35 +773,24 @@ export class GitHubAdapter implements IPlatformAdapter {
 
     await addSafeDirectory(toRepoPath(repoPath));
 
-    // App mode: install the git credential helper on the newly cloned worktree
-    // so workflows that outlive the 1h installation-token expiry can refresh
-    // credentials in-place. Non-fatal — workflows that complete in <1h still
-    // succeed via the URL-embedded token from the clone above. The result
-    // discriminator tells us whether the install actually happened so we
-    // don't log a false "installed" line in builds where the helper script
-    // isn't on disk.
+    // App mode requires a refreshable credential source after the
+    // request-scoped clone token expires.
     if (this.auth.kind === 'app') {
       const result = await installCredentialHelper(repoPath);
-      switch (result.kind) {
-        case 'installed':
-          getLog().info(
-            { repoPath, owner, repo, helperPath: result.helperPath },
-            'github_auth.credential_helper_installed'
-          );
-          break;
-        case 'skipped':
-          getLog().warn(
-            { repoPath, owner, repo, reason: result.reason, sourcePath: result.sourcePath },
-            'github_auth.credential_helper_skipped'
-          );
-          break;
-        case 'failed':
-          getLog().warn(
-            { err: result.error, repoPath, owner, repo },
-            'github_auth.credential_helper_install_failed'
-          );
-          break;
+      if (result.kind === 'failed') {
+        getLog().error(
+          { err: result.error, repoPath, owner, repo },
+          'github_auth.credential_helper_install_failed'
+        );
+        throw new Error(
+          `GitHub App repository setup requires the credential helper: ${result.error.message}`,
+          { cause: result.error }
+        );
       }
+      getLog().info(
+        { repoPath, owner, repo, helperPath: result.helperPath },
+        'github_auth.credential_helper_installed'
+      );
     }
   }
 

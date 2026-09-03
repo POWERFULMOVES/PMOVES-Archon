@@ -34,7 +34,9 @@ function seedTiers(tiers: SafeConfigTiers['tiers']): TiersForm {
 /**
  * "provider/model" hint for an unset tier. Install scope falls back to the
  * built-in default; user scope falls back to the install tier first (that's
- * what an unset per-user tier resolves to), then the built-in default.
+ * what an unset per-user tier resolves to), then the built-in default. Only
+ * claude and codex ship built-ins — for any other provider an unset tier
+ * resolves to nothing, and the hint must say so instead of implying a fallback.
  */
 function defaultHint(cfg: SafeConfigTiers, t: TierName, scope: SettingsScope): string {
   if (scope === 'user') {
@@ -42,7 +44,7 @@ function defaultHint(cfg: SafeConfigTiers, t: TierName, scope: SettingsScope): s
     if (installSet) return `${installSet.provider}/${installSet.model}`;
   }
   const d = cfg.tierDefaults?.[t];
-  return d ? `${d.provider}/${d.model}` : 'built-in default';
+  return d ? `${d.provider}/${d.model}` : 'no built-in — set a model';
 }
 
 /**
@@ -159,7 +161,7 @@ export function ModelTiersPanel(): ReactElement {
         {TIER_ORDER.map(tier => {
           const row = form[tier];
           const unset = row.provider === '';
-          const effortOptions = effortOptionsForAgent(row.provider);
+          const effortOptions = effortOptionsForAgent(row.provider, providers);
           return (
             <div
               key={tier}
@@ -178,7 +180,7 @@ export function ModelTiersPanel(): ReactElement {
                     const provider = e.target.value;
                     setRow(tier, {
                       provider,
-                      effort: normalizeEffortForAgent(provider, row.effort),
+                      effort: normalizeEffortForAgent(provider, row.effort, providers),
                     });
                   }}
                   className={SELECT_CLASS}
@@ -203,7 +205,9 @@ export function ModelTiersPanel(): ReactElement {
                 }}
                 disabled={unset}
                 placeholder={
-                  unset ? `default: ${defaultHint(cfg, tier, scope)}` : 'model (e.g. opus, gpt-5.5)'
+                  unset
+                    ? `default: ${defaultHint(cfg, tier, scope)}`
+                    : 'model (e.g. opus, gpt-5.6-terra)'
                 }
                 ariaLabel={`${tier} model`}
                 className="min-w-[160px] flex-1"
@@ -215,7 +219,9 @@ export function ModelTiersPanel(): ReactElement {
                   <select
                     value={row.effort}
                     onChange={e => {
-                      setRow(tier, { effort: e.target.value });
+                      setRow(tier, {
+                        effort: effortOptions.find(option => option === e.target.value) ?? '',
+                      });
                     }}
                     // Currently unreachable while disabled (unset rows have no
                     // effort vocabulary), but every row control rides the

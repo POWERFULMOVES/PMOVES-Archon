@@ -24,10 +24,19 @@ import {
   buildPromptWithContext,
   detectCreditExhaustion,
   detectCompletionSignal,
+  describeUnmetCompletion,
   stripCompletionTags,
   isInlineScript,
   formatSubprocessFailure,
+  retainStreamTail,
   classifyError,
+  isQuotaExhaustionError,
+  extractQuotaResetAt,
+  getRetryDelayMs,
+  isRateLimitError,
+  RATE_LIMIT_PATTERNS,
+  RATE_LIMIT_RETRY_DELAY_MS,
+  TRANSIENT_PATTERNS,
   toTelemetryErrorClass,
   safeSendMessage,
   type UnknownErrorTracker,
@@ -92,6 +101,38 @@ describe('substituteWorkflowVariables', () => {
     expect(prompt).toBe('cat "/state/root/pr-state.json"');
   });
 
+  // $ADOPTED_RUN_DIR (#2747): resolves only under an explicit adoption; a run
+  // that references it without one throws instead of substituting empty.
+  it('replaces $ADOPTED_RUN_DIR with the adopted run artifact directory', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'Read $ADOPTED_RUN_DIR/report.md',
+      'run-2',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { adoptedRunDir: '/root/artifacts/runs/run-1' }
+    );
+    expect(prompt).toBe('Read /root/artifacts/runs/run-1/report.md');
+  });
+
+  it('throws when $ADOPTED_RUN_DIR is referenced without an adoption active', () => {
+    expect(() =>
+      substituteWorkflowVariables(
+        'Read $ADOPTED_RUN_DIR/report.md',
+        'run-2',
+        'msg',
+        '/tmp/artifacts',
+        'main',
+        'docs/'
+      )
+    ).toThrow(/did not adopt a prior run/);
+  });
+
   it('throws when $STATE_DIR is referenced but no state dir was resolved', () => {
     expect(() =>
       substituteWorkflowVariables(
@@ -115,6 +156,58 @@ describe('substituteWorkflowVariables', () => {
       'docs/'
     );
     expect(prompt).toBe('No state reference here');
+  });
+
+  it('substitutes a known $INPUTS.<name> from options.inputs (#2470)', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'Plan: $INPUTS.plan and mode $INPUTS.mode',
+      'run-1',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { inputs: { plan: 'do the thing', mode: 'fast' } }
+    );
+    expect(prompt).toBe('Plan: do the thing and mode fast');
+  });
+
+  it('throws with a did-you-mean hint on an unknown $INPUTS name (#2470)', () => {
+    expect(() =>
+      substituteWorkflowVariables(
+        'Use $INPUTS.pln',
+        'run-1',
+        'msg',
+        '/tmp/artifacts',
+        'main',
+        'docs/',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { inputs: { plan: 'x' } }
+      )
+    ).toThrow('$INPUTS.plan');
+  });
+
+  it('does NOT substitute $INPUTS under shellSafe — env delivery is the shell path (#2470/#2115)', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'echo "$INPUTS.plan"',
+      'run-1',
+      'msg',
+      '/tmp/artifacts',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { shellSafe: true, inputs: { plan: 'x' } }
+    );
+    expect(prompt).toBe('echo "$INPUTS.plan"');
   });
 
   it('replaces $BASE_BRANCH with config value', () => {
@@ -597,16 +690,34 @@ describe('detectCompletionSignal', () => {
     expect(detectCompletionSignal('<status>DONE</status>', 'DONE')).toBe(true);
   });
 
-  it('detects plain signal at end of output', () => {
-    expect(detectCompletionSignal('Work done. COMPLETE', 'COMPLETE')).toBe(true);
+  it('detects a plain signal as the final standalone line', () => {
+    expect(detectCompletionSignal('Work done.\n  COMPLETE  \n', 'COMPLETE')).toBe(true);
   });
 
-  it('detects plain signal on its own line', () => {
-    expect(detectCompletionSignal('Work done.\nCOMPLETE\nExtra text', 'COMPLETE')).toBe(true);
+  it('detects a plain signal followed by trailing blank lines and whitespace', () => {
+    expect(detectCompletionSignal('Work done.\nCOMPLETE\n\n\n', 'COMPLETE')).toBe(true);
+    expect(detectCompletionSignal('Work done.\nCOMPLETE\n   \n\t\n', 'COMPLETE')).toBe(true);
   });
 
-  it('does not detect signal embedded in prose', () => {
-    expect(detectCompletionSignal('The status is not COMPLETE yet.', 'COMPLETE')).toBe(false);
+  it('detects a plain signal with CRLF line endings', () => {
+    expect(detectCompletionSignal('Work done.\r\nCOMPLETE\r\n', 'COMPLETE')).toBe(true);
+  });
+
+  it('does not detect the live incident shape: a negated mention ending the output', () => {
+    expect(
+      detectCompletionSignal(
+        'the story still has open tasks — T8 is now ready, and T9 remains — so not replying ALL_TASKS_COMPLETE.',
+        'ALL_TASKS_COMPLETE'
+      )
+    ).toBe(false);
+  });
+
+  it('does not detect a plain signal mentioned inline at the end of output', () => {
+    expect(detectCompletionSignal('Work done. COMPLETE', 'COMPLETE')).toBe(false);
+  });
+
+  it('does not detect a negated plain signal at the end of output', () => {
+    expect(detectCompletionSignal('The status is not COMPLETE', 'COMPLETE')).toBe(false);
   });
 
   it('does not detect signal when wrong value is in tags', () => {
@@ -675,16 +786,15 @@ describe('formatSubprocessFailure', () => {
     expect(userMessage).toContain('[exit 2]');
   });
 
-  it('truncates diagnostics larger than 2 KB from the tail', () => {
+  it('keeps the tail of diagnostics larger than 2 KB and bounds the output', () => {
     const big = 'x'.repeat(5000) + '\nactual error at end';
     const { userMessage } = formatSubprocessFailure(
       { message: 'Command failed: cmd\n', stderr: big, code: 1 },
       "Script node 'n1'"
     );
     expect(userMessage).toContain('actual error at end');
-    expect(userMessage).toContain('[truncated]');
-    // Tight bound: ~2 KB diagnostic + label prefix + truncation suffix should fit
-    // well under 2.1 KB. Bumping SUBPROCESS_ERROR_MAX_CHARS would trip this.
+    // Tight bound: ~2 KB diagnostic + label prefix should fit well under 2.1 KB.
+    // Bumping SUBPROCESS_ERROR_MAX_CHARS would trip this.
     expect(userMessage.length).toBeLessThan(2100);
   });
 
@@ -720,6 +830,56 @@ describe('formatSubprocessFailure', () => {
     expect(logFields.stderrTail).toBeUndefined();
   });
 
+  it('uses a stdout tail as the diagnostic when stderr is empty', () => {
+    const err = {
+      message: 'Command failed: bash -c script body\n',
+      stdout: 'targeted test failed on repetition 3/5: bun test foo.test.ts',
+      code: 1,
+    };
+    const { userMessage, logFields } = formatSubprocessFailure(err, "Script node 'n1'");
+    expect(userMessage).not.toContain('no diagnostic output');
+    expect(userMessage).toContain('targeted test failed on repetition 3/5');
+    expect(userMessage).toContain('[exit 1]');
+    expect(logFields.stdoutTail).toBe(err.stdout);
+    expect(logFields.stderrTail).toBeUndefined();
+  });
+
+  it('includes labelled stderr and stdout tails when both streams are populated', () => {
+    const err = {
+      message: 'Command failed: bash -c script body\n',
+      stderr: 'error: assertion failed',
+      stdout: 'progress line before failure',
+      code: 1,
+    };
+    const { userMessage, logFields } = formatSubprocessFailure(err, "Script node 'n1'");
+    expect(userMessage).toContain('[stderr]');
+    expect(userMessage).toContain('error: assertion failed');
+    expect(userMessage).toContain('[stdout]');
+    expect(userMessage).toContain('progress line before failure');
+    expect(logFields.stderrTail).toBe('error: assertion failed');
+    expect(logFields.stdoutTail).toBe('progress line before failure');
+  });
+
+  it('caps stderr and stdout tails jointly under the existing 2 KB budget', () => {
+    const err = {
+      message: 'Command failed: cmd\n',
+      stderr: 'e'.repeat(1200),
+      stdout: 'o'.repeat(5000),
+      code: 1,
+    };
+    const { userMessage, logFields } = formatSubprocessFailure(err, "Script node 'n1'");
+    expect(userMessage.length).toBeLessThan(2100);
+    expect(userMessage).toContain('[stderr]');
+    expect(userMessage).toContain('[stdout]');
+    const { stderrTail, stdoutTail } = logFields;
+    expect(typeof stderrTail).toBe('string');
+    expect(typeof stdoutTail).toBe('string');
+    if (typeof stderrTail !== 'string' || typeof stdoutTail !== 'string')
+      throw new Error('tails missing');
+    expect(stderrTail.length).toBeLessThanOrEqual(1000);
+    expect(stdoutTail.length).toBeLessThanOrEqual(2000 - stderrTail.length);
+  });
+
   it('omits the [exit N] suffix when no code is present', () => {
     const { userMessage } = formatSubprocessFailure({ stderr: 'diagnostic' }, "Script node 'n1'");
     expect(userMessage).not.toContain('[exit');
@@ -728,6 +888,12 @@ describe('formatSubprocessFailure', () => {
 });
 
 describe('classifyError', () => {
+  it('keeps every rate-limit pattern inside TRANSIENT so the widened budget stays reachable', () => {
+    for (const pattern of RATE_LIMIT_PATTERNS) {
+      expect(TRANSIENT_PATTERNS).toContain(pattern);
+    }
+  });
+
   it('classifies 429 as TRANSIENT', () => {
     expect(classifyError(new Error('rate limit: 429 too many requests'))).toBe('TRANSIENT');
   });
@@ -745,6 +911,23 @@ describe('classifyError', () => {
       classifyError(
         new Error(
           "Node 'prime' failed: SDK returned codex_turn_failed — unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: ..., auth error: 503, auth error code: biscuit_baker_service_me_circuit_open"
+        )
+      )
+    ).toBe('TRANSIENT');
+  });
+
+  it('classifies a silent empty stream as TRANSIENT — #2706', () => {
+    expect(
+      classifyError(
+        new Error(
+          "Node 'x' produced no assistant output. The provider stream closed without yielding content — likely a silent provider rejection."
+        )
+      )
+    ).toBe('TRANSIENT');
+    expect(
+      classifyError(
+        new Error(
+          'Loop iteration produced no assistant output. The provider stream closed without yielding content — likely a silent provider rejection or stream interruption.'
         )
       )
     ).toBe('TRANSIENT');
@@ -785,6 +968,45 @@ describe('classifyError', () => {
     // CLI-only quota string: not producible by detectCreditExhaustion, so the
     // drift guard below cannot cover it.
     expect(classifyError(new Error('Claude AI usage limit reached|1751234567'))).toBe('FATAL');
+  });
+
+  it('distinguishes MiniMax plan exhaustion from transient limit/load errors', () => {
+    const exhausted = '429 Token Plan usage limit reached: purchase Credits (2056)';
+    expect(classifyError(new Error(exhausted))).toBe('FATAL');
+    expect(isQuotaExhaustionError(exhausted)).toBe(true);
+    expect(classifyError(new Error('429 Token Plan rate limit reached (2062)'))).toBe('TRANSIENT');
+    expect(classifyError(new Error('MiniMax overloaded/high load (2064)'))).toBe('TRANSIENT');
+  });
+
+  it('detects rate-limit pressure messages — #2706', () => {
+    expect(isRateLimitError('rate limit: 429 too many requests')).toBe(true);
+    expect(isRateLimitError('MiniMax overloaded/high load (2064)')).toBe(true);
+    expect(isRateLimitError('Selected model is at capacity.')).toBe(true);
+    // Quota/session exhaustion stays out: it is FATAL and never reaches the backoff.
+    expect(isRateLimitError('Claude session limit reached')).toBe(false);
+    expect(isRateLimitError('econnreset')).toBe(false);
+  });
+
+  it('backs off flat + jitter on rate limits, exponential otherwise — #2706', () => {
+    for (let i = 0; i < 20; i++) {
+      const delay = getRetryDelayMs('429 too many requests', i, 3000);
+      expect(delay).toBeGreaterThanOrEqual(RATE_LIMIT_RETRY_DELAY_MS / 2);
+      expect(delay).toBeLessThanOrEqual((RATE_LIMIT_RETRY_DELAY_MS * 3) / 2);
+    }
+    expect(getRetryDelayMs('econnreset', 0, 3000)).toBe(3000);
+    expect(getRetryDelayMs('econnreset', 2, 3000)).toBe(12000);
+  });
+
+  it('parses only unambiguous quota reset timestamps', () => {
+    const now = new Date('2026-08-24T10:00:00.000Z');
+    expect(extractQuotaResetAt('usage limit reached|1787569200', now)?.toISOString()).toBe(
+      '2026-08-24T11:00:00.000Z'
+    );
+    expect(extractQuotaResetAt('session limit reached — resets in 2h', now)?.toISOString()).toBe(
+      '2026-08-24T12:00:00.000Z'
+    );
+    expect(extractQuotaResetAt('session limit reached — resets in 2400000001h', now)).toBeNull();
+    expect(extractQuotaResetAt('Token Plan usage limit reached (2056)', now)).toBeNull();
   });
 
   it('session-limit stays FATAL even when the message also matches a TRANSIENT pattern', () => {
@@ -955,5 +1177,60 @@ describe('safeSendMessage', () => {
       );
       expect(result).toBe(false);
     }
+  });
+});
+
+describe('describeUnmetCompletion', () => {
+  // The max-iterations failure message for both loop variants. `loop.until` is
+  // optional (#2563), so this exists to stop the two executors describing the same
+  // loop differently — and to stop either printing `undefined` at the author.
+  it('names the signal when only until is declared', () => {
+    expect(describeUnmetCompletion({ until: 'COMPLETE' })).toBe(
+      "without completion signal 'COMPLETE'"
+    );
+  });
+
+  it('names the check when only until_bash is declared', () => {
+    expect(describeUnmetCompletion({ until_bash: 'bun run test' })).toBe(
+      "without a passing 'until_bash' check"
+    );
+  });
+
+  it('names both when both are declared', () => {
+    expect(describeUnmetCompletion({ until: 'DONE', until_bash: 'test -f x' })).toBe(
+      "without completion signal 'DONE' or a passing 'until_bash' check"
+    );
+  });
+
+  it('never emits the literal "undefined" for a channel-less control', () => {
+    // Unreachable through the schema (it requires at least one channel), but this is
+    // an error message: degrade to something readable rather than assert.
+    const described = describeUnmetCompletion({});
+    expect(described).toBe('without a completion channel');
+    expect(described).not.toContain('undefined');
+  });
+});
+
+describe('retainStreamTail', () => {
+  it('returns a stream at the exact budget whole and unmarked', () => {
+    // The boundary an off-by-one would move: 2000 characters is retained in full, so a
+    // reader never sees a truncation marker on output that was not truncated.
+    const exact = 'y'.repeat(2000);
+    expect(retainStreamTail(exact)).toBe(exact);
+  });
+
+  it('keeps the tail and marks the dropped head one character over budget', () => {
+    const overBudget = `HEAD${'y'.repeat(2000)}`;
+    const retained = retainStreamTail(overBudget);
+    expect(retained).toBe(`…[truncated to last 2000 chars]\n${'y'.repeat(2000)}`);
+    expect(retained).not.toContain('HEAD');
+  });
+
+  it('reports an empty or whitespace-only stream as absent, not as an empty string', () => {
+    // `undefined` is what makes an absent tail field mean "this stream was empty"
+    // rather than "retention did not happen".
+    expect(retainStreamTail('')).toBeUndefined();
+    expect(retainStreamTail('   \n  ')).toBeUndefined();
+    expect(retainStreamTail(undefined)).toBeUndefined();
   });
 });

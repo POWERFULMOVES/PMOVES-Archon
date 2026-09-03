@@ -232,8 +232,15 @@ function pushCapped(list: string[], path: string): void {
 // Shell scripts. Parameterized ($1=upperdir, $2=lower|dest, $3=project root) and
 // portable (no `stat -c` / `realpath -m`) so they run in the runner image AND under
 // bash in the unit tests. NUL-delimited, TAB-separated records. `set -f` disables
-// globbing so adversarial filenames can't expand. NO `${…}` brace expansion (it
-// would be read as a JS template interpolation) — basename/dirname/cut/ls are used.
+// globbing so adversarial filenames can't expand.
+//
+// Path splitting uses `${…}` parameter expansion, escaped as `\${…}` so TypeScript
+// does not read it as a template interpolation. It replaced per-entry
+// basename/dirname/cut forks (#2558) — and note the expansions are the SAFER form,
+// not merely the cheaper one: `$(…)` strips trailing newlines, so a filename ending
+// in one used to decode to a different name and act on the wrong file. Do not
+// reintroduce command substitution here. The escaping is parser-enforced: an
+// unescaped `${…}` in these template literals is a TypeScript syntax error.
 // ---------------------------------------------------------------------------
 
 /**
@@ -243,6 +250,7 @@ function pushCapped(list: string[], path: string): void {
 const SHELL_HELPERS = `
 set -uf
 UP="$1"; OTHER="$2"; WS="$3"
+TAB_CHAR="	"
 
 # Reject a decoded whiteout name that could escape or wipe: empty, '.'/'..', or
 # containing a slash (defensive — a real basename can't, but never trust it).
@@ -259,8 +267,10 @@ valid_name() {
 # or 1 (refuse). Portable (test -L), no realpath.
 safe_parent() {
   _rel="$1"; _cur="$2"; _oldifs="$IFS"; IFS='/'
-  _parent="$(dirname "$_rel")"
-  [ "$_parent" = "." ] && _parent=""
+  case "$_rel" in
+    */*) _parent="\${_rel%/*}" ;;
+    *) _parent="" ;;
+  esac
   for _seg in $_parent; do
     [ -z "$_seg" ] && continue
     case "$_seg" in .|..) IFS="$_oldifs"; return 1 ;; esac
@@ -268,6 +278,19 @@ safe_parent() {
     _cur="$_cur/$_seg"
   done
   IFS="$_oldifs"; return 0
+}
+
+# Records are TAB-separated and decoded POSITIONALLY (parseRecords), so a TAB in ANY
+# variable-width field shifts every later one. Both such fields are attacker
+# controlled and both must be checked:
+#   name:   'a<TAB>b'                  -> ["L","a","b",target,esc]
+#   target: 'ok.ts<TAB>../../etc/pw'   -> ["L",name,"ok.ts","../../etc/pw",esc]
+# In the second the consumer reads a benign target and a PATH where the escape flag
+# belongs, so an escaping symlink reaches the approval gate rendered as safe — the
+# name-only check missed it. Refuse rather than emit an undecodable record, and
+# render the TAB as '?' so the refusal itself decodes. Builtins only, no fork.
+has_tab() {
+  case "$1" in *"$TAB_CHAR"*) return 0 ;; *) return 1 ;; esac
 }
 
 # A char device is an overlay WHITEOUT iff its major,minor is 0,0. Parsed from
@@ -302,16 +325,25 @@ export function buildSummaryScript(): string {
 [ -d "$UP" ] || exit 0
 cd "$UP"
 find . -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
-  rel="$(printf '%s' "$p" | sed 's#^[.]/##')"
-  base="$(basename "$rel")"
-  dir="$(dirname "$rel")"
-  [ "$dir" = "." ] && dir=""
+  # Builtins, not sed/basename/dirname — see the note above SHELL_HELPERS in
+  # overlay.ts for why (#2558). \${rel%/*} is NOT dirname: with no slash it
+  # returns rel unchanged, so the no-slash case is branched explicitly.
+  rel="\${p#./}"
+  base="\${rel##*/}"
+  case "$rel" in
+    */*) dir="\${rel%/*}" ;;
+    *) dir="" ;;
+  esac
+  if has_tab "$rel"; then
+    printf 'S\\t%s\\tunsafe-record-name\\0' "\${rel//"$TAB_CHAR"/?}"
+    continue
+  fi
 
   # --- whiteout markers → deletion ---
   is_wh=0; whname=""
   case "$base" in
     .wh..wh..opq) printf 'S\\t%s\\topaque-dir-marker\\0' "$rel"; continue ;;
-    .wh.*) is_wh=1; whname="$(printf '%s' "$base" | cut -c5-)" ;;
+    .wh.*) is_wh=1; whname="\${base#.wh.}" ;;
   esac
   if [ "$is_wh" = "0" ] && [ -c "$UP/$rel" ]; then
     if is_whiteout_char "$UP/$rel"; then is_wh=1; whname="$base"; else printf 'S\\t%s\\tspecial-char-device\\0' "$rel"; continue; fi
@@ -326,6 +358,10 @@ find . -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
   # --- symlink (check BEFORE -d/-f so a symlink-to-dir is not misclassified) ---
   if [ -L "$UP/$rel" ]; then
     ltarget="$(readlink "$UP/$rel")"
+    if has_tab "$ltarget"; then
+      printf 'S\\t%s\\tunsafe-record-target\\0' "\${rel//"$TAB_CHAR"/?}"
+      continue
+    fi
     if symlink_escapes "$ltarget"; then esc=1; else esc=0; fi
     printf 'L\\t%s\\t%s\\t%s\\0' "$rel" "$ltarget" "$esc"
     continue
@@ -347,16 +383,25 @@ DEST="$OTHER"
 [ -d "$UP" ] || exit 0
 cd "$UP"
 find . -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
-  rel="$(printf '%s' "$p" | sed 's#^[.]/##')"
-  base="$(basename "$rel")"
-  dir="$(dirname "$rel")"
-  [ "$dir" = "." ] && dir=""
+  # Builtins, not sed/basename/dirname — see the note above SHELL_HELPERS in
+  # overlay.ts for why (#2558). \${rel%/*} is NOT dirname: with no slash it
+  # returns rel unchanged, so the no-slash case is branched explicitly.
+  rel="\${p#./}"
+  base="\${rel##*/}"
+  case "$rel" in
+    */*) dir="\${rel%/*}" ;;
+    *) dir="" ;;
+  esac
+  if has_tab "$rel"; then
+    printf 'S\\t%s\\tunsafe-record-name\\0' "\${rel//"$TAB_CHAR"/?}"
+    continue
+  fi
 
   # --- whiteout markers → deletion ---
   is_wh=0; whname=""
   case "$base" in
     .wh..wh..opq) printf 'S\\t%s\\topaque-dir-marker\\0' "$rel"; continue ;;
-    .wh.*) is_wh=1; whname="$(printf '%s' "$base" | cut -c5-)" ;;
+    .wh.*) is_wh=1; whname="\${base#.wh.}" ;;
   esac
   if [ "$is_wh" = "0" ] && [ -c "$UP/$rel" ]; then
     if is_whiteout_char "$UP/$rel"; then is_wh=1; whname="$base"; else printf 'S\\t%s\\tspecial-char-device\\0' "$rel"; continue; fi
@@ -373,6 +418,10 @@ find . -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
   # --- symlink (check BEFORE -d/-f: a symlink-to-dir must not be treated as a dir) ---
   if [ -L "$UP/$rel" ]; then
     ltarget="$(readlink "$UP/$rel")"
+    if has_tab "$ltarget"; then
+      printf 'S\\t%s\\tunsafe-record-target\\0' "\${rel//"$TAB_CHAR"/?}"
+      continue
+    fi
     if symlink_escapes "$ltarget"; then printf 'S\\t%s\\tescaping-symlink\\0' "$rel"; continue; fi
     if ! safe_parent "$rel" "$DEST"; then printf 'S\\t%s\\tescaping-symlink-path\\0' "$rel"; continue; fi
     mkdir -p "$DEST/$dir" 2>/dev/null || true

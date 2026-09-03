@@ -13,7 +13,9 @@
  * │   ├── artifacts/runs/{workflow-id}/  # Workflow artifacts (NEVER in git)
  * │   ├── logs/{workflow-id}.jsonl       # Workflow execution logs
  * │   └── state/                         # $STATE_DIR — cross-run state, shared per project
+ * ├── temp/                              # Ephemeral scratch (per-simulation dry-run dirs)
  * ├── worktrees/                         # Legacy global worktrees (for repos not in workspaces/)
+ * ├── install.json                       # Last compiled CLI invoked
  * └── config.yaml                        # Global config
  *
  * `resolveProjectStorageKey` + `getProjectStoragePaths` are the single source of
@@ -22,7 +24,7 @@
  * For Docker: /.archon/
  */
 
-import { join, dirname, normalize, basename, sep } from 'path';
+import { join, dirname, normalize, basename, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { access, mkdir, symlink, lstat, readdir, readlink, realpath, rm, stat } from 'fs/promises';
 import { readFileSync } from 'fs';
@@ -47,13 +49,50 @@ export function expandTilde(path: string): string {
 }
 
 /**
+ * Canonicalize a directory path into the single form stored in and looked up
+ * from `remote_agent_codebases.default_cwd`.
+ *
+ * Every writer and every reader of that column MUST resolve through this one
+ * function. The column is matched by exact string equality (and by a
+ * separator-anchored prefix), so two call sites using two different
+ * canonicalizers silently stop finding each other's rows. That is issue #2927:
+ * on Windows `fs/promises.realpath` expands an 8.3 short component
+ * (`C:\Users\RUNNER~1\…` → `C:\Users\runneradmin\…`) while `fs.realpathSync`
+ * does not, so a folder project registered by the CLI became invisible to every
+ * later command run in that same directory.
+ *
+ * `fs/promises.realpath` is the chosen implementation for two reasons. It is the
+ * only variant whose Windows short-name behaviour has actually been observed
+ * here (`fs.realpathSync.native` is believed equivalent but is unverified on
+ * Windows, so nothing depends on it). And expansion is what makes this a
+ * canonicalization at all: the long name is the one name a directory has, so
+ * the non-expanding variant would leave two spellings of one directory able to
+ * register two rows.
+ *
+ * Fail-safe: a path that cannot be resolved (missing, unreadable parent, race)
+ * canonicalizes to its own absolute form rather than throwing, so a lookup still
+ * gets an answer to reject. Nothing is swallowed — callers that require the path
+ * to exist detect it immediately afterwards (`registerFolder` stats the result;
+ * a reader misses the lookup and reports an unregistered directory).
+ */
+export async function canonicalizeProjectPath(path: string): Promise<string> {
+  const absolute = resolve(expandTilde(path));
+  try {
+    return await realpath(absolute);
+  } catch (err) {
+    getLog().debug({ err, path: absolute }, 'paths.canonicalize_project_path_failed');
+    return absolute;
+  }
+}
+
+/**
  * Detect if running in Docker container
  */
-export function isDocker(): boolean {
+export function isDocker(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
-    process.env.WORKSPACE_PATH === '/workspace' ||
-    (process.env.HOME === '/root' && Boolean(process.env.WORKSPACE_PATH)) ||
-    process.env.ARCHON_DOCKER === 'true'
+    env.WORKSPACE_PATH === '/workspace' ||
+    (env.HOME === '/root' && Boolean(env.WORKSPACE_PATH)) ||
+    env.ARCHON_DOCKER === 'true'
   );
 }
 
@@ -103,12 +142,12 @@ export function getWSLDistroName(): string | undefined {
  * - Docker: /.archon
  * - Local: ~/.archon (or ARCHON_HOME env var)
  */
-export function getArchonHome(): string {
-  if (isDocker()) {
+export function getArchonHome(env: NodeJS.ProcessEnv = process.env): string {
+  if (isDocker(env)) {
     return '/.archon';
   }
 
-  const envHome = process.env.ARCHON_HOME;
+  const envHome = env.ARCHON_HOME;
   if (envHome) {
     if (envHome === 'undefined') {
       throw new Error(
@@ -150,10 +189,24 @@ export function getArchonWorktreesPath(): string {
 }
 
 /**
+ * Get the ephemeral scratch area (~/.archon/temp/).
+ * Contents are per-process throwaway — each consumer creates a uniquely named
+ * subdirectory and removes it when done (currently: dry-run simulations).
+ */
+export function getArchonTempPath(): string {
+  return join(getArchonHome(), 'temp');
+}
+
+/**
  * Get the global config file path
  */
 export function getArchonConfigPath(): string {
   return join(getArchonHome(), 'config.yaml');
+}
+
+/** Path to the compiled CLI discovery manifest (`<ARCHON_HOME>/install.json`). */
+export function getInstallManifestPath(): string {
+  return join(getArchonHome(), 'install.json');
 }
 
 /** Path where the auto-provisioned encryption key is stored (~/.archon/credential-key). */
@@ -524,7 +577,7 @@ export function getRunArtifactsPath(owner: string, repo: string, workflowRunId: 
  * Returns: ~/.archon/workspaces/owner/repo/logs/{id}.jsonl
  */
 export function getRunLogPath(owner: string, repo: string, workflowRunId: string): string {
-  return join(getProjectLogsPath(owner, repo), `${workflowRunId}.jsonl`);
+  return getRunLogPathForRoot(getProjectRoot(owner, repo), workflowRunId);
 }
 
 /**
@@ -584,8 +637,8 @@ export type ProjectStorageKey =
   | { kind: 'cwd'; cwd: string };
 
 /**
- * The four output roots every project kind has. Composed from one project root
- * so the tree is identical no matter which key resolved it.
+ * The output roots every project kind has. Composed from one project root so
+ * the tree is identical no matter which key resolved it.
  */
 export interface ProjectStoragePaths {
   /** `~/.archon/workspaces/<...>/` — the project root all output hangs off. */
@@ -596,6 +649,15 @@ export interface ProjectStoragePaths {
   logsDir: string;
   /** `$STATE_DIR` — per-PROJECT cross-run state, shared by every workflow. */
   stateRoot: string;
+  /**
+   * Parent of the `runs/<run-id>/` layout holding each run's frozen workflow source.
+   *
+   * A sibling of `artifactsRoot`, deliberately not inside it: `$ARTIFACTS_DIR` is the
+   * run's output channel, handed to every node and listed for humans, and the frozen
+   * pack is neither an output nor something a node should be able to reach by that
+   * path.
+   */
+  workflowSourceRoot: string;
 }
 
 /**
@@ -688,6 +750,22 @@ export function isInsideArchonHome(candidate: string): boolean {
 }
 
 /**
+ * Resolve the durable project root for a persisted run.
+ *
+ * A trusted persisted root preserves the run's original project identity. An
+ * out-of-tree root is stale or corrupt, so readers re-derive the project under
+ * the current ARCHON_HOME when the run still has a codebase row.
+ */
+export function resolveRunStorageRoot(
+  run: { output_root?: string | null },
+  codebase: { kind?: string | null; name: string; default_cwd: string } | null | undefined
+): string | null {
+  if (run.output_root && isInsideArchonHome(run.output_root)) return run.output_root;
+  if (!codebase?.name) return null;
+  return getProjectStoragePaths(resolveProjectStorageKey(codebase, codebase.default_cwd)).root;
+}
+
+/**
  * Compose the output roots from an already-resolved project root — the branch
  * taken when a run recorded its `output_root` at start and must NOT re-derive
  * identity (a renamed codebase would otherwise orphan its artifacts, #1192).
@@ -704,6 +782,7 @@ export function getStoragePathsForRoot(root: string): ProjectStoragePaths {
     artifactsRoot: join(root, 'artifacts'),
     logsDir: join(root, 'logs'),
     stateRoot: join(root, 'state'),
+    workflowSourceRoot: join(root, 'workflow-source'),
   };
 }
 
@@ -728,6 +807,20 @@ export function getRunArtifactsDirForKey(key: ProjectStorageKey, workflowRunId: 
  */
 export function getRunArtifactsDirForRoot(root: string, workflowRunId: string): string {
   return join(getStoragePathsForRoot(root).artifactsRoot, 'runs', workflowRunId);
+}
+
+/** Get a run's JSONL transcript from an already-resolved project root. */
+export function getRunLogPathForRoot(root: string, workflowRunId: string): string {
+  return join(getStoragePathsForRoot(root).logsDir, `${workflowRunId}.jsonl`);
+}
+
+/**
+ * Get a run's frozen workflow source directory from an already-resolved project root:
+ * `<workflowSourceRoot>/runs/<id>`. The same `runs/<id>` shape as artifacts, keyed by
+ * the same run id, so one run's source and output are siblings under one project.
+ */
+export function getRunWorkflowSourceDirForRoot(root: string, workflowRunId: string): string {
+  return join(getStoragePathsForRoot(root).workflowSourceRoot, 'runs', workflowRunId);
 }
 
 // =============================================================================

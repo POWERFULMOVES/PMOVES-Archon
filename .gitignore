@@ -53,6 +53,11 @@ e2e-screenshots/
 # Cross-run workflow state (e.g. issue-triage memory)
 .archon/state/
 
+# Personal per-run steering configs (#2482 sparse run config).
+# The shared .archon/config.yaml stays committed; only config.<name>.yaml variants are local.
+.archon/config.*.yaml
+!.archon/config.example.yaml
+
 # Maintainer standup — per-maintainer state and briefs (direction.md is committed)
 .archon/maintainer-standup/profile.md
 .archon/maintainer-standup/state.json
@@ -123,3 +128,6 @@ test-results/
 
 # Stray run logs from a mis-threaded logDir argument (see #2299) — never committed.
 main/
+
+# Personal per-run config overlays (workflow run --config) — never tracked
+.config.*.yaml

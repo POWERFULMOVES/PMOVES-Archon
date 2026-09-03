@@ -257,7 +257,7 @@ Archon ships with workflows for common development tasks:
 
 Archon ships 19 default workflows - run `archon workflow list` or describe what you want and the router picks the right one.
 
-**Or define your own.** Default workflows are great starting points - copy one from `.archon/workflows/defaults/` and customize it. Workflows are YAML files in `.archon/workflows/`, commands are markdown files in `.archon/commands/`. Same-named files in your repo override the bundled defaults. Commit them - your whole team runs the same process.
+**Or define your own.** Keep a workflow copyable by placing its YAML, commands, and scripts together under `.archon/workflows/<pack>/<workflow>/`; both directory names are yours. The same tree works in target repos and under `~/.archon/workflows/`. Existing flat workflows and shared `.archon/commands/` / `.archon/scripts/` remain supported. Same-named workflow files in your repo override bundled defaults.
 
 See [Authoring Workflows](https://archon.diy/guides/authoring-workflows/) and [Authoring Commands](https://archon.diy/guides/authoring-commands/).
 
@@ -336,7 +336,7 @@ Archon sends a few anonymous events so maintainers can see which workflows get r
 - **Workflow name** — the real name for *bundled* (Archon-authored) workflows; `"custom"` for your own workflows, so private names never leave your machine.
 - **Run shape & outcome** — platform (`cli`/`web`/`slack`/…), provider id (plus the model id on `workflow_invoked`), node count, which node types and features are used (loop/approval/script/bash, structured output, persisted sessions, MCP, skills, fresh-context loops), success/failure, duration, a categorical failure reason, and a fixed-enum failure class (`fatal`/`transient`/`unknown` — never raw error text) plus the failed node's type.
 - **Chat activity** — one event per direct-chat AI turn with platform, provider, model, duration, and completed/failed. Message content, prompts, and conversation ids are never sent.
-- **Aggregate usage** — provider-reported token counts and cost (USD) per workflow run and chat turn, plus total loop iterations per run. Numeric totals only — never the content the tokens represent.
+- **Aggregate usage** — provider-reported gross input, output, optional cache-read/cache-write token totals (with a flag when those totals are a floor), and cost (USD) per workflow run, plus direct-chat usage and total loop iterations. Numeric totals only — never the content the tokens represent.
 - **Machine context** — OS, architecture, Archon version, runtime, whether it's a binary build, and a CI flag.
 - **Deployment shape** (server only) — which adapters are enabled (booleans), database kind (`sqlite`/`postgresql`), whether web auth and multi-user mode are on, and the GitHub auth mode. Configuration *values* (tokens, URLs, hosts) are never sent.
 - A random install UUID stored at `~/.archon/telemetry-id`. Nothing else.

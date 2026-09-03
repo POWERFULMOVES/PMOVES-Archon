@@ -1,7 +1,11 @@
 /**
  * Database operations for isolation environments
  */
-import { pool, getDialect } from './connection';
+import { pool, getDialect, getDatabaseType } from './connection';
+import {
+  TERMINAL_WORKFLOW_STATUSES,
+  RESUMABLE_WORKFLOW_STATUSES,
+} from '@archon/workflows/schemas/workflow-run';
 import type {
   IsolationEnvironmentRow,
   IsolationWorkflowType,
@@ -9,6 +13,7 @@ import type {
   CreateEnvironmentParams,
 } from '@archon/isolation';
 import { createLogger } from '@archon/paths';
+import { toHydratedTimestamp } from './timestamps';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -18,19 +23,23 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 /**
- * Normalize an isolation-environment row so `metadata` is ALWAYS a parsed object,
- * regardless of dialect. SQLite stores `metadata` as TEXT (a JSON string,
- * `JSON.stringify`'d on write) while Postgres returns a parsed JSONB object — so the
- * raw SQLite row hands back a STRING, which makes `IsolationEnvironmentRow.metadata`
- * (typed `Record<string, unknown>`) a lie on SQLite. That lie once leaked a container
- * during Phase B smoke testing: `destroy()` read `metadata.containerName` off the
- * string as `undefined` and silently skipped `docker rm`. Parsing here at the store
- * boundary makes the type TRUE for every consumer, so no downstream reader has to
- * re-guard the shape. A corrupt string is logged and normalized to `{}` — the read
- * stays resilient (one bad row must not break `isolation list`/cleanup for all rows),
- * while the destructive path (container `destroy()`) still throws loudly when the
- * resulting object lacks the fields it needs. Mirrors `normalizeWorkflowRun` in
- * `workflows.ts`. `metadata` is the only JSON column on this row.
+ * Normalize an isolation-environment row so it matches the
+ * `IsolationEnvironmentRow` type's promise for every consumer, regardless of
+ * dialect. SQLite stores `metadata` as TEXT (a JSON string, `JSON.stringify`'d
+ * on write) while Postgres returns a parsed JSONB object — so the raw SQLite row
+ * hands back a STRING, which makes the typed `Record<string, unknown>` a lie on
+ * SQLite. That lie once leaked a container during Phase B smoke testing:
+ * `destroy()` read `metadata.containerName` off the string as `undefined` and
+ * silently skipped `docker rm`. Parsing here at the store boundary makes the type
+ * TRUE, so no downstream reader has to re-guard the shape. A corrupt string is
+ * logged and normalized to `{}` — the read stays resilient (one bad row must not
+ * break `isolation list`/cleanup for all rows), while the destructive path
+ * (container `destroy()`) still throws loudly when the resulting object lacks the
+ * fields it needs. The same boundary hydrates `created_at`: SQLite stores it as
+ * zone-less UTC TEXT that JavaScript parses as LOCAL time, so staleness math like
+ * cleanup's `isEnvironmentStale` shifts every environment's computed age by the
+ * host's UTC offset (older-looking east of UTC, younger west) without
+ * re-anchoring. Mirrors `normalizeWorkflowRun` in workflows.ts.
  */
 function normalizeEnvironmentRow<T extends IsolationEnvironmentRow>(row: T): T {
   if (typeof row.metadata === 'string') {
@@ -41,6 +50,7 @@ function normalizeEnvironmentRow<T extends IsolationEnvironmentRow>(row: T): T {
       row.metadata = {};
     }
   }
+  if (typeof row.created_at === 'string') row.created_at = toHydratedTimestamp(row.created_at);
   return row;
 }
 
@@ -86,6 +96,38 @@ export async function listByCodebase(
     [codebaseId]
   );
   return result.rows.map(normalizeEnvironmentRow);
+}
+
+/**
+ * Find the newest environment record for an exact project checkout path.
+ *
+ * Unlike operational environment lists, adoption needs the destroyed row: its
+ * branch name is the durable route back to an estate after cleanup removed the
+ * worktree. Scope by codebase, path, and the cutoff timestamp so neither an
+ * unrelated project nor a later checkout that reused the path can cross the
+ * ownership boundary.
+ */
+export async function findLatestByCodebaseAndWorkingPath(
+  codebaseId: string,
+  workingPath: string,
+  createdBefore: Date
+): Promise<IsolationEnvironmentRow | null> {
+  // SQLite stores datetime('now') as TEXT in this exact shape, so its cutoff
+  // must use the same representation for lexicographic comparison. Postgres
+  // compares native timestamps and accepts ISO 8601 directly.
+  const cutoff =
+    getDatabaseType() === 'sqlite'
+      ? createdBefore.toISOString().replace('T', ' ').slice(0, 19)
+      : createdBefore.toISOString();
+  const result = await pool.query<IsolationEnvironmentRow>(
+    `SELECT * FROM remote_agent_isolation_environments
+     WHERE codebase_id = $1 AND working_path = $2 AND created_at <= $3
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [codebaseId, workingPath, cutoff]
+  );
+  const row = result.rows[0];
+  return row ? normalizeEnvironmentRow(row) : null;
 }
 
 /**
@@ -206,14 +248,58 @@ export async function countActiveByCodebase(codebaseId: string): Promise<number>
 }
 
 /**
- * Find conversations using an isolation environment
+ * A run releases its environment only once it can never claim it again: terminal
+ * AND not resumable. 'failed' is terminal but resumable, and its worktree/branch is
+ * the only estate `workflow run --resume` and `--adopt` can attach to — cleanup's
+ * destroy path force-deletes the local branch (`git branch -D`, regardless of merge
+ * state), so releasing a failed run's env discards committed-but-unpushed work with
+ * no recovery path. Derived rather than hand-listed so a new resumable status keeps
+ * its pin automatically.
  */
-export async function getConversationsUsingEnv(envId: string): Promise<string[]> {
-  const result = await pool.query<{ id: string }>(
-    'SELECT id FROM remote_agent_conversations WHERE isolation_env_id = $1',
-    [envId]
+const UNCLAIMABLE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES.filter(
+  status => !RESUMABLE_WORKFLOW_STATUSES.includes(status)
+);
+
+/**
+ * Find a workflow run that still owns an environment — the one signal that pins an
+ * env for cleanup. Historical conversation rows are data, not locks: every
+ * CLI-launched run leaves one behind, so counting references pinned every
+ * environment forever (#2868).
+ *
+ * "Owns" means the run can still act on the estate: it is running, pending or
+ * paused, or it failed and remains resumable. See UNCLAIMABLE_WORKFLOW_STATUSES.
+ *
+ * A run attaches to an env through either route the code stamps:
+ * - its own metadata.isolation_env_id (container runs, sub-run child worktrees)
+ * - its worker conversation's isolation_env_id (top-level runs)
+ */
+export async function getLiveRunOwningEnv(
+  envId: string
+): Promise<{ id: string; status: string } | null> {
+  const postgres = getDatabaseType() === 'postgresql';
+  const envIdExtract = postgres
+    ? "r.metadata->>'isolation_env_id'"
+    : "json_extract(r.metadata, '$.isolation_env_id')";
+  // Postgres types conversations.isolation_env_id as UUID; the cast keeps the
+  // shared $1 parameter text-typed across both OR branches — an untyped $1
+  // compared against text and UUID columns in one OR is rejected at parse time.
+  const conversationEnvMatch = postgres ? 'c.isolation_env_id::text' : 'c.isolation_env_id';
+  // Placeholders follow the unclaimable statuses' length so a new status extends
+  // the IN list without a hand-edited parameter position.
+  const unclaimablePlaceholders = UNCLAIMABLE_WORKFLOW_STATUSES.map(
+    (_, i) => `$${String(i + 2)}`
+  ).join(', ');
+  const result = await pool.query<{ id: string; status: string }>(
+    `SELECT r.id, r.status
+     FROM remote_agent_workflow_runs r
+     LEFT JOIN remote_agent_conversations c ON c.id = r.conversation_id
+     WHERE (r.status NOT IN (${unclaimablePlaceholders}))
+       AND (${envIdExtract} = $1 OR ${conversationEnvMatch} = $1)
+     ORDER BY r.started_at DESC
+     LIMIT 1`,
+    [envId, ...UNCLAIMABLE_WORKFLOW_STATUSES]
   );
-  return result.rows.map(r => r.id);
+  return result.rows[0] ?? null;
 }
 
 /**

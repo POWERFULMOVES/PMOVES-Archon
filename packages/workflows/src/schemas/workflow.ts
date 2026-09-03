@@ -6,18 +6,31 @@ import { z } from '@hono/zod-openapi';
 import {
   dagNodeSchema,
   effortLevelSchema,
-  thinkingConfigSchema,
   sandboxSettingsSchema,
   betasSchema,
   KNOWN_DAG_NODE_KEYS,
 } from './dag-node';
-import type { NestedKeySpec } from './dag-node';
+import type { DagNode, NestedKeySpec } from './dag-node';
+import { jsonValueSchema } from '../output-ref';
+import { rejectRetiredThinking, type EffortLevel } from './effort';
 
 // ---------------------------------------------------------------------------
 // Shared enum schemas
 // ---------------------------------------------------------------------------
 
-export const modelReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']);
+/**
+ * DEPRECATED (#2556). The Codex-only spelling of reasoning depth.
+ *
+ * This is an ACCEPTED-INPUT alias only: the loader translates
+ * `modelReasoningEffort:` into `effort:` and never emits it, so a
+ * `WorkflowDefinition` produced by `parseWorkflow` never carries the field.
+ * It stays on the schema so `KNOWN_WORKFLOW_KEYS` still recognises it — dropping
+ * it would turn an author's deprecated-but-valid line into an "unknown key"
+ * warning and silently discard the value instead of honouring it.
+ *
+ * It derives from the shared ladder while the deprecated field remains accepted.
+ */
+export const modelReasoningEffortSchema = effortLevelSchema;
 
 export type ModelReasoningEffort = z.infer<typeof modelReasoningEffortSchema>;
 
@@ -98,21 +111,63 @@ export type WorkflowContainerPolicy = z.infer<typeof workflowContainerPolicySche
 // ---------------------------------------------------------------------------
 
 /**
- * Terminal-success evidence gate. When `required: true`, the DAG executor
+ * Terminal file-presence gate. When `required: true`, the DAG executor
  * refuses to flip the run to `completed` unless `$ARTIFACTS_DIR/evidence.json`
  * exists — a missing file marks the run `failed` with a structured note at
- * `metadata.evidence_validation`. The engine gates ONLY on file presence:
- * producing (and validating the content of) the evidence belongs to the
- * workflow's own bash/script nodes (constitution: code computes, YAML
- * coordinates). Deliberately narrow — no schema validation, no content checks,
- * no configurable path (deferred until the gate sees adoption; see #2230).
+ * `metadata.evidence_validation`. The engine gates only on file presence; any
+ * contents satisfy it, and their presence does not prove that a check ran or
+ * author a workflow outcome. Deterministic checks remain ordinary bash/script
+ * nodes. Deliberately narrow — no schema validation, no content checks, and no
+ * configurable path (see #2230).
  */
 export const workflowEvidencePolicySchema = z.object({
-  /** Refuse terminal `completed` unless `$ARTIFACTS_DIR/evidence.json` exists. */
+  /** Refuse terminal `completed` unless the conventional marker file exists. */
   required: z.boolean(),
 });
 
 export type WorkflowEvidencePolicy = z.infer<typeof workflowEvidencePolicySchema>;
+
+// ---------------------------------------------------------------------------
+// Workflow signature — declared inputs (#2470, Signature Phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Declaration of a single input a workflow accepts. All fields optional:
+ *  - `required` — a caller MUST supply this via `with:`; a bare top-level run
+ *    of a workflow with an unsatisfied required input fails before any cost.
+ *  - `default`  — value used when a caller omits the input (mutually exclusive
+ *    with `required: true`; the loader drops any key that declares both).
+ *  - `description` — human documentation only, unused by the engine.
+ *
+ * This is declarative metadata the engine needs to wire and validate `with:`
+ * against — it coordinates, it does not compute (Workflow Language Constitution).
+ */
+export const workflowInputSpecSchema = z.object({
+  required: z.boolean().optional(),
+  // Any JSON-compatible value (#2637): a boolean/number/array default keeps its
+  // logical type through the input contract instead of arriving as text.
+  default: jsonValueSchema.optional(),
+  description: z.string().optional(),
+});
+
+export type WorkflowInputSpec = z.infer<typeof workflowInputSpecSchema>;
+
+/**
+ * Deprecation marker (#2781). A bundle declares this on a workflow that is being
+ * replaced and kept only for a deprecation window; every run-start surface then
+ * composes its standard notice around `message`.
+ *
+ * Declare-and-done: a future deprecation of any bundled workflow (or a replaced
+ * pack revision) needs no engine change — set the field, get the notice. Pure
+ * declarative coordination, so it stays admissible under the Workflow Language
+ * Constitution (code computes, YAML coordinates).
+ */
+export const workflowDeprecationSchema = z.object({
+  /** Per-item sentence carried inside the standard run-start deprecation notice. */
+  message: z.string().min(1),
+});
+
+export type WorkflowDeprecation = z.infer<typeof workflowDeprecationSchema>;
 
 // ---------------------------------------------------------------------------
 // WorkflowBase — common fields shared by all workflow types
@@ -125,9 +180,28 @@ export const workflowBaseSchema = z.object({
   model: z.string().optional(),
   modelReasoningEffort: modelReasoningEffortSchema.optional(),
   webSearchMode: webSearchModeSchema.optional(),
+  /**
+   * The workflow's CLASS declaration (#2707 step 2): `true` means this
+   * workflow's tree may pause. Every background-dispatch entry point
+   * independently refuses to background an `interactive: true` workflow —
+   * CLI `--detach`, the `manage_run` native tool, and web's default
+   * background dispatch — so a pause always has a foreground driver watching
+   * for it. Absent/`false` means the workflow is unattended-class; it is
+   * also the class a `fan_out:` target must resolve to.
+   *
+   * See `validateWorkflowClassPlacement`'s doc comment in `loader.ts` for the
+   * precise load-time enforcement scope — it is narrower than "no pause node
+   * anywhere": a NATIVE gate/interactive-loop authored directly in this
+   * workflow's own DAG without `interactive: true` is inferred as
+   * `interactive: true` with a one-time WARN during a grace period (#2736/
+   * #2738), not a load error. A gate that arrives via `include:` composition
+   * is deliberately NOT covered here (`assertComposedGateDriveable` remains
+   * the invocation-time check for that case — the same reusable block can be
+   * legitimately composed by different parents, so load time cannot always
+   * tell which workflow will own a given run).
+   */
   interactive: z.boolean().optional(),
   effort: effortLevelSchema.optional(),
-  thinking: thinkingConfigSchema.optional(),
   fallbackModel: z.string().min(1).optional(),
   betas: betasSchema.optional(),
   sandbox: sandboxSettingsSchema.optional(),
@@ -155,6 +229,38 @@ export const workflowBaseSchema = z.object({
    * when per-user GitHub is enabled; a no-op for solo PAT installs.
    */
   requires: z.array(workflowRequirementSchema).optional(),
+  /**
+   * Declared inputs this workflow accepts (#2470). A caller supplies values via
+   * `with:` on the `include:`/`workflow:` node that references this workflow;
+   * for sub-runs the values become `$INPUTS.<name>` runtime variables on the
+   * child. When a workflow declares `inputs:`, callers are validated against it
+   * (missing required / undeclared key = load error); a workflow with no
+   * `inputs:` keeps Phase-1 behaviour untouched.
+   */
+  inputs: z.record(z.string(), workflowInputSpecSchema).optional(),
+  /**
+   * The node id whose output IS this workflow's result (#2470). Drives
+   * `$blk.output` for include blocks (the block's `primarySink`, overriding the
+   * positional first-sink default) and the terminal output of a `workflow:`
+   * sub-run child. Selecting by id (not text) works for every node type,
+   * including a non-sink node.
+   */
+  returns: z.string().min(1).optional(),
+  /**
+   * Required boolean property on the declared `returns:` node that records the
+   * workflow author's verdict independently from the run lifecycle (#2618).
+   * The loader validates the selected node's `output_format` contract; the
+   * engine maps exact true/false values to succeeded/failed without inference.
+   */
+  outcome_field: z.string().trim().min(1).optional(),
+  /**
+   * Marks the workflow deprecated (#2781): run-start surfaces announce removal
+   * in an upcoming release with a switch/copy escape hatch, while it keeps
+   * running normally. Metadata-only — never blocks or alters execution.
+   * Bundled defaults carry it during a deprecation window; nothing may ship it
+   * on the exempt `archon-assist` default.
+   */
+  deprecated: workflowDeprecationSchema.optional(),
 });
 
 export type WorkflowBase = z.infer<typeof workflowBaseSchema>;
@@ -167,12 +273,35 @@ export type WorkflowBase = z.infer<typeof workflowBaseSchema>;
  * Workflow definition parsed from YAML.
  * All workflows use DAG-based execution with `nodes`.
  */
-export const workflowDefinitionSchema = workflowBaseSchema.extend({
+const workflowDefinitionObjectSchema = workflowBaseSchema.extend({
   nodes: z.array(dagNodeSchema),
 });
+export const workflowDefinitionSchema = z.preprocess(
+  rejectRetiredThinking,
+  workflowDefinitionObjectSchema
+);
 
-/** Workflow definition with fully typed nodes (DagNode[]) derived from the schema. */
+/** Authored workflow definition parsed from YAML, before include expansion. */
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema> & { prompt?: never };
+
+/** Static execution plan attached after include expansion and graph validation. */
+export interface GraphPlan {
+  readonly nodes: readonly DagNode[];
+  readonly layers: readonly (readonly DagNode[])[];
+  readonly sinks: readonly string[];
+}
+
+/** Nominal identity retained only by values produced through `resolveWorkflow`. */
+declare class ResolvedWorkflowIdentity {
+  private readonly identity: never;
+}
+
+/** Include-free workflow accepted by execution and simulation boundaries. */
+export type ResolvedWorkflow = Omit<WorkflowDefinition, 'nodes'> &
+  ResolvedWorkflowIdentity & {
+    readonly nodes: readonly DagNode[];
+    readonly plan: GraphPlan;
+  };
 
 // ---------------------------------------------------------------------------
 // Known workflow keys — used by the loader to detect unknown/misplaced keys
@@ -184,7 +313,7 @@ export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema> & { pr
  * Used by parseWorkflow to warn on unknown keys (#2213).
  */
 export const KNOWN_WORKFLOW_KEYS: ReadonlySet<string> = new Set(
-  Object.keys(workflowDefinitionSchema.shape)
+  Object.keys(workflowDefinitionObjectSchema.shape)
 );
 
 /**
@@ -202,17 +331,16 @@ export const WORKFLOW_ONLY_KEYS: ReadonlySet<string> = new Set(
  * KNOWN_NODE_NESTED_KEYS — an unknown key one level down is stripped just as
  * silently as one at the top (#2213).
  *
- * `sandbox` (`.passthrough()`) and `thinking` (`z.preprocess`) are omitted for
- * the same reasons they are omitted at node level. `nodes` is handled by the
- * per-node check, not here.
+ * `sandbox` (`.passthrough()`) is omitted because it preserves unknown fields.
+ * `nodes` is handled by the per-node check, not here.
  *
- * Constructed with `keyof typeof workflowDefinitionSchema.shape` as the key type
+ * Constructed with `keyof typeof workflowDefinitionObjectSchema.shape` as the key type
  * so a typo'd registration fails to compile rather than silently disabling the
  * check; the exported type widens back to `string` for lookup (same split as
  * KNOWN_NODE_NESTED_KEYS).
  */
 export const KNOWN_WORKFLOW_NESTED_KEYS: ReadonlyMap<string, NestedKeySpec> = new Map<
-  keyof typeof workflowDefinitionSchema.shape,
+  keyof typeof workflowDefinitionObjectSchema.shape,
   NestedKeySpec
 >([
   ['worktree', { kind: 'object', keys: new Set(Object.keys(workflowWorktreePolicySchema.shape)) }],
@@ -223,6 +351,17 @@ export const KNOWN_WORKFLOW_NESTED_KEYS: ReadonlyMap<string, NestedKeySpec> = ne
   [
     'evidence_policy',
     { kind: 'object', keys: new Set(Object.keys(workflowEvidencePolicySchema.shape)) },
+  ],
+  ['deprecated', { kind: 'object', keys: new Set(Object.keys(workflowDeprecationSchema.shape)) }],
+  // First `record` entry in this map: `inputs` is a record of input-name → spec,
+  // so unknown keys under an individual spec (e.g. `inputs.diff.typo`) warn.
+  // `returns` and `outcome_field` are plain strings and need no nested registration.
+  [
+    'inputs',
+    {
+      kind: 'record',
+      entry: { kind: 'object', keys: new Set(Object.keys(workflowInputSpecSchema.shape)) },
+    },
   ],
 ]);
 
@@ -269,12 +408,30 @@ export type WorkflowExecutionResult =
  */
 export type WorkflowSource = 'bundled' | 'global' | 'project';
 
+/**
+ * The workflow-level configuration an author WROTE, captured before composition
+ * collapsed it onto the workflow's own nodes and removed the workflow-level layer
+ * (#1764). This is not a second representation of a live value — the collapsed
+ * definition no longer holds these fields at all.
+ *
+ * Read it for display and for labelling a run; never for execution. Execution reads
+ * `WorkflowWithSource.workflow`, whose nodes each carry their own resolved values.
+ * Deliberately narrow: the fields a person is shown, not the whole travelling set.
+ */
+export interface DeclaredWorkflowConfig {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly effort?: EffortLevel;
+}
+
 /** A workflow definition paired with its discovery source. */
 export interface WorkflowWithSource {
-  readonly workflow: WorkflowDefinition;
+  readonly workflow: ResolvedWorkflow;
   readonly source: WorkflowSource;
   /** Warnings from YAML parsing (e.g. unknown keys) — never hard-fails. */
   readonly parseWarnings?: readonly string[];
+  /** What the author declared at workflow level, for display. @see DeclaredWorkflowConfig */
+  readonly declared?: DeclaredWorkflowConfig;
 }
 
 /**

@@ -15,7 +15,8 @@ import { registerPiProvider } from './community/pi/registration';
 import { registerCopilotProvider } from './community/copilot/registration';
 import { registerOpencodeProvider } from './community/opencode/registration';
 import { UnknownProviderError } from './errors';
-import type { ProviderRegistration, IAgentProvider, ProviderCapabilities } from './types';
+import type { ProviderRegistration, IAgentProvider } from './types';
+import { EFFORT_LADDER } from '@archon/paths/effort';
 
 /** Minimal mock provider for testing registration. */
 function makeMockProvider(id: string): IAgentProvider {
@@ -32,11 +33,11 @@ function makeMockProvider(id: string): IAgentProvider {
       envInjection: false,
       costControl: false,
       effortControl: false,
-      thinkingControl: false,
       fallbackModel: false,
       sandbox: false,
       nativeTools: false,
       containerExec: false,
+      settingSources: false,
     }),
     async *sendQuery() {
       yield { type: 'result' as const };
@@ -56,6 +57,7 @@ function makeMockRegistration(
     builtIn: false,
     credentials: { kind: 'static', specs: [] },
     ...overrides,
+    parseRunConfig: overrides?.parseRunConfig ?? (raw => raw),
   };
 }
 
@@ -126,6 +128,7 @@ describe('registry', () => {
   describe('getProviderCapabilities', () => {
     test('returns Claude capabilities without instantiation', () => {
       const caps = getProviderCapabilities('claude');
+      expect(caps.sessionFork).toBe(true);
       expect(caps.mcp).toBe(true);
       expect(caps.hooks).toBe(true);
       expect(caps.envInjection).toBe(true);
@@ -133,6 +136,7 @@ describe('registry', () => {
 
     test('returns Codex capabilities without instantiation', () => {
       const caps = getProviderCapabilities('codex');
+      expect(caps.sessionFork).toBe(false);
       expect(caps.mcp).toBe(true);
       expect(caps.hooks).toBe(false);
       expect(caps.envInjection).toBe(true);
@@ -176,6 +180,20 @@ describe('registry', () => {
     test('throws on duplicate registration', () => {
       expect(() => registerProvider(makeMockRegistration('claude'))).toThrow(
         "Provider 'claude' is already registered"
+      );
+    });
+
+    test('rejects session fork support without session resume support', () => {
+      const entry = makeMockRegistration('invalid-fork', {
+        capabilities: {
+          ...makeMockProvider('invalid-fork').getCapabilities(),
+          sessionFork: true,
+          sessionResume: false,
+        },
+      });
+
+      expect(() => registerProvider(entry)).toThrow(
+        "Provider 'invalid-fork' cannot advertise sessionFork without sessionResume"
       );
     });
   });
@@ -222,6 +240,7 @@ describe('registry', () => {
         expect(info).not.toHaveProperty('factory');
         expect(info).not.toHaveProperty('isModelCompatible');
       }
+      expect(infos.find(info => info.id === 'codex')?.effortLevels).toBe(EFFORT_LADDER);
     });
   });
 
@@ -290,15 +309,15 @@ describe('registry', () => {
       expect(piEntries).toHaveLength(1);
     });
 
-    test('declares v2 capabilities (thinking, effort, tools, skills, sessionResume, envInjection, structuredOutput supported)', () => {
+    test('declares v2 capabilities (effort, tools, skills, sessionResume, envInjection, structuredOutput supported)', () => {
       registerPiProvider();
       const caps = getProviderCapabilities('pi');
       // Flipped true in v2
-      expect(caps.thinkingControl).toBe(true);
       expect(caps.effortControl).toBe(true);
       expect(caps.toolRestrictions).toBe(true);
       expect(caps.skills).toBe(true);
       expect(caps.sessionResume).toBe(true);
+      expect(caps.sessionFork).toBe(true);
       expect(caps.envInjection).toBe(true);
       // Best-effort structured output via prompt engineering + post-parse —
       // not SDK-enforced like Claude/Codex, but wired up and tested.
@@ -344,19 +363,18 @@ describe('registry', () => {
       expect(opencodeEntries).toHaveLength(1);
     });
 
-    test('declares capabilities (sessionResume, mcp, structuredOutput, envInjection, skills, agents, toolRestrictions supported; hooks off because nodeConfig.hooks has no translation site; effort/thinking off because opencode.json owns those)', () => {
+    test('declares capabilities (sessionResume, structuredOutput, envInjection, agents, and toolRestrictions supported; untranslated node fields stay off)', () => {
       registerOpencodeProvider();
       const caps = getProviderCapabilities('opencode');
       expect(caps.sessionResume).toBe(true);
-      expect(caps.mcp).toBe(true);
+      expect(caps.mcp).toBe(false);
       expect(caps.structuredOutput).toBe('enforced');
       expect(caps.envInjection).toBe(true);
       expect(caps.hooks).toBe(false);
-      expect(caps.skills).toBe(true);
+      expect(caps.skills).toBe(false);
       expect(caps.agents).toBe(true);
       expect(caps.toolRestrictions).toBe(true);
       expect(caps.effortControl).toBe(false);
-      expect(caps.thinkingControl).toBe(false);
       expect(caps.costControl).toBe(false);
       expect(caps.fallbackModel).toBe(false);
       expect(caps.sandbox).toBe(false);
@@ -401,7 +419,6 @@ describe('registry', () => {
       expect(caps.sessionResume).toBe(true);
       expect(caps.envInjection).toBe(true);
       expect(caps.effortControl).toBe(true);
-      expect(caps.thinkingControl).toBe(true);
       expect(caps.mcp).toBe(true);
       expect(caps.hooks).toBe(false);
       expect(caps.skills).toBe(true);

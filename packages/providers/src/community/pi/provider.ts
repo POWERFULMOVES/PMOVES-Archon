@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,7 @@ import type {
 import { PI_CAPABILITIES } from './capabilities';
 import { parsePiConfig, resolvePiExtensionSettings } from './config';
 import { parsePiModelRef } from './model-ref';
+import { buildCustomProviderModelsPath } from './request-auth';
 import { withResumedOutcome, resumedOutcome } from '../../shared/resumed';
 
 // IMPORTANT: Do NOT add static `import { ... } from '@earendil-works/*'` here,
@@ -317,7 +318,7 @@ export class PiProvider implements IAgentProvider {
       piCodingAgent,
       { bridgeSession },
       { resolvePiSkills, resolvePiThinkingLevel, resolvePiTools, buildDefaultPiTools },
-      { createNoopResourceLoader, getOrCreateReloadedExtensionLoader },
+      { createPiResourceLoader, getOrCreateReloadedExtensionLoader },
       { resolvePiSession },
       { createArchonUIBridge, createArchonUIContext },
       { buildPiNativeToolDefinitions },
@@ -359,11 +360,44 @@ export class PiProvider implements IAgentProvider {
       }
     }
 
-    // 1. Resolve model ref: request (workflow node / chat) → config default
-    const modelRef = requestOptions?.model ?? piConfig.model;
+    // 1. Resolve model ref: request (workflow node / chat) → config default →
+    //    the operator's own Pi default (defaultProvider/defaultModel in
+    //    ~/.pi/agent/settings.json, as written by the `pi` CLI when a model is
+    //    selected). The settings fallback keeps Archon model-agnostic for Pi:
+    //    no vendor model is hardcoded anywhere, and litellm-only setups — whose
+    //    catalog drifts over time — work without pinning a specific model.
+    //    Mirrors how the standalone `pi` CLI boots with the user's default.
+    let modelRef = requestOptions?.model ?? piConfig.model;
+    if (!modelRef) {
+      try {
+        const settingsManager = piCodingAgent.SettingsManager.create(cwd);
+        const settings = settingsManager.getGlobalSettings();
+        // SettingsManager records malformed/unreadable settings via
+        // drainErrors() rather than throwing, so a broken settings.json yields
+        // default (empty) settings here. Drain + log them so that case is
+        // visible instead of being swallowed behind the "requires a model"
+        // error below (this branch may throw before the main settings load
+        // that would otherwise surface them).
+        for (const { scope, error: settingsErr } of settingsManager.drainErrors()) {
+          getLog().warn({ scope, err: settingsErr }, 'pi.settings_default_model_read_error');
+        }
+        const provider = settings.defaultProvider?.trim();
+        const modelId = settings.defaultModel?.trim();
+        if (provider && modelId) {
+          modelRef = `${provider}/${modelId}`;
+          getLog().info({ modelRef }, 'pi.model_defaulted_from_settings');
+        }
+      } catch (err) {
+        // Non-fatal: settings.json may be absent (user never ran `pi`) or
+        // unreadable. Fall through to the explicit "requires a model" error
+        // below rather than swallowing the missing-model condition.
+        getLog().debug({ err }, 'pi.settings_default_model_read_failed');
+      }
+    }
     if (!modelRef) {
       throw new Error(
-        'Pi provider requires a model. Set `model` on the workflow node or `assistants.pi.model` in .archon/config.yaml. ' +
+        'Pi provider requires a model. Set `model` on the workflow node or `assistants.pi.model` in .archon/config.yaml, ' +
+          'or select a default model in the `pi` CLI (writes defaultProvider/defaultModel to ~/.pi/agent/settings.json). ' +
           "Format: '<pi-provider-id>/<model-id>' (e.g. 'google/gemini-2.5-pro')."
       );
     }
@@ -374,13 +408,36 @@ export class PiProvider implements IAgentProvider {
       );
     }
 
-    // 2. Build AuthStorage + ModelRegistry. Both read on every sendQuery —
+    // 2. Build ModelRuntime + ModelRegistry. Both read on every sendQuery —
     //    user edits to auth.json or models.json take effect without restart.
-    //    ModelRegistry.create() is mutable: extension providers can call registerProvider()
-    //    on it during bindExtensions() to add their models (phase 2 resolution).
-    let authStorage: ReturnType<typeof piCodingAgent.AuthStorage.create>;
-    let modelRegistry: ReturnType<typeof piCodingAgent.ModelRegistry.create>;
+    //    The registry is a thin facade over the runtime — extension providers
+    //    call registerProvider() on it during bindExtensions() to add their
+    //    models (phase 2 resolution).
+    const envVarName = PI_PROVIDER_ENV_VARS[parsed.provider];
+    const oauthVarName = PI_OAUTH_ENV_VARS[parsed.provider];
+    let modelRuntime: Awaited<ReturnType<typeof piCodingAgent.ModelRuntime.create>>;
+    let modelRegistry: InstanceType<typeof piCodingAgent.ModelRegistry>;
+    // For custom (non-built-in) Pi providers, build a per-call `models.json`
+    // with `${VAR}` references substituted against the per-call env. The
+    // SDK's session-auth path resolves `${VAR}` from `process.env`, which
+    // Archon deliberately keeps empty (per-call secrets ride on
+    // `requestOptions.env`); pre-substituting into a per-call file closes
+    // the seam (see `./request-auth.ts` for the full rationale). Declared
+    // as `let` so the assignment sits INSIDE the try below — that way a
+    // `mkdirSync`/`writeFileSync`/`chmodSync` throw is framed as
+    // `'Pi auth storage init failed: …'` (matching the contract the
+    // `request-auth.ts` doc comment promises), and the cleanup `finally`
+    // can still see the value to unlink the file if `ModelRuntime.create`
+    // throws after the substitution succeeded.
+    let customProviderModelsPath: string | undefined;
     try {
+      customProviderModelsPath = !envVarName
+        ? buildCustomProviderModelsPath({
+            provider: parsed.provider,
+            requestEnv: requestOptions?.env,
+            protectedEnvKeys: requestOptions?.protectedEnvKeys,
+          })
+        : undefined;
       // Archon delivers per-user credentials (API keys + subscriptions) as a
       // per-run auth.json and points us at it via ARCHON_PI_AUTH_PATH — using an
       // explicit authPath (not PI_CODING_AGENT_DIR) so the user's models.json /
@@ -391,8 +448,17 @@ export class PiProvider implements IAgentProvider {
       const archonAuthPath =
         (requestOptions?.env?.ARCHON_PI_AUTH_PATH ?? process.env.ARCHON_PI_AUTH_PATH)?.trim() ||
         undefined;
-      authStorage = piCodingAgent.AuthStorage.create(archonAuthPath);
-      modelRegistry = piCodingAgent.ModelRegistry.create(authStorage);
+      // pi-coding-agent 0.84.0 folded AuthStorage + ModelRegistry into a single
+      // ModelRuntime; ModelRegistry is now a thin facade constructed from a
+      // runtime. authPath still feeds the file-backed CredentialStore inside
+      // ModelRuntime — the per-user auth.json path is honoured the same way.
+      // modelsPath follows the same per-call pattern for custom providers'
+      // `${VAR}` substitution.
+      modelRuntime = await piCodingAgent.ModelRuntime.create({
+        authPath: archonAuthPath,
+        ...(customProviderModelsPath ? { modelsPath: customProviderModelsPath } : {}),
+      });
+      modelRegistry = new piCodingAgent.ModelRegistry(modelRuntime);
     } catch (err) {
       const e = err as Error;
       getLog().error({ err: e, piProvider: parsed.provider }, 'pi.auth_storage_init_failed');
@@ -400,6 +466,25 @@ export class PiProvider implements IAgentProvider {
         `Pi auth storage init failed: ${e.message}. Check that ~/.pi/agent/auth.json ` +
           '(or $PI_CODING_AGENT_DIR/auth.json) is valid JSON and readable.'
       );
+    } finally {
+      // The per-call models.json holds the literal substituted secret in
+      // cleartext. ModelRuntime.create reads it once at construction (via
+      // ModelConfig.load); the runtime carries the loaded values for the
+      // rest of the session, so the file can be removed as soon as the
+      // create() promise resolves. Without this cleanup, long-running
+      // processes accumulate one file per sendQuery and eventually hit
+      // ENOSPC, after which buildCustomProviderModelsPath's mkdirSync fails
+      // and the SDK silently falls through to the unsubstituted user
+      // models.json — re-opening the round-1 R1 leak surface. Errors here
+      // are non-fatal (the file may already be gone, or the FS may be in
+      // an odd state); the original error has already been surfaced.
+      if (customProviderModelsPath) {
+        try {
+          rmSync(customProviderModelsPath, { force: true });
+        } catch {
+          // Deliberately swallowed — see comment above.
+        }
+      }
     }
 
     // 3. [LOOKUP-1] Check the static catalog first (phase 1 of 2).
@@ -430,13 +515,16 @@ export class PiProvider implements IAgentProvider {
     //    createClient discriminates OAuth vs api-key by token content (sk-ant-oat*),
     //    so one runtime channel serves both — and setRuntimeApiKey stays runtime-only
     //    (no auth.json disk write, unlike AuthStorage.set) (#1984).
-    const envVarName = PI_PROVIDER_ENV_VARS[parsed.provider];
-    const oauthVarName = PI_OAUTH_ENV_VARS[parsed.provider];
     const readEnvOverride = (name: string | undefined): string | undefined =>
       name ? (requestOptions?.env?.[name] ?? process.env[name]) : undefined;
     const envOverride = readEnvOverride(oauthVarName) ?? readEnvOverride(envVarName);
     if (envOverride) {
-      authStorage.setRuntimeApiKey(parsed.provider, envOverride);
+      // pi 0.84.0+: setRuntimeApiKey is async (the runtime serializes the
+      // credential mutation per provider). await it before any subsequent
+      // getAuth() call so the override is visible to the model resolution
+      // path (otherwise the SDK would read the file-backed credential
+      // before the runtime override lands).
+      await modelRuntime.setRuntimeApiKey(parsed.provider, envOverride);
     }
 
     // Auth validation deferred for extension providers — they manage credentials
@@ -446,12 +534,24 @@ export class PiProvider implements IAgentProvider {
     // detection in step 4c; for 'anthropic' we resolve even when the model is
     // deferred to extensions (AuthStorage reads are cheap and side-effect-free)
     // so a catalog miss can never skip the OAuth-safe default prompt.
-    let resolvedKey: Awaited<ReturnType<typeof authStorage.getApiKey>> | undefined;
-    if (model || parsed.provider === 'anthropic') {
-      resolvedKey = await authStorage.getApiKey(parsed.provider);
+    let resolvedKey: string | undefined;
+    let hasResolvedAuth = false;
+    if (model && !envVarName) {
+      // This is deliberately status-only: Pi resolves models.json request auth
+      // when it sends, and command-backed values must execute only once there.
+      hasResolvedAuth = modelRegistry.hasConfiguredAuth(model);
+    } else if (model || parsed.provider === 'anthropic') {
+      // pi 0.84.0+: ModelRuntime exposes `getAuth(providerId)` returning
+      // `{ auth: { apiKey, headers, baseUrl }, env?, source? } | undefined`.
+      // We only need the apiKey for the Anthropic subscription-OAuth shape
+      // discriminator in step 4c — the SDK reads the credential on its own
+      // when sending.
+      const resolution = await modelRuntime.getAuth(parsed.provider);
+      resolvedKey = resolution?.auth.apiKey;
+      hasResolvedAuth = Boolean(resolvedKey);
     }
     if (model) {
-      if (!resolvedKey) {
+      if (!hasResolvedAuth) {
         if (envVarName) {
           // Name the OAuth var first when the backend has one — a subscription
           // user who hits this miss must be told the var the resolver actually
@@ -488,7 +588,7 @@ export class PiProvider implements IAgentProvider {
     //    trigger a dag-executor warning upstream.
     const nodeConfig = requestOptions?.nodeConfig;
 
-    //    4a. thinkingLevel: covers `thinking`/`effort` nodeConfig fields.
+    //    4a. thinkingLevel: Pi's native representation of Archon's `effort` field.
     const { level: thinkingLevel, warning: thinkingWarning } = resolvePiThinkingLevel(nodeConfig);
     if (thinkingWarning) {
       yield { type: 'system', content: `⚠️ ${thinkingWarning}` };
@@ -568,7 +668,11 @@ export class PiProvider implements IAgentProvider {
     //    was provided but not found, it falls through to a new session and
     //    the caller surfaces a resume_failed warning (matches the Codex
     //    provider's fallback pattern for the same condition).
-    const { sessionManager, resumeFailed } = await resolvePiSession(cwd, resumeSessionId);
+    const { sessionManager, resumeFailed } = await resolvePiSession(
+      cwd,
+      resumeSessionId,
+      requestOptions?.forkSession
+    );
     if (resumeFailed) {
       yield {
         type: 'system',
@@ -654,8 +758,9 @@ export class PiProvider implements IAgentProvider {
     // installed extension factory from scratch and the 2nd reload in a process
     // deadlocks on the first call's never-torn-down state (issue #1877 — see the
     // doc on getOrCreateReloadedExtensionLoader). When extensions are OFF there
-    // is no reload() and thus no re-entrancy hazard, so a fresh per-call loader
-    // is fine. Build the shared options once so the two paths can't drift.
+    // is no re-entrancy hazard, so a fresh per-call loader can reload safely.
+    // That reload is still required for Pi to discover its native context files.
+    // Build the shared options once so the two paths can't drift.
     const loaderOptions = {
       ...(systemPrompt !== undefined ? { systemPrompt } : {}),
       ...(skillPaths.length > 0 ? { additionalSkillPaths: skillPaths } : {}),
@@ -694,7 +799,8 @@ export class PiProvider implements IAgentProvider {
         getLog().debug({ count: providerRegistrations.length }, 'pi.extension_providers_reapplied');
       }
     } else {
-      resourceLoader = createNoopResourceLoader(cwd, loaderOptions);
+      resourceLoader = createPiResourceLoader(cwd, loaderOptions);
+      await resourceLoader.reload();
     }
 
     getLog().info(
@@ -739,8 +845,13 @@ export class PiProvider implements IAgentProvider {
       // createAgentSession accepts this — the model will be set via
       // session.setModel() after bindExtensions() resolves it (step 4g).
       ...(model ? { model } : {}),
-      authStorage,
-      modelRegistry,
+      // pi 0.84.0+: createAgentSession no longer accepts authStorage +
+      // modelRegistry separately; pass the modelRuntime and the SDK builds its
+      // own internal registry facade. The runtime we pass is the one already
+      // scoped with `setRuntimeApiKey` calls above, and for custom providers
+      // it was built against a per-call `modelsPath` with `${VAR}` references
+      // pre-substituted (see step 2 above) — no further per-call wiring.
+      modelRuntime,
       sessionManager,
       settingsManager,
       resourceLoader,
