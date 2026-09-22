@@ -2,10 +2,11 @@
  * Tests for skill install command
  */
 import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { BUNDLED_MANAGE_RUN_SKILL_FILES, BUNDLED_SKILL_FILES } from '../bundled-skill';
+import { removeTempTree } from '@archon/paths/test-utils';
+import { BUNDLED_SKILL_FILES } from '../bundled-skill';
 import { copyArchonSkill, skillInstallCommand } from './skill';
 
 describe('copyArchonSkill', () => {
@@ -15,54 +16,110 @@ describe('copyArchonSkill', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'archon-skill-test-'));
   });
 
-  afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await removeTempTree(tempDir);
   });
 
-  it('writes every bundled skill file under .claude/skills/archon/', async () => {
-    await copyArchonSkill(tempDir);
+  it('creates missing parents and writes exact bundled content in both destinations', async () => {
+    const target = join(tempDir, 'missing-parent', 'project');
+    expect(existsSync(target)).toBe(false);
+    await copyArchonSkill(target);
 
-    const skillRoot = join(tempDir, '.claude', 'skills', 'archon');
-    for (const [relativePath, content] of Object.entries(BUNDLED_SKILL_FILES)) {
-      const dest = join(skillRoot, relativePath);
-      expect(existsSync(dest)).toBe(true);
-      expect(readFileSync(dest, 'utf-8')).toBe(content);
+    for (const root of ['.claude', '.agents']) {
+      const skillRoot = join(target, root, 'skills', 'archon-cli');
+      for (const [relativePath, content] of Object.entries(BUNDLED_SKILL_FILES)) {
+        expect(readFileSync(join(skillRoot, relativePath), 'utf-8')).toBe(content);
+      }
     }
   });
 
-  it('writes every bundled skill file under .agents/skills/archon/ (Codex path)', async () => {
+  it('bundles active cancel guidance without the obsolete abandon mapping', () => {
+    const content = BUNDLED_SKILL_FILES['manage-run/manage-runs.md'];
+    expect(content).toContain('archon workflow cancel <run-id>');
+    expect(content).toContain('archon workflow abandon <run-id>');
+    expect(content).toContain('archon workflow respond <run-id>');
+    expect(content).not.toContain('there is no `archon workflow cancel` CLI subcommand');
+    expect(content).not.toContain('There is no separate `cancel` verb');
+    expect(content).not.toContain('cancel via reject');
+    expect(content).not.toContain('Reject (cancels the workflow)');
+  });
+
+  it('overwrites pre-existing skill files with bundled content in both destinations', async () => {
+    for (const root of ['.claude', '.agents']) {
+      const skillRoot = join(tempDir, root, 'skills', 'archon-cli');
+      mkdirSync(skillRoot, { recursive: true });
+      writeFileSync(join(skillRoot, 'SKILL.md'), 'STALE');
+    }
+
     await copyArchonSkill(tempDir);
 
-    const skillRoot = join(tempDir, '.agents', 'skills', 'archon');
-    for (const [relativePath, content] of Object.entries(BUNDLED_SKILL_FILES)) {
-      const dest = join(skillRoot, relativePath);
-      expect(existsSync(dest)).toBe(true);
-      expect(readFileSync(dest, 'utf-8')).toBe(content);
+    for (const root of ['.claude', '.agents']) {
+      expect(readFileSync(join(tempDir, root, 'skills', 'archon-cli', 'SKILL.md'), 'utf-8')).toBe(
+        BUNDLED_SKILL_FILES['SKILL.md']
+      );
     }
   });
 
-  it('writes every bundled manage-run skill file under .agents/skills/manage-run/ (Codex path)', async () => {
+  it('removes extra files from both owned skill roots without touching sibling skills', async () => {
+    for (const root of ['.claude', '.agents']) {
+      const skillsRoot = join(tempDir, root, 'skills');
+      const skillRoot = join(skillsRoot, 'archon-cli');
+      mkdirSync(skillRoot, { recursive: true });
+      writeFileSync(join(skillRoot, 'retired.md'), 'retired guidance');
+      mkdirSync(join(skillsRoot, 'user-skill'), { recursive: true });
+      writeFileSync(join(skillsRoot, 'user-skill', 'SKILL.md'), 'user guidance');
+    }
+
     await copyArchonSkill(tempDir);
 
-    const skillRoot = join(tempDir, '.agents', 'skills', 'manage-run');
-    for (const [relativePath, content] of Object.entries(BUNDLED_MANAGE_RUN_SKILL_FILES)) {
-      const dest = join(skillRoot, relativePath);
-      expect(existsSync(dest)).toBe(true);
-      expect(readFileSync(dest, 'utf-8')).toBe(content);
+    for (const root of ['.claude', '.agents']) {
+      const skillsRoot = join(tempDir, root, 'skills');
+      expect(existsSync(join(skillsRoot, 'archon-cli', 'retired.md'))).toBe(false);
+      expect(readFileSync(join(skillsRoot, 'user-skill', 'SKILL.md'), 'utf-8')).toBe(
+        'user guidance'
+      );
     }
   });
 
-  it('overwrites pre-existing skill files with bundled content', async () => {
-    const skillRoot = join(tempDir, '.claude', 'skills', 'archon');
-    const skillMdPath = join(skillRoot, 'SKILL.md');
+  it('replaces an archon-cli symlink without deleting its target', async () => {
+    const external = join(tempDir, 'external-skill');
+    mkdirSync(external);
+    writeFileSync(join(external, 'user.md'), 'keep me');
 
-    // Pre-seed with stale content; copyArchonSkill must overwrite it.
-    await copyArchonSkill(tempDir);
-    writeFileSync(skillMdPath, 'STALE');
-    expect(readFileSync(skillMdPath, 'utf-8')).toBe('STALE');
+    for (const root of ['.claude', '.agents']) {
+      const skillsRoot = join(tempDir, root, 'skills');
+      mkdirSync(skillsRoot, { recursive: true });
+      symlinkSync(external, join(skillsRoot, 'archon-cli'), 'dir');
+    }
 
     await copyArchonSkill(tempDir);
-    expect(readFileSync(skillMdPath, 'utf-8')).toBe(BUNDLED_SKILL_FILES['SKILL.md']);
+
+    expect(readFileSync(join(external, 'user.md'), 'utf-8')).toBe('keep me');
+    for (const root of ['.claude', '.agents']) {
+      expect(readFileSync(join(tempDir, root, 'skills', 'archon-cli', 'SKILL.md'), 'utf-8')).toBe(
+        BUNDLED_SKILL_FILES['SKILL.md']
+      );
+    }
+  });
+
+  it('removes obsolete skills from both supported skill roots during upgrades', async () => {
+    for (const root of ['.claude', '.agents']) {
+      const skillsRoot = join(tempDir, root, 'skills');
+      const obsoleteRoots = [join(skillsRoot, 'archon'), join(skillsRoot, 'manage-run')];
+      for (const obsoleteRoot of obsoleteRoots) {
+        mkdirSync(obsoleteRoot, { recursive: true });
+        writeFileSync(join(obsoleteRoot, 'SKILL.md'), 'STALE');
+      }
+    }
+
+    await copyArchonSkill(tempDir);
+
+    for (const root of ['.claude', '.agents']) {
+      const skillsRoot = join(tempDir, root, 'skills');
+      expect(existsSync(join(skillsRoot, 'archon'))).toBe(false);
+      expect(existsSync(join(skillsRoot, 'manage-run'))).toBe(false);
+      expect(existsSync(join(skillsRoot, 'archon-cli', 'SKILL.md'))).toBe(true);
+    }
   });
 });
 
@@ -77,8 +134,8 @@ describe('skillInstallCommand', () => {
     errSpy = spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await removeTempTree(tempDir);
     logSpy.mockRestore();
     errSpy.mockRestore();
   });
@@ -87,10 +144,9 @@ describe('skillInstallCommand', () => {
     const exitCode = await skillInstallCommand(tempDir);
 
     expect(exitCode).toBe(0);
-    expect(existsSync(join(tempDir, '.claude', 'skills', 'archon', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(tempDir, '.claude', 'skills', 'archon-cli', 'SKILL.md'))).toBe(true);
     // Also installs into the Codex path
-    expect(existsSync(join(tempDir, '.agents', 'skills', 'archon', 'SKILL.md'))).toBe(true);
-    expect(existsSync(join(tempDir, '.agents', 'skills', 'manage-run', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(tempDir, '.agents', 'skills', 'archon-cli', 'SKILL.md'))).toBe(true);
     // Final log line should mention restarting both Claude Code and Codex
     const lastLog = logSpy.mock.calls.at(-1)?.[0] as string | undefined;
     expect(lastLog).toContain('Restart Claude Code or Codex');

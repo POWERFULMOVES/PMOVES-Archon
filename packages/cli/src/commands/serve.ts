@@ -1,8 +1,9 @@
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'fs';
 import {
   createLogger,
   getWebDistDir,
+  getSourceWebDistDir,
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
   BUNDLED_WEB_DIST_SHA256,
@@ -11,6 +12,18 @@ import {
 const log = createLogger('cli.serve');
 
 const GITHUB_REPO = 'coleam00/Archon';
+
+/**
+ * Upper bound on the `tar` child. Healthy extractions on the windows runner this
+ * stalls on measure 16–676 ms, and the shipped 2.1 MB archive extracts in ~20 ms
+ * locally, so 60 s is nearly 90x the slowest healthy sample seen — a disk that
+ * misses it is not slow, it is stuck. Its only job is to stop a stalled
+ * child from turning `archon serve` into a silent permanent hang: the
+ * parent-owned stdin channel that caused the observed stall is gone (#2924), but
+ * filesystem-side stalls on windows were never ruled out, and there is no budget
+ * in production to end one.
+ */
+const EXTRACTION_TIMEOUT_MS = 60_000;
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -40,10 +53,29 @@ export async function serveCommand(opts: ServeOptions): Promise<number> {
     return 1;
   }
 
+  // A source checkout builds the web UI locally instead of downloading it: there
+  // is no release tagged `dev` to fetch from, and the tree already holds the
+  // dist that `bun run build:web` produces.
   if (!BUNDLED_IS_BINARY) {
-    console.error('Error: `archon serve` is for compiled binaries only.');
-    console.error('For development, use: bun run dev');
-    return 1;
+    const webDistDir = getSourceWebDistDir();
+
+    if (opts.downloadOnly) {
+      console.error(
+        'Error: --download-only is for binary installs. A source checkout has nothing to download.'
+      );
+      console.error('Build the web UI instead: bun run build:web');
+      return 1;
+    }
+
+    if (!existsSync(webDistDir)) {
+      log.error({ webDistDir }, 'web_dist.source_build_missing');
+      console.error(`Error: Web UI is not built at ${webDistDir}.`);
+      console.error('Build it first: bun run build:web');
+      return 1;
+    }
+
+    log.info({ webDistDir }, 'web_dist.source_build_found');
+    return startServerUntilSignal(webDistDir, opts.port);
   }
 
   const version = BUNDLED_VERSION;
@@ -68,16 +100,24 @@ export async function serveCommand(opts: ServeOptions): Promise<number> {
     return 0;
   }
 
+  return startServerUntilSignal(webDistDir, opts.port);
+}
+
+/** Run the server in the foreground until the operator interrupts it. */
+async function startServerUntilSignal(
+  webDistDir: string,
+  port: number | undefined
+): Promise<number> {
   // Import server and start (dynamic import keeps CLI startup fast for other commands)
   try {
     const { startServer } = await import('@archon/server');
     await startServer({
       webDistPath: webDistDir,
-      port: opts.port,
+      port,
     });
   } catch (err) {
     const error = toError(err);
-    log.error({ err: error, version, webDistDir, port: opts.port }, 'server.start_failed');
+    log.error({ err: error, webDistDir, port }, 'server.start_failed');
     console.error(`Error: Server failed to start: ${error.message}`);
     return 1;
   }
@@ -92,16 +132,25 @@ export async function serveCommand(opts: ServeOptions): Promise<number> {
   return 0;
 }
 
-// Exported for tests; `embeddedChecksum` defaults to the build-time constant so
-// production callers never pass it explicitly.
+// Exported for tests; `embeddedChecksum` and `extractionTimeoutMs` default to the
+// build-time constants so production callers never pass them explicitly. The
+// timeout is a parameter because a guard nothing has watched fire is a claim:
+// the only way to see this one end a genuinely stuck child is to shorten it.
 export async function downloadWebDist(
   version: string,
   targetDir: string,
-  embeddedChecksum: string = BUNDLED_WEB_DIST_SHA256
+  embeddedChecksum: string = BUNDLED_WEB_DIST_SHA256,
+  extractionTimeoutMs: number = EXTRACTION_TIMEOUT_MS
 ): Promise<void> {
   const tarballUrl = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/archon-web.tar.gz`;
   const checksumsUrl = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/checksums.txt`;
 
+  // Phase markers, not metrics. When this stalls on windows CI the only surviving
+  // evidence is the log, and a single start line cannot say whether the wait sat
+  // in the fetch, the staged write, the spawn call, the child, or the rename
+  // afterwards (#2924). Each `web_dist.*` event below closes one phase and
+  // carries that phase's own durationMs, so the phases chain from here.
+  const downloadStartedAt = performance.now();
   log.info({ version, targetDir }, 'web_dist.download_started');
   console.log(`Web UI not found locally — downloading from release v${version}...`);
 
@@ -156,23 +205,129 @@ export async function downloadWebDist(
     throw new Error(`Checksum mismatch: expected ${expectedHash}, got ${actualHash}`);
   }
   console.log('Checksum verified.');
+  const verifiedAt = performance.now();
+  log.info({ durationMs: Math.round(verifiedAt - downloadStartedAt) }, 'web_dist.tarball_verified');
 
   // Extract to temp dir, then atomic rename
   const tmpDir = `${targetDir}.tmp`;
+  const tarballPath = `${tmpDir}.tar.gz`;
 
   // Clean up any previous failed attempt
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
 
-  // Extract tarball using tar (available on macOS/Linux)
-  const proc = Bun.spawn(['tar', 'xzf', '-', '-C', tmpDir, '--strip-components=1'], {
-    stdin: new Uint8Array(tarballBuffer),
-    stderr: 'pipe',
-  });
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderrText = await new Response(proc.stderr).text();
-    cleanupAndThrow(tmpDir, `tar extraction failed (exit ${exitCode}): ${stderrText.trim()}`);
+  // Stage the archive on disk so `tar` inherits a file descriptor. Passing the
+  // bytes as `stdin` instead makes the parent own a channel it has to pump and
+  // close, and on windows that pump can stall with no upper bound: two spawns in
+  // one process sat with `tar` blocked on an unfed stdin until the test runner
+  // killed them, on a runner where the same extraction took 16 ms minutes later
+  // (#2924). Reading `-` keeps the archive path off the command line, where a
+  // windows drive letter is ambiguous with `tar`'s own `host:path` syntax.
+  await Bun.write(tarballPath, tarballBuffer);
+  const extractionStartedAt = performance.now();
+  // Covers the temp-dir reset above as well as the write — both are filesystem
+  // work on the extraction target, and a stall there is indistinguishable from a
+  // stall in `tar` without this boundary.
+  log.info(
+    {
+      tarballPath,
+      bytes: tarballBuffer.byteLength,
+      durationMs: Math.round(extractionStartedAt - verifiedAt),
+    },
+    'web_dist.archive_staged'
+  );
+  // Only read after a clean `tar` exit, so the throw paths never see the seed.
+  let extractionEndedAt = extractionStartedAt;
+  // Set only by the timer below, so the diagnostic never has to ask the platform
+  // whether our own limit is what ended the child. See the branch that reads it.
+  let boundFired = false;
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const proc = Bun.spawn([resolveTarBin(), 'xzf', '-', '-C', tmpDir, '--strip-components=1'], {
+      stdin: Bun.file(tarballPath),
+      stderr: 'pipe',
+    });
+    // The bound is a parent-owned timer rather than Bun's `timeout:` option
+    // because the parent is the only side that knows the limit is what fired.
+    // With the option, all the parent gets back is `signalCode`, which is the
+    // platform's account of how the child died — and every windows sample of this
+    // stall so far was a SIGTERM from something else (the test runner's own 5 s
+    // budget), reported identically. Owning the timer is what makes "we gave up"
+    // and "something else killed it" two different messages (#2924).
+    bound = setTimeout(() => {
+      boundFired = true;
+      proc.kill();
+    }, extractionTimeoutMs);
+    // Separate from the wait below because process creation is a real share of
+    // the cost, not a rounding error: on a healthy windows run the spawn call is
+    // 24ms against the child's 133ms, so folding them together would hide a
+    // stalled `CreateProcess` behind a slow-looking `tar`.
+    // `tarPid`, not `pid` — pino already binds the parent's pid at the root, and
+    // a second `pid` key would silently win on parse.
+    const spawnedAt = performance.now();
+    log.info(
+      { tarPid: proc.pid, durationMs: Math.round(spawnedAt - extractionStartedAt) },
+      'web_dist.extract_spawned'
+    );
+    // Drain stderr while waiting rather than after: a pipe nobody reads is the
+    // same deadlock in the other direction once `tar` fills its buffer. Record
+    // each completion separately: the combined wait has exceeded five seconds
+    // on Windows without revealing whether the child or its pipe was delayed.
+    const [exitCode, stderrText] = await Promise.all([
+      proc.exited.then(exitCode => {
+        log.info(
+          { tarPid: proc.pid, exitCode, durationMs: Math.round(performance.now() - spawnedAt) },
+          'web_dist.extract_process_exited'
+        );
+        return exitCode;
+      }),
+      new Response(proc.stderr).text().then(stderr => {
+        log.info(
+          { tarPid: proc.pid, durationMs: Math.round(performance.now() - spawnedAt) },
+          'web_dist.extract_stderr_drained'
+        );
+        return stderr;
+      }),
+    ]);
+    extractionEndedAt = performance.now();
+    log.info(
+      {
+        exitCode,
+        signalCode: proc.signalCode,
+        durationMs: Math.round(extractionEndedAt - spawnedAt),
+      },
+      'web_dist.extract_exited'
+    );
+    const details = stderrText.trim();
+    const suffix = details ? `: ${details}` : '';
+    const elapsedMs = Math.round(extractionEndedAt - extractionStartedAt);
+    if (boundFired) {
+      cleanupAndThrow(
+        tmpDir,
+        `Timed out extracting the web UI: tar did not finish within ${extractionTimeoutMs}ms ` +
+          `and was killed after ${elapsedMs}ms (archive ${tarballPath}, target ${tmpDir}). ` +
+          'Nothing was installed — rerun the command, and if it recurs that target is ' +
+          `where to look${suffix}`
+      );
+    }
+    // `tar` died on a signal this process did not send — the runner's own budget
+    // in every windows sample so far. Distinct from the branch above so a report
+    // never credits an outside kill to our limit. `proc.killed` cannot make this
+    // call: it is true after any exit.
+    if (proc.signalCode !== null) {
+      cleanupAndThrow(
+        tmpDir,
+        `tar extraction of ${tarballPath} was killed by ${proc.signalCode} after ${elapsedMs}ms ` +
+          'without finishing, by something other than this process (its own limit is ' +
+          `${extractionTimeoutMs}ms)${suffix}`
+      );
+    }
+    if (exitCode !== 0) {
+      cleanupAndThrow(tmpDir, `tar extraction failed (exit ${exitCode})${suffix}`);
+    }
+  } finally {
+    clearTimeout(bound);
+    rmSync(tarballPath, { force: true });
   }
 
   // Verify extraction produced expected layout
@@ -193,7 +348,36 @@ export async function downloadWebDist(
       `Failed to move extracted web UI from ${tmpDir} to ${targetDir}: ${toError(err).message}`
     );
   }
+  // Closes the last phase: staged-archive removal, layout check, and the rename
+  // of a freshly written tree — all after-tar filesystem work.
+  log.info(
+    { targetDir, durationMs: Math.round(performance.now() - extractionEndedAt) },
+    'web_dist.installed'
+  );
   console.log(`Extracted to ${targetDir}`);
+}
+
+/**
+ * Resolve the `tar` binary for extraction.
+ *
+ * Windows must pin it rather than leave it to PATH. Windows ships bsdtar at
+ * `System32\tar.exe`, which accepts a drive-letter operand, but Git for Windows
+ * puts GNU tar on PATH at `Git\usr\bin`, and GNU tar cannot open one — it mangles
+ * `-C C:\Users\...` and exits 2. Which one wins depends on the PATH of whichever
+ * shell launched Archon, so extraction succeeded from cmd and failed from Git Bash.
+ *
+ * `platform` and `exists` are injected so both Windows branches stay covered on a
+ * non-Windows CI runner.
+ */
+export function resolveTarBin(
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync
+): string {
+  if (platform !== 'win32') return 'tar';
+  const systemTar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
+  // Pre-1803 Windows bundles no tar; fall back to PATH rather than spawning a
+  // path we already know is absent.
+  return exists(systemTar) ? systemTar : 'tar';
 }
 
 function cleanupAndThrow(tmpDir: string, message: string): never {

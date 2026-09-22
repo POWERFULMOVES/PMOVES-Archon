@@ -14,12 +14,11 @@ import type { ProviderConfig } from '@earendil-works/pi-coding-agent';
  * This matches the exact behavior of the pre-0.71 fallback.
  */
 
-export interface NoopResourceLoaderOptions {
+export interface PiResourceLoaderOptions {
   /**
    * Override Pi's system prompt entirely. When omitted, Pi uses its default.
-   * Forwarded to `DefaultResourceLoader({ systemPrompt })` — the no* flags
-   * below still suppress all discovery of `AGENTS.md` / `CLAUDE.md` context
-   * files that would otherwise augment or replace the prompt.
+   * Forwarded to `DefaultResourceLoader({ systemPrompt })`. Pi still appends
+   * the context files it discovers through its native project and user rules.
    */
   systemPrompt?: string;
 
@@ -61,14 +60,16 @@ export interface NoopResourceLoaderOptions {
 }
 
 /**
- * Build a Pi ResourceLoader. By default performs no filesystem discovery —
- * Archon is the source of truth for skills, prompts, themes, and context
- * files, and Pi should not walk cwd or read `~/.pi/agent/` during server-side
- * workflow execution. When `enableExtensions: true`, the `noExtensions` gate
- * is lifted so Pi discovers and loads tools + hooks from the community
- * ecosystem (see `NoopResourceLoaderOptions.enableExtensions`). Skills and
- * prompts/themes remain suppressed even when extensions are enabled — skills
- * are still driven by Archon's explicit `additionalSkillPaths` plumbing.
+ * Build the ResourceLoader Archon supplies to Pi. Archon owns explicit skill,
+ * prompt-template, and theme delivery, but leaves context-file discovery to
+ * Pi. Pi therefore applies its native defaults, including user and project
+ * `AGENTS.md` / `CLAUDE.md` files, without an Archon-specific toggle.
+ *
+ * When `enableExtensions: true`, the `noExtensions` gate is lifted so Pi
+ * discovers and loads tools + hooks from the community ecosystem (see
+ * `PiResourceLoaderOptions.enableExtensions`). Skills and prompts/themes
+ * remain suppressed even when extensions are enabled — skills are still
+ * driven by Archon's explicit `additionalSkillPaths` plumbing.
  *
  * Implementation note: we delegate to `DefaultResourceLoader` with the
  * relevant `no*` flags set, rather than implementing `ResourceLoader`
@@ -76,9 +77,9 @@ export interface NoopResourceLoaderOptions {
  * requiring a real `ExtensionRuntime`, which we can't meaningfully stub.
  * DefaultResourceLoader honors the flags and returns empty-but-valid results.
  */
-export function createNoopResourceLoader(
+export function createPiResourceLoader(
   cwd: string,
-  options: NoopResourceLoaderOptions = {}
+  options: PiResourceLoaderOptions = {}
 ): DefaultResourceLoader {
   return new DefaultResourceLoader({
     cwd,
@@ -90,7 +91,6 @@ export function createNoopResourceLoader(
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    noContextFiles: true,
     ...(options.systemPrompt !== undefined ? { systemPrompt: options.systemPrompt } : {}),
     ...(options.additionalSkillPaths && options.additionalSkillPaths.length > 0
       ? { additionalSkillPaths: options.additionalSkillPaths }
@@ -198,7 +198,7 @@ function extensionLoaderCacheKey(
  */
 export async function getOrCreateReloadedExtensionLoader(
   cwd: string,
-  options: Pick<NoopResourceLoaderOptions, 'systemPrompt' | 'additionalSkillPaths'> = {}
+  options: Pick<PiResourceLoaderOptions, 'systemPrompt' | 'additionalSkillPaths'> = {}
 ): Promise<ReloadedExtensionLoader> {
   const key = extensionLoaderCacheKey(
     cwd,
@@ -208,7 +208,7 @@ export async function getOrCreateReloadedExtensionLoader(
   let pending = reloadedExtensionLoaderCache.get(key);
   if (!pending) {
     pending = (async (): Promise<ReloadedExtensionLoader> => {
-      const loader = createNoopResourceLoader(cwd, { ...options, enableExtensions: true });
+      const loader = createPiResourceLoader(cwd, { ...options, enableExtensions: true });
       // reload() loads the extensions into the loader so createAgentSession can
       // build session.extensionRunner. Without it the runner is undefined and the
       // provider's `if (runner)` flag pass-through is skipped — extensionFlags

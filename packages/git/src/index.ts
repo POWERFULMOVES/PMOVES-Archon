@@ -25,15 +25,19 @@ export {
   isWorktreePath,
   removeWorktree,
   getCanonicalRepoPath,
+  getGitCheckoutIdentity,
+  CanonicalRepoPathUnavailableError,
   verifyWorktreeOwnership,
 } from './worktree';
-export type { WorktreeLayout, WorktreeBaseOverride } from './worktree';
+export type { WorktreeLayout, WorktreeBaseOverride, GitCheckoutIdentity } from './worktree';
 
 // Branch operations
 export {
   getDefaultBranch,
   getUniqueCommitCount,
   getCurrentBranch,
+  getCurrentBranchStrict,
+  localBranchExists,
   countCommitsAhead,
   checkout,
   hasUncommittedChanges,
@@ -55,7 +59,10 @@ export {
   getRemoteUrl,
   listChildRepos,
   syncWorkspace,
+  fetchWithRefLockRetry,
   cloneRepository,
+  validateCloneUrl,
   syncRepository,
   addSafeDirectory,
 } from './repo';
+export type { CloneCredentials, CloneRepositoryOptions } from './repo';

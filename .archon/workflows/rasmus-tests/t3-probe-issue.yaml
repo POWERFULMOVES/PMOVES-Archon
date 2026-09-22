@@ -26,7 +26,7 @@ nodes:
       $issue.output
 
       Check the issue's claims against the actual code, then check it against the
-      project direction in `.archon/maintainer-standup/direction.md`.
+      project direction in `.archon/direction.md`.
 
       Pick one label:
         should-fix    — real, in scope, worth doing

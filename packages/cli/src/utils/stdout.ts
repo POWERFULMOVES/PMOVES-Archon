@@ -1,5 +1,5 @@
 /**
- * Guaranteed-delivery stdout writes for machine-readable CLI output.
+ * Guaranteed-delivery writes for CLI output that must not be silently dropped.
  *
  * ## Why this exists
  *
@@ -20,6 +20,18 @@
  * asymmetry is the signature of this class of bug.
  */
 
+function writeStream(stream: NodeJS.WriteStream, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.write(text, error => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 /**
  * Write `text` to stdout and resolve only once the bytes have been handed to
  * the OS in full.
@@ -28,15 +40,23 @@
  * @throws The underlying stream error if the write fails (e.g. EPIPE).
  */
 export function writeStdout(text: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    process.stdout.write(text, error => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
-  });
+  return writeStream(process.stdout, text);
+}
+
+/**
+ * The same guaranteed delivery for stderr.
+ *
+ * `console.error` is not equivalent for anything that has to arrive. Writing it
+ * to a pipe whose reader has already gone is a SILENT no-op under Bun — no throw,
+ * no error, exit 0 — measured with `bun … 2>&1 | head -c 1`, where the callback
+ * below reports `EPIPE` on the same closed pipe. A line whose whole job is to tell
+ * a host something cannot be allowed to disappear that way.
+ *
+ * @param text - Exact bytes to emit (include any trailing newline yourself).
+ * @throws The underlying stream error if the write fails (e.g. EPIPE).
+ */
+export function writeStderr(text: string): Promise<void> {
+  return writeStream(process.stderr, text);
 }
 
 /**

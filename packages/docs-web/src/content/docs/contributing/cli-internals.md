@@ -92,12 +92,12 @@ packages/cli/
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ archon workflow list [--json]                                    │
+│ archon workflow list [name] [--full] [--json]                    │
 └──────────────────────────────┬───────────────────────────────────┘
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ workflow.ts  workflowListCommand(cwd, json?)                     │
+│ workflow.ts  workflowListCommand(cwd, { name, full, json })      │
 └──────────────────────────────┬───────────────────────────────────┘
                                │
                                ▼
@@ -109,12 +109,20 @@ packages/cli/
 │ - Merges (repo overrides defaults by name)                       │
 └──────────────────────────────┬───────────────────────────────────┘
                                │
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Optional name resolution; project errors remain in the result    │
+│ full=false: bounded description + structured truncation state    │
+│ full=true: exact authored description                            │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
                ┌───────────────┴───────────────┐
                │ json=true                     │ json=false
                ▼                               ▼
 ┌──────────────────────────┐   ┌───────────────────────────────────┐
 │ JSON output to stdout    │   │ Human-readable list to stdout     │
-│ { workflows, errors }    │   │ name, description, type, options  │
+│ descriptionTruncated     │   │ shortened descriptions carry     │
+│ { workflows, errors }    │   │ the ` [truncated]` marker         │
 └──────────────────────────┘   └───────────────────────────────────┘
 ```
 
@@ -193,7 +201,7 @@ packages/cli/
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ archon workflow event emit --run-id <uuid> --type <type> [...]   │
+│ archon workflow event emit --run-id <run-id> --type <type> [...] │
 └──────────────────────────────┬───────────────────────────────────┘
                                │
                                ▼
@@ -205,15 +213,21 @@ packages/cli/
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ workflow.ts  workflowEventEmitCommand(runId, eventType, data?)   │
-│              createWorkflowStore().createWorkflowEvent(...)       │
-│              Non-throwing (fire-and-forget)                       │
+│ workflow.ts  workflowEventEmitCommand(..., cwd)                   │
+│              Resolve an unambiguous run-id prefix                 │
+│              Node state: persistWorkflowEvent(...)               │
+│              Observability: createWorkflowEvent(...)             │
+│              Run-ID resolution may fail                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 **Code:** `packages/cli/src/cli.ts` (case 'event'), `packages/cli/src/commands/workflow.ts:workflowEventEmitCommand`
 
-**Contract:** Event persistence is best-effort. `createWorkflowEvent` catches all errors internally -- the CLI prints a confirmation but cannot guarantee the event was stored.
+**Contract:** The shared `isNodeStateEventType` predicate routes node-state events through
+`persistWorkflowEvent`, which propagates storage failures. The CLI prints `Event persisted`
+only after that write succeeds. Other events use `createWorkflowEvent` and retain best-effort
+persistence: `Event submitted (best-effort)` does not guarantee storage. Run-ID resolution
+can fail before either write.
 
 ---
 
@@ -309,7 +323,8 @@ packages/cli/
                                   │ safe=true
                                   ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Guard checks: no uncommitted changes, no active conversations   │
+│ Guard checks: no uncommitted changes, no run can still claim    │
+│ the env (getRemovalBlocker)                                     │
 │ provider.destroy() → remove worktree + delete remote branch     │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -318,7 +333,7 @@ Signals are evaluated in order — the first positive match short-circuits to av
 unnecessary `gh` API calls. The `gh` CLI is a soft dependency: if missing or failing,
 only git signals are used and the result degrades gracefully to `NONE`.
 
-**Code:** `packages/core/src/services/cleanup-service.ts` — `isSafeToRemove()`, `cleanupMergedWorktrees()`
+**Code:** `packages/core/src/services/cleanup-service.ts` — `isSafeToRemove()`, `cleanupMergedWorktrees()`, `getRemovalBlocker()`
 **Code:** `packages/isolation/src/pr-state.ts` — `getPrState()`
 **Code:** `packages/git/src/branch.ts` — `isPatchEquivalent()`
 
@@ -376,7 +391,10 @@ When `--branch` is provided:
 1. **Lookup:** `isolationDb.findActiveByWorkflow(codebaseId, 'task', branchName)`
 2. **Health check:** `provider.healthCheck(path)` on existing
 3. **Reuse:** If found and healthy (warns if `--from` was specified but not applied)
-4. **Create:** If not found or unhealthy -- passes `fromBranch` to provider if specified via `--from`
+4. **Create:** If not found or unhealthy -- passes a `taskBranch: { kind: 'new', fromBranch }`
+   selection to the provider when `--from` is specified. Adoption instead passes
+   `taskBranch: { kind: 'existing', branch }`, which checks out that exact local branch
+   without creating a child branch or syncing it to a remote.
 
 Worktrees stored at: `~/.archon/workspaces/<owner>/<repo>/worktrees/<branch-slug>/`
 

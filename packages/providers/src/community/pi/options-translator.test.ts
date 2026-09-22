@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { NodeConfig } from '../../types';
 import { resolvePiSkills, resolvePiThinkingLevel, resolvePiTools } from './options-translator';
 
 // ─── resolvePiThinkingLevel ─────────────────────────────────────────────
@@ -17,54 +16,35 @@ describe('resolvePiThinkingLevel', () => {
     expect(resolvePiThinkingLevel({})).toEqual({ level: undefined });
   });
 
-  test('maps valid thinking string directly', () => {
-    expect(resolvePiThinkingLevel({ thinking: 'high' })).toEqual({ level: 'high' });
-    expect(resolvePiThinkingLevel({ thinking: 'xhigh' })).toEqual({ level: 'xhigh' });
-    expect(resolvePiThinkingLevel({ thinking: 'minimal' })).toEqual({ level: 'minimal' });
-  });
-
   test('maps valid effort string directly', () => {
     expect(resolvePiThinkingLevel({ effort: 'medium' })).toEqual({ level: 'medium' });
     expect(resolvePiThinkingLevel({ effort: 'low' })).toEqual({ level: 'low' });
   });
 
-  test('thinking takes precedence when both set', () => {
-    expect(resolvePiThinkingLevel({ thinking: 'high', effort: 'low' })).toEqual({ level: 'high' });
+  // Pi's native `ThinkingLevel` matches Archon's ladder through `max`
+  // (@earendil-works/pi-ai types.d.ts); Codex-only `ultra` clamps separately.
+  // This previously asserted a downgrade to
+  // `xhigh`, which was the bug: `effort: max` meant "as deep as this model goes"
+  // everywhere except Pi, where a rung was quietly removed before Pi could apply
+  // its own per-model handling.
+  test("'max' reaches Pi natively rather than being downgraded", () => {
+    expect(resolvePiThinkingLevel({ effort: 'max' })).toEqual({ level: 'max' });
   });
 
-  test("'off' on either field returns undefined", () => {
-    expect(resolvePiThinkingLevel({ thinking: 'off' })).toEqual({ level: undefined });
-    expect(resolvePiThinkingLevel({ effort: 'off' })).toEqual({ level: undefined });
+  test('every Pi-native rung passes through unclamped', () => {
+    for (const rung of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      expect(resolvePiThinkingLevel({ effort: rung })).toEqual({ level: rung });
+    }
   });
 
-  test("'max' (Archon EffortLevel enum) translates to Pi 'xhigh'", () => {
-    expect(resolvePiThinkingLevel({ effort: 'max' })).toEqual({ level: 'xhigh' });
-    expect(resolvePiThinkingLevel({ thinking: 'max' })).toEqual({ level: 'xhigh' });
+  test("'ultra' clamps to Pi's strongest native rung", () => {
+    expect(resolvePiThinkingLevel({ effort: 'ultra' })).toEqual({ level: 'max' });
+    expect(resolvePiThinkingLevel({ effort: 'persistent' })).toEqual({ level: 'max' });
   });
 
-  test('warns on Claude-shape object thinking config', () => {
-    const result = resolvePiThinkingLevel({
-      thinking: { type: 'enabled', budget_tokens: 4000 },
-    } as NodeConfig);
-    expect(result.level).toBeUndefined();
-    expect(result.warning).toContain('object form is Claude-specific');
-  });
-
-  test('warns on unknown string thinking value', () => {
-    const result = resolvePiThinkingLevel({ thinking: 'ultra' });
-    expect(result.level).toBeUndefined();
-    expect(result.warning).toContain("unknown thinking level 'ultra'");
-  });
-
-  test('warns on unknown string effort value', () => {
-    const result = resolvePiThinkingLevel({ effort: 'crushing' });
-    expect(result.level).toBeUndefined();
-    expect(result.warning).toContain("unknown thinking level 'crushing'");
-  });
-
-  test('no warning when both fields are simply absent', () => {
+  test('no warning when effort is absent', () => {
     expect(resolvePiThinkingLevel({})).toEqual({ level: undefined });
-    expect(resolvePiThinkingLevel({ thinking: undefined, effort: undefined })).toEqual({
+    expect(resolvePiThinkingLevel({ effort: undefined })).toEqual({
       level: undefined,
     });
   });

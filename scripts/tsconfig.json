@@ -5,7 +5,16 @@
     "declaration": false,
     "declarationMap": false,
     "sourceMap": false,
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    // Cross-package tests import web modules that touch browser globals through
+    // transitive imports, so this project needs DOM in `lib`.
+    "lib": ["ES2022", "DOM"],
+    // `node-ref-parity.test.ts` imports the web builder's `when:` grammar to run it
+    // against the engine's. That module resolves its own imports through the web
+    // package's `@/` alias, so this project needs the same mapping to follow it.
+    "paths": {
+      "@/*": ["../packages/web/src/*"]
+    }
   },
   "include": ["*.ts"]
 }

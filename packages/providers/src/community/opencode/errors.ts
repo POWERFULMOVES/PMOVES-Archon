@@ -1,5 +1,7 @@
-const RATE_LIMIT_PATTERNS = ['rate limit', 'too many requests', '429', 'overloaded'];
-const AUTH_PATTERNS = ['unauthorized', 'authentication', 'invalid token', '401', '403', 'api key'];
+// Prose patterns exclude bare HTTP codes; exact structured statusCode fields
+// and SDK error discriminators are classified separately below.
+const RATE_LIMIT_PATTERNS = ['rate limit', 'too many requests', 'overloaded'];
+const AUTH_PATTERNS = ['unauthorized', 'authentication', 'invalid token', 'api key'];
 const CRASH_PATTERNS = [
   'server disconnected',
   'disposed',
@@ -27,6 +29,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function classifyStructuredError(error: unknown): RetryableErrorClass | undefined {
+  const candidates = [error];
+  if (error instanceof Error) candidates.push(error.cause);
+
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) continue;
+    if (candidate.name === 'ProviderAuthError') return 'auth';
+
+    const data = isRecord(candidate.data) ? candidate.data : undefined;
+    const statusCode =
+      typeof candidate.statusCode === 'number'
+        ? candidate.statusCode
+        : typeof data?.statusCode === 'number'
+          ? data.statusCode
+          : undefined;
+    if (statusCode === 401 || statusCode === 403) return 'auth';
+    if (statusCode === 429) return 'rate_limit';
+  }
+
+  return undefined;
+}
+
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (isRecord(error)) {
@@ -39,6 +63,9 @@ export function errorMessage(error: unknown): string {
 export function classifyOpencodeError(error: unknown, aborted: boolean): RetryableErrorClass {
   if (aborted) return 'aborted';
 
+  const structuredClass = classifyStructuredError(error);
+  if (structuredClass) return structuredClass;
+
   const parts: string[] = [];
   if (error instanceof Error) {
     parts.push(error.name, error.message);
@@ -46,10 +73,8 @@ export function classifyOpencodeError(error: unknown, aborted: boolean): Retryab
   if (isRecord(error)) {
     if (typeof error.name === 'string') parts.push(error.name);
     if (typeof error.message === 'string') parts.push(error.message);
-    if (typeof error.statusCode === 'number') parts.push(String(error.statusCode));
     if (isRecord(error.data)) {
       if (typeof error.data.message === 'string') parts.push(error.data.message);
-      if (typeof error.data.statusCode === 'number') parts.push(String(error.data.statusCode));
       if (typeof error.data.responseBody === 'string') parts.push(error.data.responseBody);
     }
   }

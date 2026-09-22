@@ -47,7 +47,9 @@ import {
   setUserTiers,
   setUserAliases,
   setUserDefault,
+  isEffortRung,
   type TiersPatch,
+  type EffortRung,
   type UserAiPrefs,
 } from '@archon/core';
 import { isRegisteredProvider, getProviderInfoList } from '@archon/providers';
@@ -343,9 +345,16 @@ function registeredProvidersList(): string {
 }
 
 /** Validate provider + effort for a tier/alias entry; prints and returns false on error. */
-function validateEntryInputs(provider: string, effort: string | undefined): boolean {
+function validateEntryInputs(
+  provider: string,
+  effort: string | undefined
+): effort is EffortRung | undefined {
   if (!isRegisteredProvider(provider)) {
     console.error(`Unknown provider '${provider}'. Available: ${registeredProvidersList()}.`);
+    return false;
+  }
+  if (effort !== undefined && !isEffortRung(effort)) {
+    console.error(`Invalid effort '${effort}'.`);
     return false;
   }
   if (effort !== undefined && !isEffortValidForProvider(provider, effort)) {
@@ -419,7 +428,22 @@ export async function aiTierUnsetCommand(
       const tiers: TiersPatch = {};
       tiers[tier] = null;
       await updateGlobalConfig({ tiers });
-      console.log(`✓ Unset tier '${tier}' (falls back to the built-in default).`);
+      // Only claude and codex ship built-in tier defaults — for any other
+      // default provider an unset install tier resolves to nothing, and
+      // claiming a fallback here would hide the very state the tier
+      // resolution error exists to surface.
+      let builtIn: RawAliasEntry | undefined;
+      try {
+        const config = await loadConfig();
+        builtIn = buildAiProfile(config.assistant).aliases[tier];
+      } catch (err) {
+        getLog().warn({ err: err as Error, tier }, 'cli.ai_tier_unset_default_lookup_failed');
+      }
+      console.log(
+        builtIn
+          ? `✓ Unset tier '${tier}' (falls back to the built-in default: ${builtIn.provider}/${builtIn.model}).`
+          : `✓ Unset tier '${tier}'. No built-in default exists for your default provider — set one with \`archon ai tier set ${tier} <provider> <model>\` before anything uses this tier.`
+      );
     }
     return 0;
   } catch (err) {

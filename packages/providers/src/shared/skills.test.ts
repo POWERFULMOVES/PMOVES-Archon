@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { resolveSkillDirectories } from './skills';
+import { resolveClaudeSkillDirectories, resolveSkillDirectories } from './skills';
 
 type FakeWorld = {
   root: string;
@@ -137,5 +137,70 @@ describe('resolveSkillDirectories', () => {
     const result = resolveSkillDirectories(fake.cwd, ['zeta']);
     expect(result.paths).toEqual([]);
     expect(result.missing).toEqual(['zeta']);
+  });
+});
+
+describe('resolveClaudeSkillDirectories', () => {
+  const originalHome = process.env.HOME;
+  let fake: ReturnType<typeof makeFakeWorld>;
+
+  beforeEach(() => {
+    fake = makeFakeWorld();
+    process.env.HOME = fake.home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(fake.root, { recursive: true, force: true });
+  });
+
+  test('resolves project and user Claude-native skills', () => {
+    const project = fake.stageSkill('cwd', '.claude', 'project-skill');
+    const user = fake.stageSkill('home', '.claude', 'user-skill');
+
+    expect(resolveClaudeSkillDirectories(fake.cwd, ['project-skill', 'user-skill'])).toEqual({
+      paths: [project, user],
+      missing: [],
+    });
+  });
+
+  test('does not accept an agents-only installation', () => {
+    fake.stageSkill('cwd', '.agents', 'agents-only');
+
+    expect(resolveClaudeSkillDirectories(fake.cwd, ['agents-only'])).toEqual({
+      paths: [],
+      missing: ['agents-only'],
+    });
+  });
+
+  test('honors a custom Claude config directory for user skills', () => {
+    const customConfig = join(fake.root, 'custom-claude');
+    const skill = join(customConfig, 'skills', 'custom-skill');
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, 'SKILL.md'), '# custom\n');
+
+    expect(
+      resolveClaudeSkillDirectories(fake.cwd, ['custom-skill'], {
+        userConfigDir: customConfig,
+      })
+    ).toEqual({ paths: [skill], missing: [] });
+  });
+
+  test('can restrict discovery to project skills for isolated execution', () => {
+    fake.stageSkill('home', '.claude', 'user-only');
+
+    expect(resolveClaudeSkillDirectories(fake.cwd, ['user-only'], { includeUser: false })).toEqual({
+      paths: [],
+      missing: ['user-only'],
+    });
+  });
+
+  test('can exclude project skills when project settings are disabled', () => {
+    fake.stageSkill('cwd', '.claude', 'project-only');
+
+    expect(
+      resolveClaudeSkillDirectories(fake.cwd, ['project-only'], { includeProject: false })
+    ).toEqual({ paths: [], missing: ['project-only'] });
   });
 });

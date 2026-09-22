@@ -8,8 +8,15 @@ describe('toWorkflow — source normalization', () => {
     expect(toWorkflow({ workflow: { name: 'a' }, source: 'bundled' }).source).toBe('bundled');
   });
 
-  test('falls back to bundled for an unrecognized source', () => {
-    expect(toWorkflow({ workflow: { name: 'a' }, source: 'something-new' }).source).toBe('bundled');
+  test('surfaces an unrecognised source verbatim rather than collapsing it to bundled (#2578)', () => {
+    // The server emits only the three known sources today, but a misspelled or
+    // future value must not be silently collapsed to 'bundled' — that would
+    // mark the workflow read-only and turn Save into Save-as. The fix mirrors
+    // `groupCommandsBySource` (`packages/web/src/lib/command-groups.ts`, #2570):
+    // surface unknown values rather than hide them.
+    expect(toWorkflow({ workflow: { name: 'a' }, source: 'something-new' }).source).toBe(
+      'something-new'
+    );
   });
 
   test('normalizes a missing description to null', () => {
@@ -35,5 +42,37 @@ describe('toWorkflow — parseWarnings (#2213)', () => {
     // (the picker reads `.length`) needs an array, never undefined.
     const w = toWorkflow({ workflow: { name: 'clean' }, source: 'project' });
     expect(w.parseWarnings).toEqual([]);
+  });
+});
+
+describe('toWorkflow — declared inputs (#2554)', () => {
+  test('flattens the declared map into an ordered list, preserving declaration order', () => {
+    const w = toWorkflow({
+      workflow: {
+        name: 'review-block',
+        inputs: {
+          diff: { required: true, description: 'the diff to review' },
+          style: { default: 'strict' },
+        },
+      },
+      source: 'project',
+    });
+    expect(w.inputs).toEqual([
+      { name: 'diff', required: true, default: null, description: 'the diff to review' },
+      { name: 'style', required: false, default: 'strict', description: null },
+    ]);
+  });
+
+  test('defaults to an empty array when the workflow declares none', () => {
+    // The run card reads `.length` to decide whether to render the form at all.
+    expect(toWorkflow({ workflow: { name: 'plain' }, source: 'project' }).inputs).toEqual([]);
+  });
+
+  test('treats an absent required flag as optional rather than truthy-coercing it', () => {
+    const w = toWorkflow({
+      workflow: { name: 'w', inputs: { a: {}, b: { required: false } } },
+      source: 'project',
+    });
+    expect(w.inputs.map(i => i.required)).toEqual([false, false]);
   });
 });

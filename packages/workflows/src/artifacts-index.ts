@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createLogger } from '@archon/paths';
-import { nodeArtifactSchema, type NodeArtifact } from './schemas/node-artifact';
+import {
+  nodeArtifactSchema,
+  type NodeArtifact,
+  type NodeArtifactLoopFrame,
+} from './schemas/node-artifact';
 
 /** Lazy logger (deferred so test mocks can intercept createLogger). */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -12,6 +17,10 @@ function getLog(): ReturnType<typeof createLogger> {
 
 /** Subdirectory under the artifacts dir holding per-node typed outputs + metadata. */
 const NODES_SUBDIR = 'nodes';
+const nodeArtifactOwnerSchema = nodeArtifactSchema.pick({ nodeId: true, loopGroupPath: true });
+const nodeArtifactWriteParamsSchema = nodeArtifactSchema.omit({ path: true, size: true });
+
+type ArtifactOwner = Pick<NodeArtifact, 'nodeId' | 'loopGroupPath'>;
 
 /**
  * Restrict a node id to a single safe path segment for use in a filename.
@@ -22,28 +31,70 @@ function safeSegment(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+/** Build the single filename segment that identifies one typed node execution. */
+function artifactStem(owner: ArtifactOwner): string {
+  const nodeSegment = safeSegment(owner.nodeId);
+  if (owner.loopGroupPath === undefined) return nodeSegment;
+
+  // The dot makes loop stems disjoint from top-level safeSegment() output. Hash
+  // the canonical original owner so valid ids containing our display separators
+  // cannot alias one another; readable provenance remains in the metadata.
+  const canonicalOwner = [
+    owner.nodeId,
+    owner.loopGroupPath.map(frame => [frame.groupId, frame.iteration]),
+  ];
+  const digest = createHash('sha256').update(JSON.stringify(canonicalOwner)).digest('hex');
+  return `loop.${digest}__${nodeSegment}`;
+}
+
+function sameLoopGroupPath(
+  left: NodeArtifactLoopFrame[] | undefined,
+  right: NodeArtifactLoopFrame[] | undefined
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (frame, index) =>
+        frame.groupId === right[index]?.groupId && frame.iteration === right[index]?.iteration
+    )
+  );
+}
+
+function sameArtifactOwner(left: ArtifactOwner, right: ArtifactOwner): boolean {
+  return left.nodeId === right.nodeId && sameLoopGroupPath(left.loopGroupPath, right.loopGroupPath);
+}
+
 /**
- * Read the `nodeId` recorded in an existing `.meta.json`, or `undefined` if the
- * file is missing or unreadable. Used only by the collision guard in
- * `writeNodeArtifact` — a missing or corrupt prior file is treated as "no known
- * owner" so the write proceeds (and overwrites the unusable file).
+ * Read the owner recorded in an existing `.meta.json`, or `undefined` if the
+ * file is missing or corrupt. Used only by the collision guard in
+ * `writeNodeArtifact`. Real filesystem failures remain visible to the caller.
  */
-async function readArtifactNodeId(metaPath: string): Promise<string | undefined> {
+async function readArtifactOwner(metaPath: string): Promise<ArtifactOwner | undefined> {
+  let rawMetadata: string;
   try {
-    const parsed = JSON.parse(await readFile(metaPath, 'utf8')) as { nodeId?: unknown };
-    return typeof parsed.nodeId === 'string' ? parsed.nodeId : undefined;
+    rawMetadata = await readFile(metaPath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+
+  try {
+    const parsed = nodeArtifactOwnerSchema.safeParse(JSON.parse(rawMetadata));
+    return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
   }
 }
 
 /**
- * Write a node's typed output artifact: the output text to `nodes/<id>.md`
- * and its metadata to `nodes/<id>.meta.json`. Per-node files (no shared index):
- * the index is derived on read by globbing, so a node's output is addressable by
- * id and separate nodes / separate runs never overwrite one another's metadata.
- * Writes are issued sequentially after each layer settles — there is no in-run
- * write contention; the per-node layout is what isolates one node from the next.
+ * Write a node's typed output artifact: the output text and metadata under
+ * `nodes/`. Top-level nodes retain `nodes/<id>.md` + `<id>.meta.json`; a
+ * loop_group body execution qualifies that identity with a stable digest of its
+ * structured owner and records the readable ordered frames in metadata.
+ * Per-execution files (no shared index): the index is derived on read by globbing,
+ * so separate nodes, iterations, and runs never overwrite one another's metadata.
+ * Concurrent writers are isolated by their identity-derived paths.
  *
  * Returns the written metadata. Throws on fs failure or a sanitized-id collision
  * — callers persist artifacts best-effort and must wrap this in their own
@@ -54,33 +105,45 @@ export async function writeNodeArtifact(
   params: Omit<NodeArtifact, 'path' | 'size'>,
   outputText: string
 ): Promise<NodeArtifact> {
+  // Zod refinements such as positive iteration and non-empty lineage are not
+  // represented in the inferred TypeScript primitives, so enforce them at the
+  // durable constructor before creating either sidecar.
+  const parsedParams = nodeArtifactWriteParamsSchema.parse(params);
   const nodesDir = join(artifactsDir, NODES_SUBDIR);
   await mkdir(nodesDir, { recursive: true });
-  const safeId = safeSegment(params.nodeId);
-  const metaPath = join(nodesDir, `${safeId}.meta.json`);
+  const owner: ArtifactOwner = {
+    nodeId: parsedParams.nodeId,
+    ...(parsedParams.loopGroupPath !== undefined
+      ? { loopGroupPath: parsedParams.loopGroupPath }
+      : {}),
+  };
+  const stem = artifactStem(owner);
+  const metaPath = join(nodesDir, `${stem}.meta.json`);
 
-  // Collision guard: node ids are unique per workflow, so an existing metadata
-  // file under this safe segment naming a *different* node means safeSegment()
-  // collapsed two distinct ids (e.g. `a.b` and `a_b`) onto one filename. Fail
-  // loudly — the best-effort caller logs it — instead of silently overwriting the
-  // first node's artifact. First writer wins; the second is logged, not lost-silent.
-  const priorNodeId = await readArtifactNodeId(metaPath);
-  if (priorNodeId !== undefined && priorNodeId !== params.nodeId) {
+  // Collision guard: top-level safeSegment() can collapse distinct node ids (for
+  // example `a.b` and `a_b`), and loop digests retain an ownership check rather
+  // than assuming their hash alone is authoritative. Compare the complete
+  // producer identity and fail loudly instead of overwriting another artifact.
+  const priorOwner = await readArtifactOwner(metaPath);
+  if (priorOwner !== undefined && !sameArtifactOwner(priorOwner, owner)) {
     throw new Error(
-      `node artifact id collision: '${params.nodeId}' and '${priorNodeId}' both map to filename segment '${safeId}'`
+      `node artifact id collision: distinct producers both map to filename segment '${stem}'`
     );
   }
 
-  const relPath = join(NODES_SUBDIR, `${safeId}.md`);
+  const relPath = join(NODES_SUBDIR, `${stem}.md`);
   await writeFile(join(artifactsDir, relPath), outputText, 'utf8');
   const meta: NodeArtifact = {
-    nodeId: params.nodeId,
-    outputType: params.outputType,
+    nodeId: parsedParams.nodeId,
+    outputType: parsedParams.outputType,
+    ...(parsedParams.loopGroupPath !== undefined
+      ? { loopGroupPath: parsedParams.loopGroupPath }
+      : {}),
     path: relPath,
-    runId: params.runId,
-    producedAt: params.producedAt,
+    runId: parsedParams.runId,
+    producedAt: parsedParams.producedAt,
     size: Buffer.byteLength(outputText, 'utf8'),
-    ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+    ...(parsedParams.sessionId !== undefined ? { sessionId: parsedParams.sessionId } : {}),
   };
   await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
   return meta;

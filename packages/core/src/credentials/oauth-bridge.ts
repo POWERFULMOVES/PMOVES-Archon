@@ -17,7 +17,7 @@
  *
  * Sessions are bound to `userId`, short-TTL, and abortable; credentials are never
  * logged. On a headless host the callback-server flows must complete via the
- * manual-code path (`onManualCodeInput`/`onPrompt`) — nothing can reach their
+ * manual-code path (`onManualCodeInput`) — nothing can reach their
  * localhost callback server (see CANCEL SEMANTICS for the abort side of this).
  *
  * CANCEL SEMANTICS (#1963): pi-ai 0.79.1 ignores `options.signal` in its
@@ -43,11 +43,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@archon/paths';
-import type {
-  OAuthCredentials as PiOAuthCredentials,
-  OAuthAuthInfo,
-  OAuthDeviceCodeInfo,
-} from '@archon/providers/oauth';
+import type { OAuthAuthInfo, OAuthDeviceCodeInfo } from '@archon/providers/oauth';
 import {
   piOAuthProviderFor,
   SUBSCRIPTION_PROVIDERS,
@@ -59,7 +55,10 @@ import {
   exchangeOpenAiAuthorizationCode,
   type OpenAiOAuthCredentials,
 } from './openai-oauth';
-import { normalizeCredentialVendor } from './delivery';
+import {
+  normalizeCredentialVendor,
+  type OAuthCredentials as DeliveryOAuthCredentials,
+} from './delivery';
 import { persistProviderOAuth } from './connect-service';
 import { sanitizeCredentials, sanitizeError } from '../utils/credential-sanitizer';
 
@@ -222,8 +221,8 @@ async function runOpenAiManualLogin(session: OAuthSession): Promise<OpenAiOAuthC
   if (!parsed.code) {
     throw new Error('Missing authorization code.');
   }
-  // Returns its true type — structurally assignable to PiOAuthCredentials
-  // (access/refresh/expires plus extras), so no cast at the loginPromise join.
+  // Returns its true type — the loginPromise join is typed as delivery.ts's
+  // loose `OAuthCredentials`, which this satisfies structurally (no cast).
   return exchangeOpenAiAuthorizationCode(parsed.code, flow.verifier, session.abort.signal);
 }
 
@@ -295,7 +294,13 @@ export async function startOAuth(userId: string, providerId: string): Promise<St
   sessions.set(sessionId, session);
 
   // Kick off the login WITHOUT awaiting — it blocks on the callbacks/deferred.
-  const loginPromise: Promise<PiOAuthCredentials> = piProvider
+  // The join is typed as the loose shape the only consumer accepts:
+  // `persistProviderOAuth` takes delivery.ts's `OAuthCredentials =
+  // Record<string, unknown>`, and both branches (pi-ai 0.84's strict
+  // `type: "oauth"`-tagged credential, and the Archon-owned openai flow's
+  // `OpenAiOAuthCredentials` with its Codex-required `id_token`, #1924)
+  // satisfy it structurally. The bridge never reads the `type` discriminator.
+  const loginPromise: Promise<DeliveryOAuthCredentials> = piProvider
     ? piProvider.login({
         onAuth: (info: OAuthAuthInfo) => {
           session.url = info.url;
@@ -308,11 +313,19 @@ export async function startOAuth(userId: string, providerId: string): Promise<St
           session.mode = 'device';
           session.firstSignal.resolve(true);
         },
-        // Manual providers ask for the pasted code via onManualCodeInput (or onPrompt);
-        // wire both to the same deferred. NOTE: a future provider that used onPrompt for
-        // a DIFFERENT question would get handed the auth code — fine for claude/copilot.
+        // Manual providers ask for the pasted code via onManualCodeInput; route
+        // that to the deferred the client submits through poll(code).
         onManualCodeInput: () => session.codeDeferred.promise,
-        onPrompt: async () => session.codeDeferred.promise,
+        // Free-text/secret prompts have no interactive channel here (#2763):
+        // answering with "" takes the provider's documented blank-input default
+        // (github-copilot's enterprise-domain prompt defaults to github.com).
+        // Routing them to codeDeferred would deadlock — poll(code) only
+        // resolves once the flow reaches manual/device mode, which for
+        // github-copilot happens strictly after this prompt is answered.
+        onPrompt: async () => {
+          getLog().info({ provider }, 'oauth_bridge.prompt_defaulted');
+          return '';
+        },
         // No interactive account picker on the web bridge — take the first option.
         onSelect: async prompt => prompt.options[0]?.id,
         onProgress: (message: string) => {
@@ -322,7 +335,7 @@ export async function startOAuth(userId: string, providerId: string): Promise<St
       })
     : runOpenAiManualLogin(session);
   session.settled = loginPromise
-    .then(async (creds: PiOAuthCredentials) => {
+    .then(async (creds: DeliveryOAuthCredentials) => {
       await persistProviderOAuth(userId, provider, creds);
       session.status = 'connected';
       getLog().info({ userId, provider }, 'oauth_bridge.connected');

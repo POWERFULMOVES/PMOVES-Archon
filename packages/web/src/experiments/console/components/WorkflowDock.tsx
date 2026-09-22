@@ -8,8 +8,9 @@ import { ApprovalPanel } from './ApprovalPanel';
 import * as skill from '../skills';
 import type { Run } from '../primitives/run';
 import type { RunCounts } from '../skills/runs';
-import { statusDotClass, statusLabel } from '../lib/run-status';
+import { statusDotClass, runStatusLabel } from '../lib/run-status';
 import { shortRunId, formatElapsed, elapsedSince } from '../lib/format';
+import { RunOutcomeBadge } from './RunOutcomeBadge';
 
 interface FeedData {
   runs: Run[];
@@ -119,6 +120,7 @@ function ApprovalDockCard({ run }: { run: Run }): ReactElement {
         <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-warning">
           Waiting for approval
         </span>
+        <RunOutcomeBadge outcome={run.outcome} />
         <span className="text-[13px] font-medium text-text-primary">{run.workflow}</span>
         <span className="font-mono text-[10px] text-text-tertiary">{shortRunId(run.id)}</span>
         <button
@@ -141,7 +143,7 @@ function ApprovalDockCard({ run }: { run: Run }): ReactElement {
 function DockCard({ run }: { run: Run }): ReactElement {
   const navigate = useNavigate();
   const elapsed = formatElapsed(elapsedSince(run.startedAt));
-  const node = run.currentNode !== null && run.currentNode !== undefined ? run.currentNode : null;
+  const activeNodes = run.activeNodes;
 
   return (
     <button
@@ -162,11 +164,14 @@ function DockCard({ run }: { run: Run }): ReactElement {
           <span className="font-mono text-[10px] text-text-tertiary">{shortRunId(run.id)}</span>
         </span>
         <span className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-text-tertiary">
-          <span className="text-text-secondary">{statusLabel[run.status]}</span>
-          {node !== null ? (
+          <span className="text-text-secondary">{runStatusLabel(run)}</span>
+          <RunOutcomeBadge outcome={run.outcome} />
+          {activeNodes.length > 0 ? (
             <>
               <span aria-hidden>·</span>
-              <span className="truncate">{node}</span>
+              <span className="truncate">
+                {activeNodes.length === 1 ? 'node' : 'nodes'}: {activeNodes.join(', ')}
+              </span>
             </>
           ) : null}
         </span>

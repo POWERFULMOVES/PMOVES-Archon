@@ -164,6 +164,20 @@ describe('isReadOnlySource / saveTargetFor', () => {
     expect(saveTargetFor('project')).toBe('project');
     expect(saveTargetFor('global')).toBe('global');
   });
+
+  // #2578 — the helpers accept `string` precisely so an unrecognised wire value
+  // does not silently become read-only / write-to-global. These tests pin that
+  // observable contract against the regressions noted in the review (a
+  // `source !== 'project' && source !== 'global'` rewrite would make the
+  // editor offer Save-as instead of Save; an inverted `saveTargetFor` would
+  // write the workflow into `~/.archon/workflows/` instead of the project).
+  test('an unrecognised source is editable in place, not read-only (#2578)', () => {
+    expect(isReadOnlySource('something-new')).toBe(false);
+  });
+
+  test('an unrecognised source saves to project scope, the most permissive target (#2578)', () => {
+    expect(saveTargetFor('something-new')).toBe('project');
+  });
 });
 
 describe('isValidWorkflowName', () => {

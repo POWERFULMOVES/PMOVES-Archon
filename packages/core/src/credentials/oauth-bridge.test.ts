@@ -1,10 +1,10 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
-import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockQuery, mockPostgresDialect } from '../test/mocks/database';
 
 process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
 
 // persistProviderOAuth (called on success) writes through the store → mock the DB.
-const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
+const mockQuery = createMockQuery();
 mock.module('../db/connection', () => ({
   pool: { query: mockQuery },
   getDialect: () => mockPostgresDialect,
@@ -126,6 +126,25 @@ describe('oauth-bridge', () => {
     expect(start.mode).toBe('device');
     expect(start.userCode).toBe('WXYZ');
     expect(start.verificationUri).toBe('https://dev');
+    await tick();
+    expect(pollOAuth(start.sessionId, 'u1').status).toBe('connected');
+  });
+
+  // #2763: github-copilot asks its enterprise-domain text prompt BEFORE firing
+  // onDeviceCode. The prompt must be answered with the blank default instead
+  // of awaiting poll(code) — which only resolves in manual/device mode, i.e.
+  // never at this point — or login hangs until the session TTL.
+  test('copilot pre-device-code text prompt is answered with the blank default', async () => {
+    let promptAnswer: string | undefined;
+    loginImpl = async cb => {
+      promptAnswer = await cb.onPrompt({ type: 'text', message: 'GitHub Enterprise URL/domain' });
+      cb.onDeviceCode({ userCode: 'WXYZ', verificationUri: 'https://dev' });
+      return { access: 'a', refresh: 'r', expires: 1 };
+    };
+    const start = await startOAuth('u1', 'copilot');
+    expect(promptAnswer).toBe('');
+    expect(start.mode).toBe('device');
+    expect(start.userCode).toBe('WXYZ');
     await tick();
     expect(pollOAuth(start.sessionId, 'u1').status).toBe('connected');
   });

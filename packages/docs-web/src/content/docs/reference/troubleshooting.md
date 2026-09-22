@@ -365,3 +365,20 @@ ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS=120000 archon workflow run ...
 - `path contains a full git checkout, not a worktree`: something non-Archon created a full git repo at the worktree path. Remove or move it.
 - `.git pointer is not a git-worktree reference`: the `.git` file at that path points somewhere unexpected (submodule, malformed). Inspect it with `cat <path>/.git` and clean up manually.
 - `Cannot verify worktree ownership`: filesystem permission or I/O error reading `<path>/.git`. Check `ls -la <path>` and file permissions on `~/.archon/workspaces`.
+
+## Chat Says the Working Directory No Longer Exists
+
+**Symptom:** A chat message in a project-scoped conversation is refused with:
+
+- `This conversation's working directory no longer exists: <path>`
+
+**Cause:** The conversation carries a working-directory override (`cwd`) pointing at a directory that has since been removed — an isolated worktree torn down by `archon isolation cleanup`, the periodic reaper, the Environments list in the web UI, or your own `rm -rf`. The override outlives the directory. Only workflow runs re-resolve isolation; a chat turn uses the recorded path as-is.
+
+Archon refuses the turn instead of passing the missing path to the AI provider. It does not silently fall back to the project root, because relocating the agent into the live checkout would widen its write scope without you asking for it. Before this check existed, the provider spawned into the missing directory and the failure surfaced as an unrelated error — `posix_spawn` reports a missing *working directory* as `ENOENT` against the *executable's* path, so Codex reported `No such file or directory (os error 2)` and Claude reported a libc/architecture mismatch. Neither named the directory.
+
+**Fix — follow the message:**
+
+1. **`/setproject <name>`** clears the stale override and rebinds the conversation to a project. This always works and is the suggestion you will always be offered.
+2. **`/worktree remove`** is offered *only* when the conversation is still bound to an isolation environment. It detaches and returns you to the project root. When the environment reference has already been cleared, this command reports `This conversation is not using a worktree.`, which is why it is not suggested in that state.
+
+The refusal writes nothing and changes no state, so a transient cause (a mount blip, a directory mid-move) costs one refused message and nothing else — the next turn re-evaluates from scratch. Operators can find these events in the logs under `orchestrator.conversation_cwd_missing`, which records the conversation id, the path, and the isolation environment id.

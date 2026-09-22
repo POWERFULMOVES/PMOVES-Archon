@@ -6,7 +6,7 @@
 import type { Issue } from '../types';
 import { makeIssue } from '../validation/make-issue';
 import { HttpError } from '../../lib/http';
-import type { WorkflowSource, WorkflowSaveSource } from '../../skills/workflows';
+import type { WorkflowSaveSource } from '../../skills/workflows';
 
 /** A client-side instant error for the panel (name validation, save gate). */
 export function clientIssue(rule: string, message: string): Issue {
@@ -82,17 +82,25 @@ export function blockingErrors(issues: readonly Issue[]): Issue[] {
   return issues.filter(i => i.severity === 'error');
 }
 
-/** Bundled workflows open read-only; everything else is editable in place. */
-export function isReadOnlySource(source: WorkflowSource): boolean {
+/**
+ * Bundled workflows open read-only; everything else is editable in place. The
+ * parameter is widened to `string` so an unrecognised `Workflow.source` (#2578,
+ * `WorkflowSource | (string & {})`) can pass through without a cast at the
+ * call site — the comparison is the same `=== 'bundled'` either way.
+ */
+export function isReadOnlySource(source: string): boolean {
   return source === 'bundled';
 }
 
 /**
  * The write scope for a save. A `global` workflow saves back to global; a
  * `project` workflow stays project; a `bundled` (read-only) workflow saves as a
- * project override (Save-as).
+ * project override (Save-as). The parameter is widened to `string` for the
+ * same reason `isReadOnlySource` is (#2578): an unrecognised source is not
+ * `global`, so it falls to `'project'`, which is the "most permissive"
+ * interpretation the issue explicitly defends.
  */
-export function saveTargetFor(source: WorkflowSource): WorkflowSaveSource {
+export function saveTargetFor(source: string): WorkflowSaveSource {
   return source === 'global' ? 'global' : 'project';
 }
 

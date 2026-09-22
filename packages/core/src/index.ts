@@ -9,6 +9,14 @@
  * - Utility functions
  */
 
+export {
+  EFFORT_LADDER,
+  clampEffort,
+  isEffortRung,
+  type AssertNever,
+  type EffortRung,
+} from './effort';
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -20,6 +28,7 @@ export {
   type Codebase,
   type Session,
   type CommandResult,
+  type WorkflowRequest,
   type IPlatformAdapter,
   type IWebPlatformAdapter,
   isWebAdapter,
@@ -139,6 +148,35 @@ export {
 
 export { generateAndSetTitle } from './services/title-generator';
 
+export {
+  waitForRunAttention,
+  DEFAULT_ATTENTION_POLL_INTERVAL_MS,
+} from './services/run-attention-watch';
+export type {
+  NonTerminalWorkflowRunStatus,
+  RunWaitResult,
+  RunAttentionWaitOptions,
+} from './services/run-attention-watch';
+
+export {
+  startRunLiveOwner,
+  withRunLiveOwner,
+  watchRunLiveOwner,
+  requestRunLiveOwnerStop,
+  runLiveOwnerPath,
+  canConnectToRunLiveOwner,
+  RunLiveOwnerStopUnavailableError,
+  RUN_LIVE_OWNER_IPC_TIMEOUT_MS,
+  RUN_LIVE_OWNER_CONTROL_HANDOFF_GRACE_MS,
+} from './services/run-live-owner';
+export type {
+  RunLiveOwner,
+  RunLiveOwnerOptions,
+  RunLiveOwnerStopLease,
+  RunLiveOwnerWatch,
+  RunLiveOwnerWatchEvent,
+} from './services/run-live-owner';
+
 // =============================================================================
 // State
 // =============================================================================
@@ -184,6 +222,7 @@ export {
   isPerUserGitHubEnabled,
   loadDeviceFlowConfig,
   assertEncryptionKeyAtBoot,
+  resolveGitHubTokenFromEnv,
   connectGithubForUser,
   persistGithubConnection,
   startDeviceFlow,
@@ -270,4 +309,4 @@ export { isPathWithinWorkspace, validateAndResolvePath } from './utils/path-vali
 export { getPort } from './utils/port-allocation';
 
 // Worktree sync
-export { syncArchonToWorktree } from './utils/worktree-sync';
+export { resolveWorkflowSourceRoot } from './utils/workflow-source-root';

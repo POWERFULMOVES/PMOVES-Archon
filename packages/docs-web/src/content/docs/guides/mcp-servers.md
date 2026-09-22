@@ -9,12 +9,15 @@ sidebar:
   order: 7
 ---
 
-DAG workflow nodes support a `mcp` field that attaches MCP (Model Context Protocol)
-servers to individual nodes. Each node gets exactly the external tools it needs —
-GitHub, Linear, Postgres, etc. — without over-provisioning.
+DAG workflow nodes support an `mcp` field that attaches MCP (Model Context Protocol)
+servers to individual nodes. Claude workflow nodes exclude ambient user/project/plugin
+MCP by default and expose exactly the external servers in their declared file, plus
+governed native tools that Archon injects for the current workflow when applicable.
+Codex is an explicit exception: its SDK adds declared servers to ambient configuration
+rather than replacing it.
 
-MCP works with Codex and Claude workflow nodes. Pi nodes still warn and ignore
-the `mcp` field.
+MCP works with Claude, Codex, and Copilot workflow nodes. Pi and OpenCode nodes
+currently warn and ignore the `mcp` field.
 
 ## Quick Start
 
@@ -178,6 +181,11 @@ named `github` and `postgres`, the node gets:
 - `mcp__github__*`
 - `mcp__postgres__*`
 
+With no `mcp:` declaration, a Claude workflow node receives no ambient or
+author-declared MCP servers. Archon may still inject its own governed native-tool
+server for a node that requests an engine capability. This does not disable
+`CLAUDE.md`, built-in agents, or filesystem-defined agents.
+
 Codex nodes pass the same MCP config as per-node `mcp_servers` overrides to the
 Codex SDK, so the servers are available for that node without requiring global
 `~/.codex/config.toml` setup.
@@ -214,12 +222,21 @@ MCP server connection failed: github (failed)
 The node continues executing but without the tools from the failed server.
 Check your config file path, server command, and environment variables if this happens.
 
-User-level plugin MCPs inherited from provider-specific user config routinely
-fail to connect inside headless workflow subprocesses and are **not** surfaced
-when the workflow did not configure MCP itself — they're not actionable for the
-workflow author. They appear only in debug logs as
-`dag.mcp_plugin_connection_suppressed`. Run the CLI with `--verbose` (or set
-`LOG_LEVEL=debug` on the server) if you need to see them.
+Claude's strict workflow configuration prevents undeclared user/plugin MCPs from
+starting, so their connection failures do not affect the run. Codex can still
+inherit ambient servers as described below.
+
+### Codex ambient MCP limitation
+
+Codex's SDK applies node `mcp:` servers as additive configuration overrides. It
+does not replace the ambient user/project/plugin MCP catalog: with no node `mcp:`,
+ambient servers may remain available, and with a declared file, both ambient and
+declared servers may be present. `mcp_servers={}` does not clear inherited entries,
+and the current SDK has no wildcard/default global-off control.
+
+Archon therefore does not describe Codex `mcp:` as an exclusive tool boundary.
+It preserves runnable additive behavior and reports the limitation rather than
+mutating user configuration or rejecting the workflow.
 
 ## Workflow Examples
 

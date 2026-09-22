@@ -143,7 +143,7 @@ export function AliasesPanel(): ReactElement {
       ) : (
         <div className="flex flex-col gap-[11px]">
           {rows.map((row, i) => {
-            const effortOptions = effortOptionsForAgent(row.provider);
+            const effortOptions = effortOptionsForAgent(row.provider, providers);
             return (
               <div
                 // Index key is intentional: rows are positional edit buffers and
@@ -169,7 +169,7 @@ export function AliasesPanel(): ReactElement {
                       const provider = e.target.value;
                       setRow(i, {
                         provider,
-                        effort: normalizeEffortForAgent(provider, row.effort),
+                        effort: normalizeEffortForAgent(provider, row.effort, providers),
                       });
                     }}
                     aria-label="Provider"
@@ -192,7 +192,7 @@ export function AliasesPanel(): ReactElement {
                   onChange={v => {
                     setRow(i, { model: v });
                   }}
-                  placeholder="model (e.g. opus, gpt-5.5)"
+                  placeholder="model (e.g. opus, gpt-5.6-terra)"
                   ariaLabel="Model"
                   className="min-w-[140px] flex-1"
                   agents={keyData?.agents}
@@ -203,7 +203,9 @@ export function AliasesPanel(): ReactElement {
                     <select
                       value={row.effort}
                       onChange={e => {
-                        setRow(i, { effort: e.target.value });
+                        setRow(i, {
+                          effort: effortOptions.find(option => option === e.target.value) ?? '',
+                        });
                       }}
                       aria-label="Effort"
                       className={SELECT_CLASS}

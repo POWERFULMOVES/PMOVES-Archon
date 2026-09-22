@@ -1,6 +1,12 @@
 import { requestJson } from '../lib/http';
-import { toWorkflow, type Workflow, type WorkflowSource } from '../primitives/workflow';
+import {
+  toWorkflow,
+  type Workflow,
+  type WorkflowSource,
+  type RawWorkflowShape,
+} from '../primitives/workflow';
 import type { WorkflowGraphNode } from '../primitives/workflow-graph';
+import type { BuilderWorkflowDefinition } from '../builder/types';
 import type { WireWorkflowDefinition } from '../builder/types/wire';
 
 interface RawNode {
@@ -11,15 +17,21 @@ interface RawNode {
   command?: string;
   cancel?: string;
   approval?: unknown;
+  wait?: unknown;
   loop?: unknown;
   script?: unknown;
 }
 
-interface RawWorkflow {
-  name: string;
-  description?: string;
+/**
+ * Shares `RawWorkflowShape` with `toWorkflow`'s own wire type rather than re-declaring
+ * the common fields: `listWorkflows` feeds these entries straight into `toWorkflow`, so
+ * a field this copy omitted (as it once omitted `inputs`) would still compile and still
+ * arrive at runtime, leaving the type quietly wrong. `nodes` is the one field only this
+ * side needs — `getWorkflowGraph` reads it.
+ */
+type RawWorkflow = RawWorkflowShape & {
   nodes?: RawNode[];
-}
+};
 
 interface WorkflowListEntry {
   workflow: RawWorkflow;
@@ -49,6 +61,7 @@ export async function listWorkflows(cwd?: string): Promise<WorkflowListResult> {
 function nodeKind(n: RawNode): WorkflowGraphNode['kind'] {
   if (n.loop !== undefined) return 'loop';
   if (n.approval !== undefined) return 'approval';
+  if (n.wait !== undefined) return 'wait';
   if (n.cancel !== undefined) return 'cancel';
   if (n.bash !== undefined) return 'bash';
   if (n.command !== undefined) return 'command';
@@ -102,14 +115,27 @@ export type WorkflowSaveSource = 'project' | 'global';
 export interface GetWorkflowResponse {
   workflow: WireWorkflowDefinition;
   filename: string;
-  source: WorkflowSource;
+  /**
+   * Where the workflow came from. `Workflow['source']` widens to
+   * `WorkflowSource | (string & {})` so an unrecognised value (#2578) is
+   * surfaced verbatim rather than silently collapsed — the single-endpoint
+   * wire shape and `LoadedWorkflow` must match `Workflow.source` for the
+   * load-state chain to type-check end-to-end without a cast.
+   */
+  source: Workflow['source'];
 }
 
 /** Normalized result of `loadWorkflow`. */
 export interface LoadedWorkflow {
   definition: WireWorkflowDefinition;
   filename: string;
-  source: WorkflowSource;
+  /**
+   * Where the workflow came from. Same widening rationale as
+   * `GetWorkflowResponse.source`: an unrecognised value reaches the editor
+   * verbatim and the downstream helpers (`isReadOnlySource`, `saveTargetFor`)
+   * — both accepting `string` — decide what to do with it.
+   */
+  source: Workflow['source'];
 }
 
 /**
@@ -168,7 +194,7 @@ export async function deleteWorkflow(
  * NO `?cwd=` (validation is stateless).
  */
 export function validateWorkflow(
-  definition: WireWorkflowDefinition
+  definition: BuilderWorkflowDefinition
 ): Promise<ValidateWorkflowResponse> {
   return requestJson<ValidateWorkflowResponse>('/api/workflows/validate', {
     method: 'POST',

@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Regenerates packages/workflows/src/defaults/bundled-defaults.generated.ts from
- * the on-disk defaults in .archon/commands/defaults/ and .archon/workflows/defaults/.
+ * the packs selected by packages/workflows/src/defaults/bundle-index.json.
+ * bundle-inventory.ts owns the file selection for this script and live source capture.
  *
  * Emits inline string literals (via JSON.stringify) rather than Bun's
  * `import X from '...' with { type: 'text' }` attributes so the module loads
@@ -22,9 +23,17 @@
  *   1  unexpected error (missing dir, unreadable source, invalid filename, etc.)
  *   2  --check was passed and the file would change
  */
-import { access, readFile, readdir, writeFile } from 'fs/promises';
-import { join, resolve } from 'path';
+import { readFile, writeFile } from 'fs/promises';
+import { join, relative, resolve } from 'path';
 import { execFileAsync } from '@archon/git';
+import {
+  collectBundleSources,
+  readBundleContent,
+  readBundleIndex,
+} from '../packages/workflows/src/defaults/bundle-inventory';
+
+import type { BundledScriptPack } from '../packages/workflows/src/defaults/bundled-script-pack';
+import type { WorkflowResourceOwner } from '../packages/workflows/src/packaged-workflow';
 
 // BUNDLED_DEFAULTS_REPO_ROOT is a test seam: the integration tests point the
 // script at a throwaway git repo (see
@@ -34,8 +43,8 @@ const REPO_ROOT = process.env.BUNDLED_DEFAULTS_REPO_ROOT
   : resolve(import.meta.dir, '..');
 const COMMANDS_REL = '.archon/commands/defaults';
 const WORKFLOWS_REL = '.archon/workflows/defaults';
-const COMMANDS_DIR = join(REPO_ROOT, COMMANDS_REL);
-const WORKFLOWS_DIR = join(REPO_ROOT, WORKFLOWS_REL);
+const WORKFLOWS_ROOT_REL = '.archon/workflows';
+const WORKFLOWS_ROOT = join(REPO_ROOT, WORKFLOWS_ROOT_REL);
 const OUTPUT_PATH = join(
   REPO_ROOT,
   'packages/workflows/src/defaults/bundled-defaults.generated.ts'
@@ -48,24 +57,14 @@ interface BundledFile {
   content: string;
 }
 
-async function ensureDir(dir: string, label: string): Promise<void> {
-  try {
-    await access(dir);
-  } catch {
-    throw new Error(
-      `${label} directory not found: ${dir}\n` +
-        `Run this script from the repo root (cwd was ${process.cwd()}), ` +
-        'or verify the .archon/ tree exists.'
-    );
-  }
-}
+type BundledWorkflowOwner = Pick<WorkflowResourceOwner, 'pack' | 'workflow'>;
 
 /**
  * Refuse to embed files that git does not track (#1578). An untracked file in
  * defaults/ would silently ship inside locally built binaries while being
  * absent from every other checkout and from CI builds — fail loudly instead.
  *
- * Intentionally stricter than collectFiles(): `git ls-files` recurses into
+ * Intentionally stricter than the selected inventory: `git ls-files` recurses into
  * subdirectories and reports every untracked path, while the embedder only
  * reads top-level files with matching extensions. The asymmetry is deliberate
  * — anything untracked under defaults/ is a mistake worth flagging, even if
@@ -105,43 +104,23 @@ async function assertNoUntrackedFiles(
   }
 }
 
-async function collectFiles(dir: string, extensions: readonly string[]): Promise<BundledFile[]> {
-  const entries = await readdir(dir);
-  const matched = entries
-    .map(entry => {
-      const ext = extensions.find(e => entry.endsWith(e));
-      return ext ? { entry, ext } : undefined;
-    })
-    .filter((m): m is { entry: string; ext: string } => m !== undefined)
-    .sort((a, b) => a.entry.localeCompare(b.entry));
-
-  const files: BundledFile[] = [];
-  const seen = new Set<string>();
-  for (const { entry, ext } of matched) {
-    const name = entry.slice(0, -ext.length);
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-      throw new Error(
-        `Bundled default has invalid filename "${entry}" in ${dir}. ` +
-          'Names must be kebab-case (lowercase letters, digits, hyphens).'
-      );
-    }
-    if (seen.has(name)) {
-      throw new Error(
-        `Bundled default name collision: "${name}" appears with multiple extensions in ${dir}. ` +
-          'Keep a single file per name (remove either the .yaml or .yml variant).'
-      );
-    }
-    seen.add(name);
-    const raw = await readFile(join(dir, entry), 'utf-8');
-    // Normalize to LF so output is identical regardless of the checkout's
-    // line-ending policy (e.g. Windows `core.autocrlf=true` yields CRLF).
-    const content = raw.replace(/\r\n/g, '\n');
-    if (!content.trim()) {
-      throw new Error(`Bundled default "${entry}" in ${dir} is empty.`);
-    }
-    files.push({ name, content });
+async function assertTrackedPackagedFiles(paths: readonly string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const relativePaths = paths.map(path => relative(REPO_ROOT, path).replaceAll('\\', '/'));
+  const { stdout } = await execFileAsync(
+    'git',
+    ['-c', 'core.quotePath=false', 'ls-files', '--cached', '--', ...relativePaths],
+    { cwd: REPO_ROOT }
+  );
+  const tracked = new Set(stdout.trim().split('\n').filter(Boolean));
+  const missing = relativePaths.filter(path => !tracked.has(path));
+  if (missing.length > 0) {
+    throw new Error(
+      `Packaged workflows contain untracked files that would be embedded into the binary bundle:\n${missing
+        .map(path => `  ${path}`)
+        .join('\n')}\n\nStage and commit them, or remove them from the packaged workflow folder.`
+    );
   }
-  return files;
 }
 
 function renderRecord(comment: string, exportName: string, files: BundledFile[]): string {
@@ -156,7 +135,32 @@ function renderRecord(comment: string, exportName: string, files: BundledFile[])
   ].join('\n');
 }
 
-function renderFile(commands: BundledFile[], workflows: BundledFile[]): string {
+function renderMapRecord<T>(
+  comment: string,
+  exportName: string,
+  typeName: string,
+  entries: ReadonlyMap<string, T>,
+  recordType = `Record<string, ${typeName}>`
+): string {
+  const rendered = [...entries.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, value]) => `  ${JSON.stringify(name)}: ${JSON.stringify(value)},`)
+    .join('\n');
+  return [
+    `// ${comment} (${entries.size} total)`,
+    `export const ${exportName}: ${recordType} = {`,
+    rendered,
+    '};',
+  ].join('\n');
+}
+
+function renderFile(
+  commands: BundledFile[],
+  workflows: BundledFile[],
+  workflowOwners: ReadonlyMap<string, BundledWorkflowOwner>,
+  scriptPacks: ReadonlyMap<string, BundledScriptPack>,
+  workflowPaths: ReadonlyMap<string, string>
+): string {
   const header = [
     '/**',
     ' * AUTO-GENERATED — DO NOT EDIT.',
@@ -164,9 +168,7 @@ function renderFile(commands: BundledFile[], workflows: BundledFile[]): string {
     ' * Regenerate with: bun run generate:bundled',
     ' * Verify up-to-date:  bun run check:bundled',
     ' *',
-    ' * Source of truth:',
-    ' *   .archon/commands/defaults/*.md',
-    ' *   .archon/workflows/defaults/*.{yaml,yml}',
+    ' * Source of truth: bundle-index.json selects packs; bundle-inventory.ts selects files.',
     ' *',
     ' * Contents are inlined as plain string literals (JSON-escaped) so this',
     ' * module loads in both Bun and Node. Previous versions used',
@@ -177,46 +179,106 @@ function renderFile(commands: BundledFile[], workflows: BundledFile[]): string {
 
   return [
     header,
-    renderRecord('Bundled default commands', 'BUNDLED_COMMANDS', commands),
+    "import type { BundledScriptPack } from './bundled-script-pack';",
+    "import type { WorkflowResourceOwner } from '../packaged-workflow';",
     '',
-    renderRecord('Bundled default workflows', 'BUNDLED_WORKFLOWS', workflows),
+    "export type BundledWorkflowOwner = Pick<WorkflowResourceOwner, 'pack' | 'workflow'>;",
+    '',
+    renderRecord('Bundled commands', 'BUNDLED_COMMANDS', commands),
+    '',
+    renderRecord('Bundled workflows', 'BUNDLED_WORKFLOWS', workflows),
+    '',
+    renderMapRecord(
+      'Authored workflow paths beneath the bundled scope',
+      'BUNDLED_WORKFLOW_PATHS',
+      'string',
+      workflowPaths
+    ),
+    '',
+    renderMapRecord(
+      'Packaged workflow owners',
+      'BUNDLED_WORKFLOW_OWNERS',
+      'BundledWorkflowOwner',
+      workflowOwners,
+      'Readonly<Partial<Record<keyof typeof BUNDLED_WORKFLOWS, BundledWorkflowOwner>>>'
+    ),
+    '',
+    renderMapRecord(
+      'Bundled script packs',
+      'BUNDLED_SCRIPT_PACKS',
+      'BundledScriptPack',
+      scriptPacks
+    ),
     '',
   ].join('\n');
 }
 
 async function main(): Promise<void> {
-  await Promise.all([
-    ensureDir(COMMANDS_DIR, 'Commands defaults'),
-    ensureDir(WORKFLOWS_DIR, 'Workflows defaults'),
-  ]);
+  const packs = await readBundleIndex(
+    join(REPO_ROOT, 'packages/workflows/src/defaults/bundle-index.json')
+  );
+  const files = await collectBundleSources(
+    WORKFLOWS_ROOT,
+    join(REPO_ROOT, '.archon/commands'),
+    packs
+  );
+  if (packs.includes('defaults')) {
+    await Promise.all([
+      assertNoUntrackedFiles(
+        COMMANDS_REL,
+        'Commands defaults (.archon/commands/defaults/)',
+        '.archon/commands/ (project-scope) or ~/.archon/commands/ (home-scope)'
+      ),
+      assertNoUntrackedFiles(
+        WORKFLOWS_REL,
+        'Workflows defaults (.archon/workflows/defaults/)',
+        '.archon/workflows/ (project-scope) or ~/.archon/workflows/ (home-scope)'
+      ),
+    ]);
+  }
+  await assertTrackedPackagedFiles(
+    files
+      .filter(
+        file =>
+          !file.relativePath.startsWith('workflows/defaults/') &&
+          !file.relativePath.startsWith('commands/defaults/')
+      )
+      .map(file => file.sourcePath)
+  );
 
-  // Runs after ensureDir (a missing directory still wins) and before
-  // collectFiles (untracked files abort before being read into the bundle).
-  await Promise.all([
-    assertNoUntrackedFiles(
-      COMMANDS_REL,
-      'Commands defaults (.archon/commands/defaults/)',
-      '.archon/commands/ (project-scope) or ~/.archon/commands/ (home-scope)'
-    ),
-    assertNoUntrackedFiles(
-      WORKFLOWS_REL,
-      'Workflows defaults (.archon/workflows/defaults/)',
-      '.archon/workflows/ (project-scope) or ~/.archon/workflows/ (home-scope)'
-    ),
-  ]);
-
-  const [commands, workflows] = await Promise.all([
-    collectFiles(COMMANDS_DIR, ['.md']),
-    collectFiles(WORKFLOWS_DIR, ['.yaml', '.yml']),
-  ]);
-
-  const contents = renderFile(commands, workflows);
-
+  const commands: BundledFile[] = [];
+  const workflows: BundledFile[] = [];
+  const workflowOwners = new Map<string, BundledWorkflowOwner>();
+  const workflowPaths = new Map<string, string>();
+  const scriptPacks = new Map<string, BundledScriptPack>();
+  for (const file of files) {
+    const content = await readBundleContent(file);
+    if (file.kind === 'command') commands.push({ name: file.name, content });
+    else if (file.kind === 'workflow') {
+      workflows.push({ name: file.name, content });
+      workflowPaths.set(file.name, file.relativePath);
+      if (file.owner) workflowOwners.set(file.name, file.owner);
+    } else {
+      const prior = scriptPacks.get(file.pack) ?? { files: {}, scripts: {} };
+      scriptPacks.set(file.pack, {
+        files: { ...prior.files, [file.packPath]: content },
+        scripts: file.entry
+          ? {
+              ...prior.scripts,
+              [file.entry.name]: { path: file.packPath, runtime: file.entry.runtime },
+            }
+          : prior.scripts,
+      });
+    }
+  }
+  commands.sort((a, b) => a.name.localeCompare(b.name));
+  workflows.sort((a, b) => a.name.localeCompare(b.name));
+  const contents = renderFile(commands, workflows, workflowOwners, scriptPacks, workflowPaths);
   if (CHECK_ONLY) {
     let existing = '';
     try {
       const raw = await readFile(OUTPUT_PATH, 'utf-8');
-      // Same LF normalization as collectFiles — the .ts itself may be
+      // Same LF normalization as the bundled contents — the .ts itself may be
       // checked out with CRLF line endings on Windows.
       existing = raw.replace(/\r\n/g, '\n');
     } catch (e) {
@@ -228,14 +290,14 @@ async function main(): Promise<void> {
       process.exit(2);
     }
     console.log(
-      `bundled-defaults.generated.ts is up to date (${commands.length} commands, ${workflows.length} workflows).`
+      `bundled-defaults.generated.ts is up to date (${commands.length} commands, ${workflows.length} workflows, ${scriptPacks.size} script packs).`
     );
     return;
   }
 
   await writeFile(OUTPUT_PATH, contents, 'utf-8');
   console.log(
-    `Wrote ${OUTPUT_PATH}\n  ${commands.length} commands, ${workflows.length} workflows.`
+    `Wrote ${OUTPUT_PATH}\n  ${commands.length} commands, ${workflows.length} workflows, ${scriptPacks.size} script packs.`
   );
 }
 
