@@ -857,30 +857,6 @@ export class WorktreeProvider implements IIsolationProvider {
   }
 
   /**
-   * Set worktree-local `git config user.email`/`user.name` so commits made in
-   * this worktree attribute to the originating user. Non-fatal on failure: a
-   * worktree without the override simply uses the ambient git identity.
-   */
-  private async applyGitIdentity(
-    worktreePath: string,
-    identity: { email: string; name?: string }
-  ): Promise<void> {
-    try {
-      await execFileAsync('git', ['-C', worktreePath, 'config', 'user.email', identity.email], {
-        timeout: 5000,
-      });
-      if (identity.name) {
-        await execFileAsync('git', ['-C', worktreePath, 'config', 'user.name', identity.name], {
-          timeout: 5000,
-        });
-      }
-      getLog().debug({ worktreePath, email: identity.email }, 'isolation.git_identity_applied');
-    } catch (err) {
-      getLog().warn({ err: err as Error, worktreePath }, 'isolation.git_identity_apply_failed');
-    }
-  }
-
-  /**
    * Resolve the git remote name to use for all fetch/push operations.
    *
    * Resolution order: explicit config (worktree.remote) > auto-detect via
