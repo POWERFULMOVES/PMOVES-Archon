@@ -70,9 +70,11 @@ export function tryParseStructuredOutput(text: string): unknown {
   if (trimmed.length === 0) return undefined;
   // Strip ```json / ``` fences if present. Match only at boundaries so we
   // don't mangle JSON strings that legitimately contain backticks.
+  // Whitespace runs bounded (CodeQL js/polynomial-redos); fences never carry
+  // more than 64 chars of padding in practice.
   const cleaned = trimmed
-    .replace(/^```(?:json)?\s*\n?/i, '')
-    .replace(/\n?\s*```\s*$/, '')
+    .replace(/^```(?:json)?[^\S\n]{0,64}\n?/i, '')
+    .replace(/\n?[^\S\n]{0,64}```[^\S\n]{0,64}$/, '')
     .trim();
 
   // Tier 1: clean parse — fast path for fully compliant outputs.

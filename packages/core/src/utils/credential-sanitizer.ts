@@ -23,9 +23,11 @@ export function sanitizeCredentials(input: string): string {
   // clone URLs can embed tokens on ANY host (oauth2:<token>@gitlab.example.com,
   // <token>@gitea.example.com), so redact the whole userinfo (user[:pass]) of
   // any scheme://userinfo@host form — the username itself can be the token —
-  // while keeping scheme and host for debugging. `[^@/\s]+` cannot cross a
-  // `/`, so URLs without embedded credentials are left untouched.
-  result = result.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^@/\s]+@/g, '$1[REDACTED]@');
+  // while keeping scheme and host for debugging. `[^@/\s]` cannot cross a
+  // `/`, so URLs without embedded credentials are left untouched. Bounded to
+  // 512 (CodeQL js/polynomial-redos): userinfo longer than that is not a
+  // credential worth redacting and no real one approaches it.
+  result = result.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^@/\s]{1,512}@/g, '$1[REDACTED]@');
 
   return result;
 }

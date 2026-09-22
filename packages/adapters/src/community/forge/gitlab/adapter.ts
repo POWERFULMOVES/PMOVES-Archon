@@ -74,7 +74,9 @@ export class GitLabAdapter implements IPlatformAdapter {
       throw new Error('GitLabAdapter requires a non-empty webhookSecret');
     }
 
-    this.gitlabUrl = (gitlabUrl ?? 'https://gitlab.com').replace(/\/+$/, '');
+    // Bounded trailing-slash strip (CodeQL js/polynomial-redos) — no real
+    // GitLab base URL carries more than 32.
+    this.gitlabUrl = (gitlabUrl ?? 'https://gitlab.com').replace(/\/{1,32}$/, '');
     this.token = token;
     this.webhookSecret = webhookSecret;
     this.lockManager = lockManager;

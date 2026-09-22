@@ -303,8 +303,10 @@ function unparseableReason(output: string): OutputRefErrorReason {
 
 export type FieldResolution = { kind: 'value'; value: unknown } | { kind: 'empty' };
 
-/** Strip a single markdown code fence (```json … ```) some models/scripts wrap JSON in. */
-const FENCE_RE = /^[\s\S]*?```(?:json)?\s*\n([\s\S]*?)\n\s*```[\s\S]*$/;
+/** Strip a single markdown code fence (```json … ```) some models/scripts wrap JSON in.
+ * Quantifiers bounded (CodeQL js/polynomial-redos): junk outside the fence is
+ * capped at 4k and whitespace runs at 64 — no behavioral change for real fences. */
+const FENCE_RE = /^[\s\S]{0,4096}?```(?:json)?[^\S\n]{0,64}\n([\s\S]*?)\n[^\S\n]{0,64}```[\s\S]{0,4096}$/;
 
 function asPlainObject(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)

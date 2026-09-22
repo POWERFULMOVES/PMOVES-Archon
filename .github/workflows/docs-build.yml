@@ -19,6 +19,11 @@ on:
       - 'bun.lock'
       - '.github/workflows/docs-build.yml'
 
+# Least-privilege default (CodeQL actions/missing-workflow-permissions): this
+# workflow only builds; it uploads nothing and needs no write scope.
+permissions:
+  contents: read
+
 env:
   BUN_VERSION: '1.4.2'
 
