@@ -34,17 +34,22 @@ Archon provides a unified directory and configuration system with:
 │       ├── worktrees/              # Git worktrees for this project (repo kinds only)
 │       ├── artifacts/              # Workflow artifacts — NEVER in git
 │       │   ├── runs/<run-id>/      #   $ARTIFACTS_DIR for one run
+│       │   │   ├── .archon/node-output-spills/  # engine-owned oversized shell handoffs
+│       │   │   │   └── *.nodeoutput
 │       │   │   └── nodes/          #     typed output sidecars (<id>.md + <id>.meta.json)
 │       │   ├── scopes/<workflow>/<scope>/   # cross-invocation artifacts (persist_session)
 │       │   └── uploads/<conv-id>/  #   Web UI file uploads (ephemeral)
 │       ├── logs/<run-id>.jsonl     # Workflow execution logs
-│       └── state/                  # $STATE_DIR — cross-run state, shared per project
+│       ├── state/                  # $STATE_DIR — cross-run state, shared per project
+│       └── workflow-source/runs/<run-id>/  # The frozen workflow source one run executes
 ├── workflows/  commands/  scripts/ # Home-scoped ("global") definitions
+├── temp/                           # Ephemeral scratch (per-simulation dry-run dirs; removed when the run ends)
 ├── worktrees/                      # Legacy global worktrees (repos not in workspaces/)
 ├── vendor/codex/                   # Codex native binary (binary builds, user-placed)
 ├── web-dist/<version>/             # Cached web UI dist (archon serve, binary only)
 ├── update-check.json               # Update check cache (binary builds only, 24h TTL)
 ├── tier-notice.json                # One-time tier-default notice state (CLI, per version)
+├── install.json                    # Last compiled CLI path and version (discovery hint)
 ├── credential-key                  # Auto-provisioned per-user credential encryption key
 ├── archon.db                       # SQLite database (when DATABASE_URL is unset)
 └── config.yaml                     # Global user configuration
@@ -57,11 +62,18 @@ Archon provides a unified directory and configuration system with:
   project, and `_cwd/<basename>` when a run has no registered codebase at all. Folder
   projects and `_cwd` projects have no `source/` or `worktrees/` — they run in place.
 - `workspaces/<project>/artifacts/` - Run output. `$ARTIFACTS_DIR` is
-  `artifacts/runs/<run-id>/`.
+  `artifacts/runs/<run-id>/`. Oversized values passed to shell nodes are retained in the
+  engine-owned `.archon/node-output-spills/` child so concurrent runs never share the deferred
+  read and workflow-authored root files remain untouched. Archon currently retains filesystem
+  run artifacts until the operator removes them; `archon workflow cleanup` deletes old database
+  run records, not these directories.
 - `workspaces/<project>/logs/` - One JSONL execution log per run.
 - `workspaces/<project>/state/` - `$STATE_DIR`. Cross-run workflow state, shared by every
   workflow in the project. Survives worktree teardown; never visible to git.
 - `worktrees/` - Legacy fallback for repos not registered under `workspaces/`
+- `install.json` - Discovery metadata for the last compiled Archon invoked. GUI and
+  service consumers may use its absolute `binary` path when the user has not
+  configured one explicitly. Source/Bun runs do not write this file.
 - `config.yaml` - Non-secret user preferences
 
 Each run also records the project root it resolved in `workflow_runs.output_root`, so an
@@ -82,7 +94,7 @@ any-repo/.archon/
 
 **Purpose:**
 - `commands/` - Slash commands (auto-loaded on clone)
-- `workflows/` - YAML workflow definitions, discovered recursively at runtime
+- `workflows/` - YAML workflow definitions in flat, one-level grouped, or exact `<pack>/<workflow>/` packaged layouts
 - `scripts/` - Named scripts referenced by `script:` nodes
 - `config.yaml` - Project-specific settings
 
@@ -135,6 +147,10 @@ getArchonWorktreesPath(): string
 // Get global config path
 getArchonConfigPath(): string
 // Returns: ${ARCHON_HOME}/config.yaml
+
+// Get the compiled CLI discovery manifest path
+getInstallManifestPath(): string
+// Returns: ${ARCHON_HOME}/install.json
 
 // Get cached web UI distribution directory for a given version
 getWebDistDir(version: string): string

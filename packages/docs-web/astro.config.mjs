@@ -66,6 +66,7 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/custom.css'],
+      routeMiddleware: './src/starlightRouteData.ts',
       plugins: [
         starlightLlmsTxt({
           description:

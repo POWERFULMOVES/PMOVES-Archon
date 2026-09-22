@@ -41,15 +41,17 @@ interface IsolationRequestBase {
   codebaseName?: string;
 
   /**
-   * Absolute, resolved filesystem path to the main repository checkout.
+   * Absolute, resolved filesystem path to a registered repository checkout.
    *
    * "Canonical" means the real path with symlinks resolved and `~` expanded
    * (e.g., `/home/user/.archon/workspaces/owner/repo/source`). This must
-   * point to the primary git checkout, not a worktree, because git worktree
-   * operations (add, remove, list) must be executed from the main repo.
+   * This normally points to the primary checkout. A repository created with
+   * `--separate-git-dir` does not record a reverse primary-checkout path, so an
+   * exactly registered linked checkout is also a valid Git worktree-operation
+   * anchor.
    *
-   * Use `getCanonicalRepoPath()` to resolve any path (including worktree
-   * paths) back to the canonical repo path.
+   * Use `getCanonicalRepoPath()` when Git can resolve a primary checkout; keep
+   * an exact registered checkout when it returns its typed unavailable result.
    */
   canonicalRepoPath: RepoPath;
 
@@ -113,12 +115,16 @@ export interface ThreadIsolationRequest extends IsolationRequestBase {
   identifier: string;
 }
 
+export type TaskBranchSelection =
+  | { kind: 'new'; branch?: BranchName; fromBranch?: BranchName }
+  | { kind: 'existing'; branch: BranchName };
+
 export interface TaskIsolationRequest extends IsolationRequestBase {
   workflowType: 'task';
-  /** Task identifier (will be slugified for branch name, max 50 chars) */
+  /** Task identifier (will be slugified for branch name unless a branch is specified). */
   identifier: string;
-  /** Optional branch to use as start point for new task branch creation */
-  fromBranch?: BranchName;
+  /** Whether this task creates a branch or continues an exact existing branch. */
+  taskBranch?: TaskBranchSelection;
 }
 
 export type IsolationRequest =
@@ -248,8 +254,8 @@ export interface IsolationHints {
   prFetchFailed?: boolean;
 
   // Task-specific
-  /** Start-point branch for new task worktree creation. Only consumed when workflowType === 'task'. */
-  fromBranch?: BranchName;
+  /** Branch ownership for task isolation. Only consumed when workflowType === 'task'. */
+  taskBranch?: TaskBranchSelection;
 
   /** Expected base branch for this workflow. When set, reused worktrees are validated with merge-base. */
   baseBranch?: BranchName;
@@ -431,6 +437,27 @@ export interface BackendPrepareRequest {
     name: string;
     kind: 'repo' | 'folder';
   };
+  /**
+   * Host path of the run's frozen workflow source, to bind read-only at the SAME
+   * absolute path inside the environment.
+   *
+   * ENGINE-INTERNAL. There is deliberately no YAML or `archon.config` surface for this:
+   * it is one Archon-owned path the engine already knows, not a general mount facility.
+   * Backends that do not isolate the filesystem (in-place) ignore it — the path is
+   * already reachable there.
+   */
+  sourceMount?: string;
+  /**
+   * Host path of the run's artifacts directory (`$ARTIFACTS_DIR`), to bind READ-WRITE at
+   * the SAME absolute path inside the environment.
+   *
+   * `$ARTIFACTS_DIR` is the run's output channel: screenshots, reports, the evidence
+   * marker. A node writes there on both sides of the boundary, so the container gets
+   * the host directory itself rather than a container-local copy the host never sees.
+   * Same ownership rules as `sourceMount`: engine-internal, Archon-owned, ignored by
+   * backends that do not isolate the filesystem.
+   */
+  artifactsMount?: string;
 }
 
 /**

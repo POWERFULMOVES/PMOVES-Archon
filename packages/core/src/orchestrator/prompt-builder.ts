@@ -5,6 +5,16 @@
  */
 import type { Codebase, Conversation } from '../types';
 import type { WorkflowDefinition } from '@archon/workflows/schemas/workflow';
+import {
+  isApprovalContext,
+  isContainerRun,
+  runAttention,
+} from '@archon/workflows/schemas/workflow-run';
+import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
+
+type PromptWorkflow = Pick<WorkflowDefinition, 'name' | 'description'> & {
+  readonly nodes: readonly unknown[];
+};
 
 /**
  * Format a single project for the orchestrator prompt.
@@ -22,7 +32,7 @@ export function formatProjectSection(codebase: Codebase): string {
 /**
  * Format workflow list for the orchestrator prompt.
  */
-export function formatWorkflowSection(workflows: readonly WorkflowDefinition[]): string {
+export function formatWorkflowSection(workflows: readonly PromptWorkflow[]): string {
   if (workflows.length === 0) {
     return 'No workflows available. Users can create workflows in `.archon/workflows/` as YAML files.\n';
   }
@@ -63,6 +73,155 @@ export function formatWorkflowContextSection(results: readonly WorkflowResultCon
   }
 
   return section.trimEnd();
+}
+
+/** The paused run a conversation's approval gate belongs to. */
+export interface PausedGateContext {
+  /**
+   * The paused run itself. The whole row, not a pre-chewed gate: `runAttention`
+   * decides what the run needs from outside, and a hand-copied subset would be a
+   * second place that decision could be made differently.
+   */
+  run: Pick<WorkflowRun, 'id' | 'workflow_name' | 'status' | 'metadata'>;
+  /**
+   * This turn actually has a route to the approve/reject verbs — i.e. the
+   * conversation is project-scoped, which is what gates both the `manage_run`
+   * tool and the CLI-pointer section. Default `true`. When false the section
+   * must not tell the agent to resolve the gate itself; the routes it would name
+   * are not wired, and handing out instructions for an absent tool is the same
+   * dishonesty this issue removed.
+   */
+  agentCanResolve?: boolean;
+}
+
+/**
+ * Format the "there is a human gate waiting in this conversation" section.
+ *
+ * This is the ONLY thing that tells the chat agent a gate is open. It states the
+ * facts of the gate and the decision policy; it does NOT name a tool, because the
+ * verbs reach different providers by different routes (the `manage_run` native
+ * tool on Claude/Pi, the `archon workflow approve|reject` CLI section on the
+ * others). Both routes are described elsewhere in the same prompt.
+ *
+ * Returns '' when there is nothing for the agent to decide — an already-resolved
+ * gate is awaiting resume, not a human.
+ */
+export function formatPausedGateSection(gate: PausedGateContext): string {
+  const header = '## Paused Approval Gate\n\n';
+  const runId = gate.run.id;
+  const workflowName = gate.run.workflow_name;
+  const attention = runAttention(gate.run);
+
+  // Nothing needs a person: a resolved gate awaiting resume, a durable `wait:`, or a
+  // run that already finished. Offering any of those to the agent invites a second
+  // decision the operations reject.
+  if (attention === null || attention.kind === 'terminal') return '';
+
+  if (attention.kind === 'unreadable') {
+    // Paused, but the gate cannot be described — unreadable metadata, or a gate type
+    // this build cannot resolve. Preserve the explicit-command guidance the old
+    // natural-language branch sent directly to the user.
+    return (
+      header +
+      `Run \`${runId}\` (**${workflowName}**) is paused, but its approval context is ` +
+      'missing or malformed, so the gate cannot be described. Tell the user to resolve it ' +
+      `explicitly with \`/workflow approve ${runId}\` or \`/workflow reject ${runId} <reason>\`.`
+    );
+  }
+
+  if (attention.kind === 'blocked_on_child') {
+    return (
+      header +
+      `Run \`${runId}\` (**${workflowName}**) is paused waiting on its sub-run ` +
+      `\`${attention.childRunId}\`, which has a gate of its own. This run has no gate you can resolve — ` +
+      'the decision belongs to the child run, and this one continues on its own once the child ' +
+      'finishes.'
+    );
+  }
+
+  if (attention.kind === 'action_required') {
+    return (
+      '## Paused action required\n\n' +
+      `Run \`${runId}\` (**${workflowName}**) is paused until someone completes this outside action:\n\n` +
+      `> ${attention.message.replace(/\n/g, '\n> ')}\n\n` +
+      `After the action is complete, run \`archon workflow resume ${runId}\`. Abandon it if it should not continue. ` +
+      'Do not approve or reject this pause.'
+    );
+  }
+
+  // `awaiting_response`. The projection reports it only for a well-formed, unresolved
+  // gate; the context read here carries the DETAIL the attention value omits.
+  const rawApproval = gate.run.metadata.approval;
+  const approval = isApprovalContext(rawApproval) ? rawApproval : undefined;
+
+  const facts = [
+    `- Run id: \`${runId}\``,
+    `- Workflow: **${workflowName}**`,
+    `- Gate node: \`${attention.respondTo.nodeId}\``,
+  ];
+  if (approval?.type === 'interactive_loop' && typeof approval.iteration === 'number') {
+    facts.push(`- Loop iteration: ${String(approval.iteration)}`);
+  }
+
+  const explicitCommands = `\`/workflow approve ${runId} [comment]\` or \`/workflow reject ${runId} <reason>\``;
+
+  const preamble =
+    header +
+    'A workflow run in this conversation is PAUSED waiting for a human decision. It does not ' +
+    'continue until the gate is resolved.\n\n' +
+    facts.join('\n') +
+    '\n\nWhat the run is asking:\n\n' +
+    `> ${attention.message.replace(/\n/g, '\n> ')}\n\n`;
+
+  // No project is attached, so neither the `manage_run` tool nor the CLI-pointer
+  // section is present this turn. Relay the gate rather than instructing the
+  // agent to use verbs it does not have.
+  if (gate.agentCanResolve === false) {
+    return (
+      preamble +
+      'You have no way to resolve this gate yourself in this conversation — no project is ' +
+      'attached, so the run-management verbs are not available. If the user is answering the ' +
+      `gate, tell them to decide it explicitly with ${explicitCommands}. Do not claim you ` +
+      'resolved anything.'
+    );
+  }
+
+  // A container run can only be resumed where the container can be rewired. The
+  // section promises continuation, and that promise is false here — the executor
+  // refuses a resume it cannot rewire.
+  const continuation = isContainerRun(gate.run)
+    ? 'This run executed inside an isolation container, so resolving the gate records the ' +
+      'decision but CANNOT continue the run from here — only the CLI can rewire the ' +
+      `container. Tell the user to finish it with \`archon workflow resume ${runId}\` ` +
+      'from the CLI in the same project.'
+    : 'Resolving the gate also continues the run — there is no separate resume step.';
+
+  return (
+    preamble +
+    "Read the user's message and judge what it means for THIS gate:\n\n" +
+    '- It clearly approves → resolve the gate as APPROVED, passing their own words verbatim as ' +
+    'the comment (a workflow may read that comment as the gate node’s output).\n' +
+    '- It clearly objects, refuses, or asks to stop → resolve the gate as REJECTED, passing ' +
+    'their own words verbatim as the reason.\n' +
+    '- Anything else — a question, a request for detail, an unrelated message → resolve ' +
+    'NOTHING. Answer them and leave the gate open.\n\n' +
+    // Demonstration, not just the rule: the reason a rejection carries is what an
+    // on_reject prompt reworks the code from, so a paraphrase there is a different
+    // artifact from what the user asked for.
+    'The words that travel are the user’s, not your summary:\n\n' +
+    '  User: "no, stop — why is it editing the schema?"\n' +
+    '  → REJECT, reason: "no, stop — why is it editing the schema?"\n' +
+    '    (NOT "the user objected to the schema change" — the reason is what an on_reject\n' +
+    '     prompt reworks from, so a summary reworks the wrong thing.)\n\n' +
+    '  User: "looks good, but add error handling for the edge cases"\n' +
+    '  → APPROVE, comment: "looks good, but add error handling for the edge cases"\n\n' +
+    'An unambiguous decision from the user IS the human confirmation a gate action needs — ' +
+    'resolve it in the same turn rather than making them repeat themselves. When you are not ' +
+    'sure what they meant, ask: leaving the gate open costs nothing, and resolving it against ' +
+    'their intent cannot be undone.\n\n' +
+    continuation +
+    ` The user can always decide it themselves with ${explicitCommands}.`
+  );
 }
 
 /**
@@ -141,7 +300,7 @@ IMPORTANT: Always clone into ~/.archon/workspaces/{owner}/{repo}/source unless t
  */
 export function buildOrchestratorPrompt(
   codebases: readonly Codebase[],
-  workflows: readonly WorkflowDefinition[]
+  workflows: readonly PromptWorkflow[]
 ): string {
   let prompt = `# Archon Orchestrator
 
@@ -179,7 +338,7 @@ You can answer questions directly or invoke workflows for structured development
 export function buildProjectScopedPrompt(
   scopedCodebase: Codebase,
   allCodebases: readonly Codebase[],
-  workflows: readonly WorkflowDefinition[]
+  workflows: readonly PromptWorkflow[]
 ): string {
   const otherCodebases = allCodebases.filter(c => c.id !== scopedCodebase.id);
 
@@ -230,15 +389,17 @@ export function buildRunManagementSection(): string {
 
 You can inspect and control this project's workflow runs directly via the \`archon\` CLI (bash) — you do NOT need to invoke a workflow for run management. Add \`--json\` to any command for a single clean, machine-readable line.
 
-Run these from within the project's git repo (any subdirectory works — they resolve to the repo root, which also scopes \`runs\` to this project). They fail with "Not in a git repository" if the working directory is \`~/.archon/workspaces/\` or another non-repo path.
+Run these from within the project's git repo (any subdirectory works — they resolve to the repo root, which also scopes \`runs\` and \`status\` to this project). In an unregistered git checkout, \`workflow status\` falls back to install-wide active runs and reports \`scopeFallback: true\` in JSON. A non-repo path such as \`~/.archon/workspaces/\` still fails with "Not in a git repository".
 
 - \`archon workflow runs [--json]\` — recent runs of ALL statuses for this project
 - \`archon workflow get <run-id> [--json]\` — one run's status/error (add \`--verbose\` for per-node detail)
-- \`archon workflow status [--json]\` — active runs only (running/paused)
+- \`archon workflow status [--json]\` — active runs only (running/paused) for this project; add \`--all\` only for install-wide visibility
 - \`archon workflow run <workflow> "<message>" --detach\` — start a run in the background (returns immediately)
-- \`archon workflow approve <run-id> [--json]\` / \`archon workflow reject <run-id> [reason] [--json]\` — resolve a paused approval gate
+- \`archon workflow approve <run-id> [comment]\` / \`archon workflow reject <run-id> [reason]\` — resolve a paused approval gate AND continue the run in one step. Pass the user's own words as the comment or reason, never a summary: a workflow may read the comment as the gate node's output, and the reason is what an \`on_reject\` prompt reworks from. Add \`--json\` only when you need a machine-readable ack: \`--json\` records the decision WITHOUT continuing, and you must then drive \`archon workflow resume <run-id>\` yourself or the run stays stranded.
+- \`archon workflow respond <run-id> <decision> [text]\` — same shape as approve/reject, but for a gate that declares decisions beyond the default pair (check the paused run's message for the declared options). \`approve\`/\`reject\` remain the shortcuts above; use \`respond\` only when the gate offers a different vocabulary.
 - \`archon workflow resume <run-id>\` — re-run a failed/paused run, skipping completed nodes (run as a background task; \`--json\` validates only)
-- \`archon workflow abandon <run-id> [--json]\` — cancel a non-terminal run
+- \`archon workflow cancel <run-id> [--json]\` — actively stop a running CLI \`--detach\` owner, then record \`cancelled\`
+- \`archon workflow abandon <run-id> [--json]\` — state-only cancellation for paused runs or verified orphans; it does not stop host work
 
 When the user asks what's running, whether a run passed/failed, or to approve / reject / resume / cancel a run, use these commands directly instead of invoking a workflow. The \`manage-run\` skill has the full reference if it is loaded.`;
 }
@@ -253,7 +414,7 @@ When the user asks what's running, whether a run passed/failed, or to approve / 
 export function buildOrchestratorSystemAppend(
   conversation: Conversation,
   codebases: readonly Codebase[],
-  workflows: readonly WorkflowDefinition[]
+  workflows: readonly PromptWorkflow[]
 ): string {
   const scopedCodebase = conversation.codebase_id
     ? codebases.find(c => c.id === conversation.codebase_id)

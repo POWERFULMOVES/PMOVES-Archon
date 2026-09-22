@@ -4,52 +4,664 @@
  * Note: These tests focus on argument parsing logic.
  * Full integration tests would require mocking the database and commands.
  */
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { parseArgs } from 'util';
+import { cliArgOptions } from './args';
 import * as git from '@archon/git';
+import { removeTempTree } from '@archon/paths/test-utils';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { sealWorkflowRunConfig } from '@archon/core/config';
+import {
+  rejectConfigOnContinue,
+  rejectConfigOutsideRun,
+  rejectModelOnContinue,
+} from './dispatch-guards';
 
-describe('CLI help output', () => {
-  it('lists the workflow resume command', () => {
-    const result = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), '--help'], {
+const CLI_ENTRY = join(import.meta.dir, 'cli.ts');
+// The enclosing git worktree — a valid repo for the git gate, with a real
+// .archon/workflows/ directory so an unknown workflow name fails deterministically.
+const repoRoot = join(import.meta.dir, '..', '..', '..');
+
+describe('removed continue command', () => {
+  // Full interpreter startup: the rejection lives in main()'s dispatch, not in
+  // a pure guard, so a subprocess is the only way to pin the actual outcome.
+  it('rejects archon continue and points to explicit run adoption', () => {
+    const result = spawnSync(process.execPath, [CLI_ENTRY, 'continue', 'some/branch', 'carry on'], {
+      encoding: 'utf8',
+      env: { ...process.env, ARCHON_TELEMETRY_DISABLED: '1' },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Removed: 'archon continue'");
+    expect(result.stderr).toContain('--adopt <run-id>');
+  });
+
+  it('rejects archon continue outside any git repository', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'archon-no-repo-'));
+    try {
+      const result = spawnSync(process.execPath, [CLI_ENTRY, 'continue', 'some/branch'], {
+        encoding: 'utf8',
+        cwd: dir,
+        env: { ...process.env, ARCHON_TELEMETRY_DISABLED: '1' },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Removed: 'archon continue'");
+      expect(result.stderr).toContain('--adopt <run-id>');
+    } finally {
+      await removeTempTree(dir);
+    }
+  });
+
+  it('no longer parses the continue-only flags', () => {
+    for (const flag of ['--workflow', '--no-context']) {
+      expect(() =>
+        parseArgs({
+          args: ['workflow', 'run', 'x', flag, 'value'],
+          options: cliArgOptions,
+          allowPositionals: true,
+          strict: true,
+        })
+      ).toThrow();
+    }
+  });
+});
+
+describe('workflow model arguments', () => {
+  it('parses repeated --model values without accepting a coarse provider flag', () => {
+    const parsed = parseArgs({
+      args: ['workflow', 'run', 'x', '--model', 'large=openai/gpt-5.6', '--model', '@p=large'],
+      options: cliArgOptions,
+      allowPositionals: true,
+      strict: true,
+    });
+    expect(parsed.values.model).toEqual(['large=openai/gpt-5.6', '@p=large']);
+    expect(() =>
+      parseArgs({
+        args: ['workflow', 'run', 'x', '--provider', 'pi'],
+        options: cliArgOptions,
+        allowPositionals: true,
+        strict: true,
+      })
+    ).toThrow(/provider/);
+  });
+
+  for (const args of [
+    ['workflow', 'resume', 'run-1'],
+    ['workflow', 'approve', 'run-1'],
+    ['workflow', 'reject', 'run-1'],
+    ['workflow', 'respond', 'run-1', 'approve'],
+  ]) {
+    it(`rejects --model on ${args[0]} ${args[1]}`, () => {
+      // Pure pre-dispatch argv guard — no I/O, so asserted in-process instead
+      // of through a full interpreter startup. A defined message is what makes
+      // main() print to stderr and exit 1.
+      const message = rejectModelOnContinue(args[1], 'large=opus');
+      expect(message).toBeDefined();
+      expect(message).toContain('--model cannot be used when continuing an existing workflow run');
+      expect(message).toContain('keeps the model bindings it started with');
+    });
+  }
+});
+
+describe('workflow run config argument', () => {
+  it('parses one local path', () => {
+    const parsed = parseArgs({
+      args: ['workflow', 'run', 'x', '--config', './config.minimax.yaml'],
+      options: cliArgOptions,
+      allowPositionals: true,
+      strict: true,
+    });
+    expect(parsed.values.config).toBe('./config.minimax.yaml');
+  });
+
+  it('rejects a new config on run --resume before reading it', () => {
+    // Pure pre-dispatch argv guard — no I/O, so asserted in-process.
+    const message = rejectConfigOnContinue(true, './does-not-exist.yaml');
+    expect(message).toBeDefined();
+    expect(message).toContain('--config cannot be used when continuing');
+  });
+
+  it('rejects --config outside workflow run before dispatch', () => {
+    // Pure pre-dispatch argv guard — no I/O, so asserted in-process.
+    const message = rejectConfigOutsideRun('chat', undefined, './does-not-exist.yaml');
+    expect(message).toBeDefined();
+    expect(message).toContain('--config can only be used with workflow run');
+  });
+
+  it('resolves a relative config path from the requested subdirectory cwd', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'archon-cli-config-cwd-'));
+    const subdir = join(repo, 'bench');
+    mkdirSync(subdir, { recursive: true });
+    spawnSync('git', ['init'], { cwd: repo, encoding: 'utf8' });
+    writeFileSync(join(subdir, 'config.yaml'), 'paths: {}\n');
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'run', 'x', '--cwd', subdir, '--config', './config.yaml'],
+        { encoding: 'utf8' }
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Run config key 'paths' cannot apply");
+      expect(result.stderr).not.toContain('Unable to read run config');
+    } finally {
+      await removeTempTree(repo);
+    }
+  });
+
+  it('keeps a detached config handoff outside repo env overrides', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'archon-cli-detached-config-'));
+    const archonHome = join(repo, 'archon-home');
+    mkdirSync(join(repo, '.archon'), { recursive: true });
+    spawnSync('git', ['init', '-q', '.'], { cwd: repo });
+    writeFileSync(
+      join(repo, '.env'),
+      `TOKEN_ENCRYPTION_KEY=${'33'.repeat(32)}\n` +
+        `ARCHON_HOME=${join(repo, 'wrong-home')}\n` +
+        'ARCHON_DOCKER=true\n' +
+        'WORKSPACE_PATH=/workspace\n' +
+        'HOME=/root\n'
+    );
+    writeFileSync(
+      join(repo, '.archon', '.env'),
+      `TOKEN_ENCRYPTION_KEY=${'22'.repeat(32)}\n` +
+        'ARCHON_DOCKER=true\n' +
+        'WORKSPACE_PATH=/workspace\n' +
+        'HOME=/root\n'
+    );
+
+    const savedKey = process.env.TOKEN_ENCRYPTION_KEY;
+    const savedArchonHome = process.env.ARCHON_HOME;
+    delete process.env.TOKEN_ENCRYPTION_KEY;
+    process.env.ARCHON_HOME = relative(process.cwd(), archonHome);
+    const payload = JSON.stringify(
+      sealWorkflowRunConfig({ docsPath: 'accepted' }, { kind: 'cli', label: 'config.minimax.yaml' })
+    );
+    if (savedKey === undefined) delete process.env.TOKEN_ENCRYPTION_KEY;
+    else process.env.TOKEN_ENCRYPTION_KEY = savedKey;
+    if (savedArchonHome === undefined) delete process.env.ARCHON_HOME;
+    else process.env.ARCHON_HOME = savedArchonHome;
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI_ENTRY,
+          'workflow',
+          'run',
+          'x',
+          '--dry-run',
+          '--resume',
+          '--internal-detached-run-config',
+          payload,
+        ],
+        {
+          cwd: repo,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ARCHON_HOME: archonHome,
+            TOKEN_ENCRYPTION_KEY: '',
+            ARCHON_DOCKER: '',
+            WORKSPACE_PATH: '',
+            HOME: homedir(),
+          },
+        }
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain('could not be decrypted');
+      expect(result.stderr).toContain('--resume and --config are mutually exclusive');
+    } finally {
+      await removeTempTree(repo);
+    }
+  });
+
+  it('keeps a detached Docker install classified through target env loading', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'archon-cli-detached-docker-'));
+    mkdirSync(join(repo, '.archon'), { recursive: true });
+    writeFileSync(
+      join(repo, '.env'),
+      `TOKEN_ENCRYPTION_KEY=${'33'.repeat(32)}\n` +
+        `ARCHON_HOME=${join(repo, 'wrong-home')}\n` +
+        'ARCHON_DOCKER=false\n' +
+        'WORKSPACE_PATH=\n' +
+        `HOME=${repo}\n`
+    );
+    writeFileSync(
+      join(repo, '.archon', '.env'),
+      `TOKEN_ENCRYPTION_KEY=${'22'.repeat(32)}\n` +
+        `ARCHON_HOME=${join(repo, 'wrong-home')}\n` +
+        'ARCHON_DOCKER=false\n' +
+        'WORKSPACE_PATH=\n' +
+        `HOME=${repo}\n`
+    );
+
+    const stripBootUrl = pathToFileURL(
+      join(repoRoot, 'packages', 'paths', 'src', 'strip-cwd-env-boot.ts')
+    ).href;
+    const pathsUrl = pathToFileURL(join(repoRoot, 'packages', 'paths', 'src', 'index.ts')).href;
+    const probe = join(repo, 'probe.ts');
+    writeFileSync(
+      probe,
+      `import '${stripBootUrl}';\n` +
+        `import { captureDetachedInstallContext, getArchonHome, isDocker, loadArchonEnv, restoreDetachedInstallContext } from '${pathsUrl}';\n` +
+        'const inherited = captureDetachedInstallContext();\n' +
+        'loadArchonEnv(process.cwd());\n' +
+        'restoreDetachedInstallContext(inherited);\n' +
+        'process.stdout.write(JSON.stringify({ docker: isDocker(), home: getArchonHome(), context: inherited }));\n'
+    );
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [probe, '--internal-detached-run-config', 'placeholder'],
+        {
+          cwd: repo,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TOKEN_ENCRYPTION_KEY: 'parent-key',
+            ARCHON_HOME: '/.archon',
+            ARCHON_DOCKER: 'true',
+            WORKSPACE_PATH: '/workspace',
+            HOME: '/root',
+          },
+        }
+      );
+      expect({ status: result.status, stderr: result.stderr }).toEqual({
+        status: 0,
+        stderr: expect.stringContaining('[archon] stripped 5 keys'),
+      });
+      expect(JSON.parse(result.stdout)).toEqual({
+        docker: true,
+        home: '/.archon',
+        context: {
+          TOKEN_ENCRYPTION_KEY: 'parent-key',
+          ARCHON_HOME: '/.archon',
+          ARCHON_DOCKER: 'true',
+          WORKSPACE_PATH: '/workspace',
+          HOME: '/root',
+        },
+      });
+    } finally {
+      await removeTempTree(repo);
+    }
+  });
+
+  for (const args of [
+    ['workflow', 'resume', 'run-1'],
+    ['workflow', 'approve', 'run-1'],
+    ['workflow', 'reject', 'run-1'],
+    ['workflow', 'respond', 'run-1', 'approve'],
+  ]) {
+    it(`rejects --config on ${args[0]} ${args[1]}`, () => {
+      // Pure pre-dispatch argv guard — no I/O, so asserted in-process instead
+      // of through a full interpreter startup.
+      const message = rejectConfigOutsideRun(args[0], args[1], './config.minimax.yaml');
+      expect(message).toBeDefined();
+      expect(message).toContain('--config can only be used with workflow run');
+    });
+  }
+});
+
+describe('unknown flag rejection (#2769)', () => {
+  it('exits non-zero naming the mistyped flag before any command runs', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI_ENTRY, 'workflow', 'run', 'assist', '--dryrun', '--stubs', 'x.yaml'],
+      { encoding: 'utf8' }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--dryrun');
+  });
+
+  it('still accepts a valid workflow dry-run invocation', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI_ENTRY, 'workflow', 'run', 'definitely-not-a-workflow', '--dry-run'],
+      { encoding: 'utf8', cwd: join(import.meta.dir, '../../../') }
+    );
+
+    // Fails on the unknown workflow name (after parsing), not on the flag.
+    expect(result.stderr).not.toContain('Error parsing arguments');
+  });
+});
+
+describe('workflow status arguments', () => {
+  it('rejects a run id and points to workflow get', () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, 'cli.ts'), 'workflow', 'status', 'abc123'],
+      { encoding: 'utf8' }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'Usage: archon workflow status [--all] [--json] [--verbose] [--events]'
+    );
+    expect(result.stderr).toContain('archon workflow get <run-id>');
+    expect(result.stdout).toBe('');
+  });
+});
+
+describe('workflow status project scope', () => {
+  it('uses the run-owned project after its conversation moves and returns every project with --all', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'archon-cli-status-scope-'));
+    const archonHome = join(scratch, 'home');
+    const projectA = join(scratch, 'project-a');
+    const projectB = join(scratch, 'project-b');
+    const unregisteredProject = join(scratch, 'unregistered-project');
+    mkdirSync(archonHome, { recursive: true });
+    mkdirSync(projectA);
+    mkdirSync(projectB);
+    mkdirSync(unregisteredProject);
+
+    try {
+      expect(spawnSync('git', ['init', '-q', '.'], { cwd: projectA }).status).toBe(0);
+      expect(spawnSync('git', ['init', '-q', '.'], { cwd: projectB }).status).toBe(0);
+      expect(spawnSync('git', ['init', '-q', '.'], { cwd: unregisteredProject }).status).toBe(0);
+      const projectARoot = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: projectA,
+        encoding: 'utf8',
+      });
+      const projectBRoot = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: projectB,
+        encoding: 'utf8',
+      });
+      expect(projectARoot.status).toBe(0);
+      expect(projectBRoot.status).toBe(0);
+      const env = {
+        ...process.env,
+        ARCHON_HOME: archonHome,
+        ARCHON_TELEMETRY_DISABLED: '1',
+        DATABASE_URL: '',
+      };
+      const initialize = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--all', '--json', '--cwd', projectA],
+        { cwd: projectA, env, encoding: 'utf8' }
+      );
+      expect({ status: initialize.status, stderr: initialize.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+
+      const database = new Database(join(archonHome, 'archon.db'));
+      try {
+        const insertCodebase = database.prepare(
+          'INSERT INTO remote_agent_codebases (id, name, default_cwd) VALUES (?, ?, ?)'
+        );
+        insertCodebase.run('codebase-a', 'fixture/a', projectARoot.stdout.trim());
+        insertCodebase.run('codebase-b', 'fixture/b', projectBRoot.stdout.trim());
+
+        const insertConversation = database.prepare(
+          'INSERT INTO remote_agent_conversations (id, platform_type, platform_conversation_id, codebase_id) VALUES (?, ?, ?, ?)'
+        );
+        insertConversation.run('conversation-a', 'cli', 'cli-a', 'codebase-a');
+        insertConversation.run('conversation-b', 'cli', 'cli-b', 'codebase-b');
+
+        const insertRun = database.prepare(
+          'INSERT INTO remote_agent_workflow_runs (id, conversation_id, codebase_id, workflow_name, user_message, status) VALUES (?, ?, ?, ?, ?, ?)'
+        );
+        insertRun.run(
+          '00000000-0000-4000-8000-00000000000a',
+          'conversation-a',
+          'codebase-a',
+          'project-a-work',
+          'test',
+          'running'
+        );
+        insertRun.run(
+          '00000000-0000-4000-8000-00000000000b',
+          'conversation-b',
+          'codebase-b',
+          'project-b-work',
+          'test',
+          'paused'
+        );
+        database
+          .prepare('UPDATE remote_agent_conversations SET codebase_id = ? WHERE id = ?')
+          .run('codebase-b', 'conversation-a');
+      } finally {
+        database.close();
+      }
+
+      const scoped = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--json', '--cwd', projectA],
+        { cwd: projectA, env, encoding: 'utf8' }
+      );
+      expect({ status: scoped.status, stderr: scoped.stderr }).toEqual({ status: 0, stderr: '' });
+      const scopedJson = JSON.parse(scoped.stdout) as {
+        scopeFallback: boolean;
+        runs: Array<{ workflow_name: string }>;
+      };
+      expect(scopedJson.scopeFallback).toBe(false);
+      expect(scopedJson.runs.map(run => run.workflow_name)).toEqual(['project-a-work']);
+
+      const otherProject = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--json', '--cwd', projectB],
+        { cwd: projectB, env, encoding: 'utf8' }
+      );
+      expect({ status: otherProject.status, stderr: otherProject.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+      const otherProjectJson = JSON.parse(otherProject.stdout) as {
+        scopeFallback: boolean;
+        runs: Array<{ workflow_name: string }>;
+      };
+      expect(otherProjectJson.scopeFallback).toBe(false);
+      expect(otherProjectJson.runs.map(run => run.workflow_name)).toEqual(['project-b-work']);
+
+      const global = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--all', '--json', '--cwd', projectA],
+        { cwd: projectA, env, encoding: 'utf8' }
+      );
+      expect({ status: global.status, stderr: global.stderr }).toEqual({ status: 0, stderr: '' });
+      const globalJson = JSON.parse(global.stdout) as {
+        scopeFallback: boolean;
+        runs: Array<{ workflow_name: string }>;
+      };
+      expect(globalJson.scopeFallback).toBe(false);
+      expect(new Set(globalJson.runs.map(run => run.workflow_name))).toEqual(
+        new Set(['project-a-work', 'project-b-work'])
+      );
+
+      const fallback = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--json', '--cwd', unregisteredProject],
+        { cwd: unregisteredProject, env, encoding: 'utf8' }
+      );
+      expect({ status: fallback.status, stderr: fallback.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+      const fallbackJson = JSON.parse(fallback.stdout) as {
+        scopeFallback: boolean;
+        runs: Array<{ workflow_name: string }>;
+      };
+      expect(fallbackJson.scopeFallback).toBe(true);
+      expect(new Set(fallbackJson.runs.map(run => run.workflow_name))).toEqual(
+        new Set(['project-a-work', 'project-b-work'])
+      );
+    } finally {
+      await removeTempTree(scratch);
+    }
+  }, 30_000);
+});
+
+describe('workflow get arguments', () => {
+  it('rejects extra positional arguments', () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, 'cli.ts'), 'workflow', 'get', 'abc123', 'accidental-extra'],
+      { encoding: 'utf8' }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'Usage: archon workflow get <run-id> [--json] [--verbose] [--events]'
+    );
+    expect(result.stdout).toBe('');
+  });
+});
+
+describe('workflow logs arguments', () => {
+  it.each([
+    ['missing run id', ['workflow', 'logs']],
+    ['extra positional', ['workflow', 'logs', 'abc123', 'accidental-extra']],
+  ])('rejects %s', (_label, args) => {
+    const result = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), ...args], {
       encoding: 'utf8',
     });
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain(
-      'workflow resume <run-id>   Resume a failed or paused run from completed nodes'
-    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Usage: archon workflow logs <run-id> [--follow]');
+    expect(result.stdout).toBe('');
   });
+
+  it('rejects --json because stdout is already raw JSONL', () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, 'cli.ts'), 'workflow', 'logs', 'abc123', '--json'],
+      { encoding: 'utf8' }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('workflow logs already emits JSONL');
+    expect(result.stdout).toBe('');
+  });
+
+  it('rejects the get-only --events mode', () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, 'cli.ts'), 'workflow', 'logs', 'abc123', '--events'],
+      { encoding: 'utf8' }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--events applies to workflow status/get');
+    expect(result.stdout).toBe('');
+  });
+});
+
+describe('CLI workflow event dispatch', () => {
+  it('resolves a run prefix using the registered effective cwd', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'archon-cli-event-'));
+    const archonHome = join(scratch, 'home');
+    const repoDir = join(scratch, 'repo');
+    mkdirSync(archonHome, { recursive: true });
+    mkdirSync(repoDir, { recursive: true });
+
+    try {
+      expect(spawnSync('git', ['init', '-q', '.'], { cwd: repoDir }).status).toBe(0);
+      const repoRoot = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: repoDir,
+        encoding: 'utf8',
+      });
+      expect(repoRoot.status).toBe(0);
+
+      const env = {
+        ...process.env,
+        ARCHON_HOME: archonHome,
+        ARCHON_TELEMETRY_DISABLED: '1',
+      };
+      const initialize = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, 'workflow', 'status', '--cwd', repoDir],
+        { env, encoding: 'utf8' }
+      );
+      expect({ status: initialize.status, stderr: initialize.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+
+      const fullRunId = '0b1ee8da-1111-2222-3333-444455556666';
+      const database = new Database(join(archonHome, 'archon.db'));
+      try {
+        database.run(
+          'INSERT INTO remote_agent_codebases (id, name, default_cwd) VALUES (?, ?, ?)',
+          ['codebase-1', 'fixture', repoRoot.stdout.trim()]
+        );
+        database.run(
+          'INSERT INTO remote_agent_conversations (id, platform_type, platform_conversation_id, codebase_id) VALUES (?, ?, ?, ?)',
+          ['conversation-1', 'cli', 'cli-fixture', 'codebase-1']
+        );
+        database.run(
+          'INSERT INTO remote_agent_workflow_runs (id, conversation_id, codebase_id, workflow_name, user_message) VALUES (?, ?, ?, ?, ?)',
+          [fullRunId, 'conversation-1', 'codebase-1', 'fixture', 'test']
+        );
+      } finally {
+        database.close();
+      }
+
+      const emitted = spawnSync(
+        process.execPath,
+        [
+          CLI_ENTRY,
+          'workflow',
+          'event',
+          'emit',
+          '--run-id',
+          fullRunId.slice(0, 8),
+          '--type',
+          'workflow_started',
+          '--cwd',
+          repoDir,
+        ],
+        { env, encoding: 'utf8' }
+      );
+      expect({ status: emitted.status, stderr: emitted.stderr }).toEqual({ status: 0, stderr: '' });
+
+      const verify = new Database(join(archonHome, 'archon.db'), { readonly: true });
+      try {
+        const event = verify
+          .query<
+            { workflow_run_id: string; event_type: string },
+            []
+          >('SELECT workflow_run_id, event_type FROM remote_agent_workflow_events')
+          .get();
+        expect(event).toEqual({
+          workflow_run_id: fullRunId,
+          event_type: 'workflow_started',
+        });
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await removeTempTree(scratch);
+    }
+  }, 30_000);
 });
 
 // Test the argument parsing logic used in cli.ts
 describe('CLI argument parsing', () => {
-  // Mirror the actual parseArgs options from cli.ts
   const parseCliArgs = (
     args: string[]
   ): { values: Record<string, unknown>; positionals: string[] } => {
     return parseArgs({
       args,
-      options: {
-        cwd: { type: 'string', default: process.cwd() },
-        help: { type: 'boolean', short: 'h' },
-        branch: { type: 'string', short: 'b' },
-        from: { type: 'string' },
-        'from-branch': { type: 'string' },
-        base: { type: 'string' },
-        'no-worktree': { type: 'boolean' },
-        spawn: { type: 'boolean' },
-        quiet: { type: 'boolean', short: 'q' },
-        verbose: { type: 'boolean', short: 'v' },
-        scope: { type: 'string' },
-        force: { type: 'boolean' },
-      },
+      options: cliArgOptions,
       allowPositionals: true,
-      strict: false,
+      strict: true,
     });
   };
+
+  describe('isolation cleanup flags', () => {
+    it('parses --merged and --include-closed in strict mode', () => {
+      const { values } = parseCliArgs(['isolation', 'cleanup', '--merged', '--include-closed']);
+      expect(values.merged).toBe(true);
+      expect(values['include-closed']).toBe(true);
+    });
+  });
 
   describe('--cwd flag', () => {
     it('should parse --cwd with path', () => {
@@ -79,6 +691,13 @@ describe('CLI argument parsing', () => {
     it('should parse -h short flag', () => {
       const result = parseCliArgs(['-h']);
       expect(result.values.help).toBe(true);
+    });
+  });
+
+  describe('--follow flag', () => {
+    it('parses workflow transcript follow mode', () => {
+      const result = parseCliArgs(['workflow', 'logs', 'abc123', '--follow']);
+      expect(result.values.follow).toBe(true);
     });
   });
 
@@ -173,6 +792,29 @@ describe('CLI argument parsing', () => {
       const result = parseCliArgs(['workflow', 'run', 'assist', '--base', 'epic/foo']);
       expect(result.values.base).toBe('epic/foo');
     });
+
+    it('parses workflow dry-run flags', () => {
+      const result = parseCliArgs([
+        'workflow',
+        'run',
+        'assist',
+        '--dry-run',
+        '--stubs',
+        'fixtures.yaml',
+        '--stubs-init',
+        'generated.yaml',
+        '--default-stubs',
+        '--exec-code',
+        '--pause-at-gates',
+      ]);
+
+      expect(result.values['dry-run']).toBe(true);
+      expect(result.values.stubs).toBe('fixtures.yaml');
+      expect(result.values['stubs-init']).toBe('generated.yaml');
+      expect(result.values['default-stubs']).toBe(true);
+      expect(result.values['exec-code']).toBe(true);
+      expect(result.values['pause-at-gates']).toBe(true);
+    });
   });
 
   describe('version flag detection', () => {
@@ -227,18 +869,13 @@ describe('CLI argument parsing', () => {
     });
   });
 
-  describe('unknown flags with strict: false', () => {
-    it('should pass through unknown flags', () => {
-      const result = parseCliArgs(['--unknown', 'workflow', 'list']);
-      // Unknown flag is ignored, positionals are preserved
-      expect(result.positionals).toEqual(['workflow', 'list']);
+  describe('unknown flags (#2769)', () => {
+    it('rejects an unknown flag instead of dropping it', () => {
+      expect(() => parseCliArgs(['--unknown', 'workflow', 'list'])).toThrow(/unknown option/i);
     });
 
-    it('should pass through typos like --cwdd', () => {
-      const result = parseCliArgs(['--cwdd', '/path', 'workflow', 'list']);
-      // Typo is ignored, --cwd defaults to process.cwd()
-      expect(result.values.cwd).toBe(process.cwd());
-      expect(result.positionals).toContain('/path'); // /path becomes positional
+    it('rejects a typoed flag like --cwdd', () => {
+      expect(() => parseCliArgs(['--cwdd', '/path', 'workflow', 'list'])).toThrow(/--cwdd/);
     });
   });
 
@@ -466,5 +1103,343 @@ describe('CLI git repo check', () => {
       expect(msg).toContain('Directory does not exist');
       expect(msg).toContain('/nonexistent');
     });
+  });
+});
+
+// All --json error-envelope tests share one contract: exit 1 and a parseable
+// `{ ok: false }` payload on stdout via the shared writeJsonLine catch path.
+// One helper owns the spawn env and envelope access so every case pays setup
+// once instead of repeating it; each test still drives its own invocation so
+// the subprocess stdout/exit-code contract stays covered.
+//
+// The helper owns an ARCHON_HOME because these spawns are real CLI processes:
+// the no-git folder-project gate opens the Archon registry to decide whether an
+// unregistered directory is a folder project, before it refuses the command.
+// Inheriting the ambient home aimed that at the operator's ~/.archon, so the
+// tests both mutated real state and queued behind whoever else held it. The
+// registry sets `PRAGMA busy_timeout = 5000` — the same number as Bun's
+// implicit per-test budget — so a contended open can spend the whole budget
+// waiting: holding a write lock for 3 s made this command take 3.41 s, and an
+// 8 s lock took it to the 5.54 s ceiling. A private registry removes the
+// contention, and seeding it once below keeps schema creation out of every
+// timed body (#2982).
+let jsonEnvelopeHome: string;
+
+function spawnJsonError(argv: string[], extraEnv: Record<string, string> = {}) {
+  const result = spawnSync(process.execPath, [CLI_ENTRY, ...argv], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ARCHON_TELEMETRY_DISABLED: '1',
+      ARCHON_HOME: jsonEnvelopeHome,
+      ...extraEnv,
+    },
+  });
+  return { status: result.status, envelope: () => JSON.parse(result.stdout ?? '') };
+}
+
+beforeAll(() => {
+  jsonEnvelopeHome = mkdtempSync(join(tmpdir(), 'archon-json-envelope-home-'));
+
+  // Build the registry once, here, so no timed body below pays for creating it.
+  // Seeding through `spawnJsonError` rather than a bespoke spawn is deliberate:
+  // it makes this also the check that the helper hands its ARCHON_HOME to the
+  // child. If that wiring is ever dropped, no registry appears in the scratch
+  // home and this throws, instead of every case below quietly falling back to
+  // the operator's registry again.
+  const seed = spawnJsonError(['workflow', 'list', '--json', '--cwd', tmpdir()]);
+  if (!existsSync(join(jsonEnvelopeHome, 'archon.db'))) {
+    throw new Error(
+      `--json envelope tests could not seed a scratch registry in ${jsonEnvelopeHome}.\n` +
+        `status=${String(seed.status)}\n${JSON.stringify(seed.envelope())}`
+    );
+  }
+});
+
+afterAll(async () => {
+  if (jsonEnvelopeHome) await removeTempTree(jsonEnvelopeHome);
+});
+
+describe('workflow list arguments', () => {
+  it('dispatches a named full-description request', () => {
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'list',
+      'archon-fix-github-issue-codex',
+      '--full',
+      '--json',
+      '--cwd',
+      repoRoot,
+    ]);
+
+    expect(status).toBe(0);
+    const output = envelope() as {
+      workflows: Array<{
+        name: string;
+        description: string;
+        descriptionTruncated: boolean;
+      }>;
+      errors: unknown[];
+    };
+    expect(output.workflows).toHaveLength(1);
+    expect(output.workflows[0].name).toBe('archon-fix-github-issue-codex');
+    expect(Array.from(output.workflows[0].description).length).toBeGreaterThan(160);
+    expect(output.workflows[0].descriptionTruncated).toBe(false);
+  });
+
+  it('rejects extra positionals with human-readable usage', () => {
+    const result = spawnSync(
+      process.execPath,
+      [CLI_ENTRY, 'workflow', 'list', 'first', 'second', '--cwd', repoRoot],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ARCHON_TELEMETRY_DISABLED: '1',
+          ARCHON_HOME: jsonEnvelopeHome,
+        },
+      }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Usage: archon workflow list [name] [--full] [--json]');
+    expect(result.stdout).toBe('');
+  });
+
+  it('rejects extra positionals with one JSON error envelope', () => {
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'list',
+      'first',
+      'second',
+      '--json',
+      '--cwd',
+      repoRoot,
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toEqual({
+      ok: false,
+      error: 'Usage: archon workflow list [name] [--full] [--json]',
+    });
+  });
+
+  it('reports an unknown workflow through the JSON error envelope', () => {
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'list',
+      'definitely-not-a-workflow',
+      '--json',
+      '--cwd',
+      repoRoot,
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Workflow 'definitely-not-a-workflow' not found"),
+    });
+  });
+
+  it('preserves discovery errors in a missing-workflow JSON error envelope', async () => {
+    const scratchRepo = mkdtempSync(join(tmpdir(), 'archon-workflow-list-errors-'));
+    try {
+      const gitInit = spawnSync('git', ['init', '--quiet', scratchRepo], { encoding: 'utf8' });
+      expect(gitInit.status).toBe(0);
+      const workflowDir = join(scratchRepo, '.archon', 'workflows');
+      mkdirSync(workflowDir, { recursive: true });
+      writeFileSync(join(workflowDir, 'broken.yaml'), 'name: broken\nnodes: [\n');
+
+      const { status, envelope } = spawnJsonError([
+        'workflow',
+        'list',
+        'definitely-not-a-workflow',
+        '--json',
+        '--cwd',
+        scratchRepo,
+      ]);
+
+      expect(status).toBe(1);
+      expect(envelope()).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Workflow 'definitely-not-a-workflow' not found"),
+        errors: [
+          {
+            filename: 'broken.yaml',
+            errorType: 'parse_error',
+          },
+        ],
+      });
+    } finally {
+      await removeTempTree(scratchRepo);
+    }
+  });
+});
+
+describe('workflow search --json error envelope', () => {
+  it('emits { ok: false } on stdout when the command throws under --json', () => {
+    // An unreachable marketplace URL makes fetchMarketplace throw inside the
+    // `workflow search` handler — the only deterministic error path. The
+    // envelope, not the message, is the contract.
+    const { status, envelope } = spawnJsonError(['workflow', 'search', 'anything', '--json'], {
+      ARCHON_MARKETPLACE_URL: 'http://127.0.0.1:9/nope',
+    });
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+});
+
+describe('main catch --json error envelope', () => {
+  it('emits { ok: false } on stdout when an unhandled command error reaches the top-level catch', () => {
+    // An unknown workflow name makes workflowRunCommand throw with no local
+    // handling, so the error escapes to main()'s outer catch — the last route
+    // that could still leak bare stderr text under --json.
+    //
+    // `--dry-run` is not part of the contract; it is how this test avoids
+    // paying for one. A real run freezes the workflow source BEFORE resolving
+    // the name (workflow.ts: prepareWorkflowSource precedes
+    // resolveWorkflowName, deliberately — discovery must read the frozen
+    // bytes, #2660/#2747), so without the flag this single spawn copies and
+    // digests every project, global, and bundled workflow file this repository
+    // has — thousands of filesystem operations, and growing — then deletes
+    // them, only to report that the workflow does not exist. The throw, its
+    // route to main()'s catch, and the envelope are identical either way.
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'run',
+      'definitely-not-a-workflow',
+      '--json',
+      '--dry-run',
+      '--cwd',
+      repoRoot,
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+});
+
+describe('pre-dispatch gates --json error envelope', () => {
+  it('emits { ok: false } on stdout when --cwd does not exist', () => {
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'run',
+      'anything',
+      '--json',
+      '--cwd',
+      '/does/not/exist',
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout when outside a git repository', () => {
+    const { status, envelope } = spawnJsonError(['workflow', 'list', '--json', '--cwd', tmpdir()]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('leaves the default home untouched when the gate opens the registry', async () => {
+    // Same command as the case above — the one route here that opens the
+    // registry — but with the child's home directory pointed at a scratch tree,
+    // so `<sentinel>/.archon` is what `getArchonHome()` would resolve to if the
+    // helper's ARCHON_HOME stopped reaching the child. It must stay absent: the
+    // registry belongs in the test-owned home, never the ambient one.
+    const sentinel = mkdtempSync(join(tmpdir(), 'archon-json-envelope-sentinel-'));
+    try {
+      const { status } = spawnJsonError(['workflow', 'list', '--json', '--cwd', tmpdir()], {
+        HOME: sentinel,
+        USERPROFILE: sentinel,
+      });
+
+      expect(status).toBe(1);
+      expect(existsSync(join(sentinel, '.archon'))).toBe(false);
+      expect(existsSync(join(jsonEnvelopeHome, 'archon.db'))).toBe(true);
+    } finally {
+      await removeTempTree(sentinel);
+    }
+  });
+
+  it('emits { ok: false } on stdout for an unknown command instead of usage text', () => {
+    const { status, envelope } = spawnJsonError(['boguscmd', '--json']);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout when arg parsing rejects an unknown flag', () => {
+    const { status, envelope } = spawnJsonError(['workflow', 'list', '--json', '--bogus-flag']);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout when chat is invoked with no message', () => {
+    const { status, envelope } = spawnJsonError(['chat', '--json']);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout for an invalid setup --scope', () => {
+    const { status, envelope } = spawnJsonError(['setup', '--scope', 'bogus', '--json']);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout when workflow get is missing its run-id', () => {
+    const { status, envelope } = spawnJsonError(['workflow', 'get', '--json']);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
+  it('emits { ok: false } on stdout when setup --scope project runs outside a git repo', () => {
+    const { status, envelope } = spawnJsonError([
+      'setup',
+      '--scope',
+      'project',
+      '--json',
+      '--cwd',
+      tmpdir(),
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+});
+
+describe('workflow test --json error envelope', () => {
+  it('emits { ok: false } on stdout when the command throws under --json', () => {
+    // A --cwd that does not exist makes findRepoRoot throw inside the
+    // `workflow test` handler — the only reachable error path without a full
+    // fixture project. The envelope, not the message, is the contract.
+    const { status, envelope } = spawnJsonError([
+      'workflow',
+      'test',
+      '--json',
+      '--cwd',
+      join(tmpdir(), 'archon-missing-cwd'),
+    ]);
+
+    expect(status).toBe(1);
+    expect(envelope).not.toThrow();
+    expect(envelope()).toMatchObject({ ok: false });
   });
 });

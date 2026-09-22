@@ -14,49 +14,123 @@ Thank you for your interest in contributing to Archon!
 
 ### Code Quality
 
-Before submitting a PR, ensure:
+`bun run validate` is the gate. Run it before opening a pull request: it runs every
+check that gates a pull request except the five listed below, so a green run means CI's
+`test` and `workflow-fixtures` jobs will pass. It needs no network and no
+services, takes a couple of minutes, and prints what each check cost so you can see
+where the time goes.
 
 ```bash
-bun run check:bundled  # Bundled defaults are up to date (see note below)
-bun run type-check     # TypeScript types
-bun run lint           # ESLint
-bun run format         # Prettier
-bun run test           # All tests (per-package isolation)
-
-# Or run the full validation suite:
-bun run validate
+bun run validate                            # the whole gate
+bun run validate --only workflow-fixtures   # one check, while iterating
 ```
 
-**Bundled defaults**: If you added, removed, or edited a file under
-`.archon/commands/defaults/` or `.archon/workflows/defaults/`, run
-`bun run generate:bundled` to refresh the embedded bundle before committing.
+`scripts/validate.ts` owns the list of checks, and the CI jobs call that script instead
+of restating its commands, so the two cannot describe different work.
+
+While you work, run the narrow check instead — `bun run type-check`, `bun run lint`,
+`bun run test <path>`, `bun run check:bundled` — and keep the full gate for the end.
 
 **Important:** Use `bun run test` (not `bun test` from the repo root) to avoid mock pollution across packages.
 
-### Commit Messages
+#### What `bun run validate` deliberately leaves out
 
-- Use present tense ("Add feature" not "Added feature")
-- Keep the first line under 72 characters
-- Reference issues when applicable
+These PR-gating jobs need something a contributor may not have, so they stay in CI only.
+If you touched what they cover, run them yourself.
 
-### Pull Requests
+| CI job | Needs | Run it yourself |
+| --- | --- | --- |
+| `schema-upgrade` | a live PostgreSQL; the SQLite half also reads every release tag | `bun run check:schema-upgrades` (`PGHOST`/`PGUSER`/… or `DATABASE_URL`) and `bun run check:sqlite-vintages` |
+| `postgres-parity` | a live PostgreSQL | `ARCHON_TEST_PG_URL=postgres://… bun test packages/core/src/db/isolation-environments.live-run.postgres.integration.test.ts` |
+| `docker-build` | a Docker daemon, and ~14GB of free disk for the image | `docker build .` |
+| `docs-build` | Node (Astro's CLI does not run under Bun); path-filtered to `packages/docs-web/` | `bun run build:docs` — run it when you change the docs site |
+| `marketplace-lint` | 9 unauthenticated github.com API calls against a 60/hour per-IP quota, which seven `validate` runs an hour would exhaust | `bun packages/docs-web/scripts/lint-marketplace.ts` — run it when you change `packages/docs-web/src/data/marketplace.ts` |
 
-1. Create a feature branch from `dev`
-2. Make your changes
-3. Ensure all checks pass
-4. Submit a PR using the template at [`.github/pull_request_template.md`](./.github/pull_request_template.md). GitHub fills it in automatically when you open a PR through the web UI. If you use `gh pr create`, copy the template into the body — leaving it empty or partially filled slows review.
-5. Link the issue your PR addresses with `Closes #<number>` (or `Fixes #<number>` / `Resolves #<number>`) in the description so it auto-closes on merge.
+**Schema changes**: run `bun run check:schema-upgrades` and `bun run check:sqlite-vintages`
+yourself if you touched `migrations/000_combined.sql`. A statement that applies cleanly to a fresh install can
+abort the whole apply on an upgrade, and nothing before that job catches it.
 
-## Code Style
+`scripts/validate-ci-parity.test.ts` holds the same exclusions as a machine-checked list,
+so another PR-gating command cannot appear without a deliberate decision to leave it out.
 
-- TypeScript strict mode is enforced
-- All functions require explicit return types
-- No `any` types without justification
-- Follow existing patterns in the codebase
+**SDLC workflows**: We do not accept pull requests that change
+`.archon/workflows/sdlc/`. Open an issue instead and describe the problem or
+change you want the maintainers to consider.
+
+### Commit messages
+
+Follow the repository's Conventional Commit style. Write a concise,
+human-readable subject that explains the meaningful outcome. Commit subjects
+may become changelog entries or pull request titles, so they must make sense
+without the diff.
+
+Use plain language and the repository's exact terms. Cut filler and vague verbs.
+Do not present a mechanical change as a larger outcome. Treat Git history as
+evidence of valid structure, not as the writing-quality standard.
+
+Never add AI attribution, generated-by text, robot emoji, or
+`Co-Authored-By: $Agent`.
+
+**Bad:** `refactor(prp-pr): update skill instructions`
+
+**Good:** `refactor(prp-pr): PR creation now uses one focused workflow`
+
+### Pull requests
+
+1. Create a feature branch from `dev`.
+2. Keep the pull request focused on one coherent slice or concern. Split broad
+   work into reviewable pull requests organized by product slices or concerns.
+   Pull requests that combine too many concerns will be closed.
+3. Ensure all checks pass.
+4. Use the template at
+   [`.github/pull_request_template.md`](./.github/pull_request_template.md).
+   GitHub fills it in when you open a pull request through the Web UI. If you
+   use `gh pr create`, copy the template into the body. Keep **Problem and
+   outcome**, **Review guidance**, **Solution**, and **Validation**. Delete
+   conditional sections that do not apply instead of filling them with "N/A".
+   Bot-authored dependency pull requests (`renovate[bot]`) are exempt because
+   Renovate generates the body.
+5. Link the issue the pull request addresses with `Closes #<number>`,
+   `Fixes #<number>`, or `Resolves #<number>` in the description. Pull requests
+   without a linked issue will be closed.
+
+Treat repository rules as syntax constraints, not as the writing-quality
+standard. Write in plain, natural language. Use the repository's exact terms
+and name concrete behavior and validation evidence. Cut filler, generic praise,
+formulaic transitions, and vague claims.
+
+#### Title
+
+Write a concise, human-readable title that describes the meaningful outcome.
+Follow the repository's Conventional Commit style, but do not copy vague or
+implementation-focused titles from its history.
+
+**Bad:** `feat(core): add child run traversal and parent event aggregation`
+
+**Good:** `feat(core): workflows can now include a child workflow in the parent run`
+
+#### Description
+
+Preserve the pull request template's structure and fill every applicable section
+with concrete information from the issue, diff, commits, and validation
+evidence. Lead with the problem and outcome, not an implementation inventory.
+
+## Code style
+
+- Follow [`AGENTS.md`](./AGENTS.md) and
+  [`.archon/engineering.md`](./.archon/engineering.md).
+- TypeScript strict mode is enforced.
+- All functions require explicit return types.
+- Do not use `any` without justification.
+- Follow existing patterns in the codebase.
+
+Before proposing a major feature, read
+[`.archon/direction.md`](./.archon/direction.md). Pull requests that conflict
+with the documented product direction will be closed.
 
 ## Architecture
 
-See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
+See [AGENTS.md](./AGENTS.md) for detailed architecture documentation.
 
 ## Contributing Workflows to the Marketplace
 
@@ -87,6 +161,7 @@ Directory structure convention:
 
 ```
 my-workflow/
+├── README.md          # Describe what the workflow does and any prereqs a user needs to run it
 ├── my-workflow.yaml   # Main workflow (must match slug or be the only .yaml)
 ├── commands/          # → installed to .archon/commands/
 │   └── helper.md

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { parsePiConfig, resolvePiExtensionSettings } from './config';
+import { parsePiConfig, parsePiRunConfig, resolvePiExtensionSettings } from './config';
 
 describe('parsePiConfig', () => {
   test('parses valid model string', () => {
@@ -238,6 +238,14 @@ describe('parsePiConfig', () => {
     expect(parsePiConfig({ nodes: 'implement' })).toEqual({});
     expect(parsePiConfig({ nodes: ['implement'] })).toEqual({});
     expect(parsePiConfig({ nodes: null })).toEqual({});
+  });
+});
+
+describe('parsePiRunConfig', () => {
+  test('explains that invalid models need a Pi vendor prefix', () => {
+    expect(() => parsePiRunConfig({ model: 'minimax-m3' })).toThrow(
+      "expected a Pi vendor/model reference such as 'minimax/minimax-m3'"
+    );
   });
 });
 

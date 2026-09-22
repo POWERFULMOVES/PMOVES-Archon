@@ -15,6 +15,8 @@ import {
   toBranchName,
   isAncestorOf,
   verifyWorktreeOwnership,
+  CanonicalRepoPathUnavailableError,
+  toRepoPath,
 } from '@archon/git';
 import type { RepoPath, BranchName, WorktreePath } from '@archon/git';
 
@@ -133,7 +135,7 @@ export class IsolationResolver {
     const workflowType: IsolationWorkflowType = hints?.workflowType ?? 'thread';
     const workflowId = hints?.workflowId ?? '';
 
-    // Compute canonical repo path once — paths 3-6 all need it either for
+    // Compute the Git command anchor once — paths 3-6 all need it either for
     // ownership verification (cross-clone guard) or for worktree creation.
     // Mirror createNewEnvironment's contract: known infrastructure failures
     // (permission denied, ENOENT, malformed worktree pointer, etc.) become
@@ -144,29 +146,37 @@ export class IsolationResolver {
     try {
       canonicalPath = await getCanonicalRepoPath(codebase.defaultCwd);
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      getLog().error(
-        {
-          err,
-          errorType: err.constructor.name,
-          codebaseId: codebase.id,
-          defaultCwd: codebase.defaultCwd,
-        },
-        'isolation.canonical_repo_path_resolution_failed'
-      );
+      // A registered checkout backed by `--separate-git-dir` is already the
+      // authoritative path, but Git has no reverse pointer from its linked
+      // worktree metadata to a primary checkout. Git worktree operations are
+      // valid from that registered linked checkout, so retain it as the anchor.
+      if (error instanceof CanonicalRepoPathUnavailableError) {
+        canonicalPath = toRepoPath(codebase.defaultCwd);
+      } else {
+        const err = error instanceof Error ? error : new Error(String(error));
+        getLog().error(
+          {
+            err,
+            errorType: err.constructor.name,
+            codebaseId: codebase.id,
+            defaultCwd: codebase.defaultCwd,
+          },
+          'isolation.canonical_repo_path_resolution_failed'
+        );
 
-      if (!isKnownIsolationError(err)) {
-        throw err;
+        if (!isKnownIsolationError(err)) {
+          throw err;
+        }
+
+        const userMessage = classifyIsolationError(err);
+        return {
+          status: 'blocked',
+          reason: 'creation_failed',
+          userMessage:
+            userMessage +
+            ' Execution blocked to prevent changes to shared codebase. Please resolve the issue and try again.',
+        };
       }
-
-      const userMessage = classifyIsolationError(err);
-      return {
-        status: 'blocked',
-        reason: 'creation_failed',
-        userMessage:
-          userMessage +
-          ' Execution blocked to prevent changes to shared codebase. Please resolve the issue and try again.',
-      };
     }
 
     // 3. Check for existing environment with same workflow
@@ -490,7 +500,7 @@ export class IsolationResolver {
       isolationRequest = {
         ...baseRequest,
         workflowType: 'task' as const,
-        fromBranch: hints?.fromBranch,
+        taskBranch: hints?.taskBranch,
       };
     } else {
       isolationRequest = {
@@ -532,7 +542,7 @@ export class IsolationResolver {
     }
 
     // provider.create() succeeded — worktree exists on disk.
-    // If store.create() fails, we must clean up the orphaned worktree.
+    // If store.create() fails, clean up a worktree created by this call.
     let env: IsolationEnvironmentRow;
     try {
       env = await this.store.create({
@@ -560,28 +570,30 @@ export class IsolationResolver {
         'isolation_store_create_failed'
       );
 
-      // Clean up the orphaned worktree — best-effort, don't mask the original error
-      try {
-        await this.provider.destroy(isolatedEnv.workingPath, {
-          canonicalRepoPath: canonicalPath,
-          branchName: isolatedEnv.branchName,
-          force: true,
-        });
-        getLog().info(
-          { worktreePath: isolatedEnv.workingPath },
-          'isolation_orphan_cleanup_completed'
-        );
-      } catch (cleanupError) {
-        const cleanupErr =
-          cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
-        getLog().error(
-          {
-            err: cleanupErr,
-            errorType: cleanupErr.constructor.name,
-            worktreePath: isolatedEnv.workingPath,
-          },
-          'isolation_orphan_cleanup_failed'
-        );
+      if (!isolatedEnv.metadata.adopted) {
+        // Clean up the orphaned worktree — best-effort, don't mask the original error
+        try {
+          await this.provider.destroy(isolatedEnv.workingPath, {
+            canonicalRepoPath: canonicalPath,
+            branchName: isolatedEnv.branchName,
+            force: true,
+          });
+          getLog().info(
+            { worktreePath: isolatedEnv.workingPath },
+            'isolation_orphan_cleanup_completed'
+          );
+        } catch (cleanupError) {
+          const cleanupErr =
+            cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
+          getLog().error(
+            {
+              err: cleanupErr,
+              errorType: cleanupErr.constructor.name,
+              worktreePath: isolatedEnv.workingPath,
+            },
+            'isolation_orphan_cleanup_failed'
+          );
+        }
       }
 
       throw err; // Re-throw original store error — this is an unexpected failure

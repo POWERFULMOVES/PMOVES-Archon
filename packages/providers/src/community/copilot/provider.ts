@@ -33,14 +33,16 @@ import { loadMcpConfig } from '../../mcp/config';
 import { resolveSkillDirectories } from '../../shared/skills';
 import { augmentPromptForJsonSchema } from '../../shared/structured-output';
 import { COPILOT_CAPABILITIES } from './capabilities';
-import { parseCopilotConfig, type CopilotProviderDefaults } from './config';
+import { COPILOT_EFFORTS, parseCopilotConfig, type CopilotProviderDefaults } from './config';
+import { clampEffort } from '@archon/paths/effort';
 import { resolveCopilotBinaryPath } from './binary-resolver';
 import { bridgeSession } from './event-bridge';
 
 // `ReasoningEffort` is defined in the SDK but not re-exported from its barrel
-// (as of @github/copilot-sdk@0.2.2). Mirror the enum literally so we don't
-// depend on an internal subpath.
-type CopilotReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+// (as of @github/copilot-sdk@0.2.2), so the vocabulary is mirrored in ./config
+// and pinned there against `CopilotProviderDefaults`. Derive the type from that
+// one array rather than restating the union here.
+type CopilotReasoningEffort = (typeof COPILOT_EFFORTS)[number];
 
 /**
  * Auth env vars, split by intent.
@@ -110,57 +112,32 @@ function resolveGenericGitHubToken(env: Record<string, string>): string | undefi
 // ─── Reasoning ──────────────────────────────────────────────────────────────
 
 function normalizeReasoning(value: unknown): CopilotReasoningEffort | undefined {
-  if (value === 'max') return 'xhigh';
-  if (value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
-  return undefined;
+  const clamped = clampEffort(value, COPILOT_EFFORTS);
+  // Copilot's SDK lacks both ends of the ladder, so it clamps more often than
+  // any other provider — the one that most needs the adjustment to be visible.
+  // Matches `claude.effort_clamped` / `codex.effort_clamped`.
+  if (clamped !== undefined && clamped !== value) {
+    getLog().debug({ declared: value, applied: clamped }, 'copilot.effort_clamped');
+  }
+  return clamped;
 }
 
 /**
- * Resolve Copilot's `reasoningEffort` from Archon's workflow inputs.
- * Precedence:
- *   nodeConfig.thinking > nodeConfig.effort > config.modelReasoningEffort
- *
- * Archon's `effort` schema is `'low' | 'medium' | 'high' | 'max'` — we map
- * `'max'` to the SDK's `'xhigh'`. The `'off'` sentinel disables reasoning.
- * The object form of `thinking` (Claude-specific) returns a warning.
+ * Resolve Copilot's `reasoningEffort` from the node or assistant default.
  */
 function resolveCopilotReasoning(
   nodeConfig: SendQueryOptions['nodeConfig'] | undefined,
   copilotConfig: CopilotProviderDefaults
 ): { effort: CopilotReasoningEffort | undefined; warning?: string } {
-  if (!nodeConfig) {
-    return { effort: copilotConfig.modelReasoningEffort };
-  }
-
-  const rawThinking = nodeConfig.thinking;
-  const rawEffort = nodeConfig.effort;
-
-  if (rawThinking === 'off' || rawEffort === 'off') return { effort: undefined };
-
-  const fromThinking = normalizeReasoning(rawThinking);
-  if (fromThinking) return { effort: fromThinking };
-
-  const fromEffort = normalizeReasoning(rawEffort);
-  if (fromEffort) return { effort: fromEffort };
-
-  if (rawThinking !== undefined && rawThinking !== null && typeof rawThinking === 'object') {
+  const declared = nodeConfig?.effort ?? copilotConfig.modelReasoningEffort;
+  const effort = normalizeReasoning(declared);
+  if (declared !== undefined && effort === undefined) {
     return {
       effort: undefined,
-      warning:
-        'Copilot ignored `thinking` (object form is Claude-specific). Use `effort: low|medium|high|max` instead.',
+      warning: `Copilot ignored invalid effort '${declared}'.`,
     };
   }
-
-  if (typeof rawThinking === 'string' || typeof rawEffort === 'string') {
-    const offender = typeof rawThinking === 'string' ? rawThinking : rawEffort;
-    return {
-      effort: undefined,
-      warning: `Copilot ignored unknown reasoning level '${String(offender)}'. Valid: low, medium, high, xhigh, max, off.`,
-    };
-  }
-
-  // Fall back to config-level default when nodeConfig provides nothing actionable.
-  return { effort: copilotConfig.modelReasoningEffort };
+  return { effort };
 }
 
 // ─── System prompt ──────────────────────────────────────────────────────────

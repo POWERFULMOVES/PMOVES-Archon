@@ -1,6 +1,8 @@
-// CONTRACT LAYER — no SDK imports, no runtime deps.
+// CONTRACT LAYER — no SDK imports, no runtime deps beyond SDK-free foundations.
 // @archon/workflows and @archon/core import from this subpath (@archon/providers/types).
-// HARD RULE: This file must never import SDK packages or other @archon/* packages.
+// HARD RULE: This file must never import SDK packages.
+
+import type { EffortRung } from '@archon/paths/effort';
 
 // ─── Provider Config Defaults ──────────────────────────────────────────────
 // Canonical definitions — @archon/core/config/config-types.ts imports from here.
@@ -26,8 +28,7 @@ export interface ClaudeProviderDefaults {
 export interface CodexProviderDefaults {
   [key: string]: unknown;
   model?: string;
-  /** Structurally matches @archon/workflows ModelReasoningEffort */
-  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: EffortRung;
   /** Structurally matches @archon/workflows WebSearchMode */
   webSearchMode?: 'disabled' | 'cached' | 'live';
   additionalDirectories?: string[];
@@ -47,7 +48,7 @@ export interface CopilotProviderDefaults {
    * mirrors `CodexProviderDefaults.modelReasoningEffort` so users get one
    * consistent key across cross-provider configs.
    */
-  modelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: EffortRung;
   /**
    * Absolute path to the Copilot CLI binary. Required in compiled Archon
    * builds when `COPILOT_BIN_PATH` env var is not set. Dev-mode builds let
@@ -158,6 +159,9 @@ export interface OpencodeProviderDefaults {
 /** Generic per-provider defaults bag used by config surfaces and UI. */
 export type ProviderDefaults = Record<string, unknown>;
 
+/** Strict parser for an explicitly selected, run-scoped provider config layer. */
+export type ProviderRunConfigParser = (raw: ProviderDefaults) => ProviderDefaults;
+
 /** Provider-keyed defaults map. Built-ins may refine individual entries. */
 export type ProviderDefaultsMap = Record<string, ProviderDefaults>;
 
@@ -165,10 +169,61 @@ export type ProviderDefaultsMap = Record<string, ProviderDefaults>;
  * Token usage statistics from AI provider responses.
  */
 export interface TokenUsage {
+  /** Gross prompt input, including cache reads and writes reported separately. */
   input: number;
   output: number;
+  /** Provider-reported cached input. Absent means unsupported or unknown; zero is known. */
+  cacheRead?: number;
+  /** Provider-reported cache-creation input. Absent means unsupported or unknown; zero is known. */
+  cacheWrite?: number;
+  /**
+   * Set only by aggregation ({@link mergeTokenUsage}), never by a provider. When true the
+   * cache axes on this usage are a FLOOR: at least one contributing usage did not report
+   * that axis, so true cache use is at least the reported total and
+   * `input - cacheRead - cacheWrite` is an UPPER bound on full-price input rather than an
+   * exact figure. Absent means the cache totals are complete, or that no axis is present
+   * at all (#2662).
+   */
+  cachePartial?: true;
+  /** Total of gross input, output, and any provider-reported reasoning tokens. */
   total?: number;
   cost?: number;
+}
+
+/**
+ * Sum usages into one aggregate, keeping every cache figure that was actually reported.
+ *
+ * `input` and `output` always sum across every entry. Each cache axis sums over only the
+ * entries that define it and is emitted when at least one did, so a silent contributor
+ * NARROWS the total instead of erasing it; `cachePartial` then marks the result as a floor.
+ * Withholding the axis entirely, as this once did, left gross `input` standing beside no
+ * cache context at all and read as "nothing was cached" (#2662).
+ *
+ * An axis no entry reports stays absent, which already encodes "unknown" — that case is not
+ * flagged. The two axes are decided independently.
+ *
+ * Pure by design: callers own validation and logging, because their contexts differ (persisted
+ * JSON in @archon/core, non-finite guarding in @archon/workflows). Entries are expected to have
+ * finite `input`/`output` already; `total` and `cost` are not aggregated here.
+ */
+export function mergeTokenUsage(usages: readonly TokenUsage[]): TokenUsage | undefined {
+  if (usages.length === 0) return undefined;
+  const merged: TokenUsage = {
+    input: usages.reduce((sum, usage) => sum + usage.input, 0),
+    output: usages.reduce((sum, usage) => sum + usage.output, 0),
+  };
+  // A contribution that is itself a floor keeps the whole aggregate a floor.
+  let partial = usages.some(usage => usage.cachePartial === true);
+  for (const axis of ['cacheRead', 'cacheWrite'] as const) {
+    const reporters = usages.filter(usage => usage[axis] !== undefined);
+    if (reporters.length === 0) continue;
+    merged[axis] = reporters.reduce((sum, usage) => sum + (usage[axis] ?? 0), 0);
+    if (reporters.length < usages.length) partial = true;
+  }
+  if (partial && (merged.cacheRead !== undefined || merged.cacheWrite !== undefined)) {
+    merged.cachePartial = true;
+  }
+  return merged;
 }
 
 /** Concrete model identifier reported by a provider after a request completes. */
@@ -437,9 +492,20 @@ export interface AgentRequestOptions {
   systemPrompt?: SystemPromptInput;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
   env?: Record<string, string>;
+  /**
+   * Names in `env` whose values Archon injected as credentials rather than
+   * loading from project configuration. Custom provider configuration must not
+   * be allowed to select them.
+   */
+  protectedEnvKeys?: readonly string[];
   maxBudgetUsd?: number;
   fallbackModel?: string;
-  /** Session fork flag — when true, copies prior session history before appending. */
+  /**
+   * Request an immutable fork of `resumeSessionId`. Exact-fork callers such as
+   * named workflow resume must first verify `sessionFork === true`. Legacy session
+   * reuse may still send this flag to resume-only providers, where behavior is
+   * provider-specific and immutability is not guaranteed.
+   */
   forkSession?: boolean;
   /** When false, skip writing session transcript to disk. */
   persistSession?: boolean;
@@ -454,21 +520,58 @@ export interface AgentRequestOptions {
 }
 
 /**
+ * One property on a native tool's input object. `kind` is the discriminant the
+ * provider converters switch on; each variant maps to exactly one SDK schema
+ * form. `values` is a non-empty tuple, so an enum with no options is a compile
+ * error rather than a provider-side runtime throw.
+ */
+export type NativeToolProperty =
+  | { kind: 'string'; description?: string }
+  | { kind: 'enum'; values: readonly [string, ...string[]]; description?: string }
+  | { kind: 'boolean'; description?: string };
+
+/**
+ * The closed input shape a native tool may declare: a flat object of string /
+ * string-enum / boolean properties, plus the names of the required ones. Every
+ * provider maps this to its SDK's schema form, so the supported subset lives
+ * here once instead of being re-derived by each converter.
+ */
+export interface NativeToolInputSchema {
+  properties: Record<string, NativeToolProperty>;
+  required: readonly string[];
+}
+
+/**
+ * Build a NativeToolInputSchema while tying `required` to the property keys: a
+ * name that is not a declared property is a compile error, where the erased
+ * interface alone would accept any string. Returns the erased shape so
+ * `NativeTool` stays non-generic — a `keyof P` constraint on the interface
+ * itself would make the schema invariant in `P` and break assignment to
+ * `SendQueryOptions.nativeTools`.
+ */
+export function defineNativeToolInputSchema<P extends Record<string, NativeToolProperty>>(input: {
+  properties: P;
+  required: readonly (keyof P & string)[];
+}): NativeToolInputSchema {
+  return input;
+}
+
+/**
  * A provider-neutral in-process tool. The handler runs in the host process and
  * closes over whatever live context it needs (DB, operations, conversation), so
  * `@archon/providers` never imports `@archon/core` — the tool crosses the
  * boundary as data + a function on the request options.
  *
- * `inputSchema` is canonical JSON Schema (object). Each provider converts it to
- * its SDK's schema form. The handler is expected to return a text result rather
- * than throw — provider adapters add no safety net, so an uncaught throw would
+ * `inputSchema` is the closed typed shape each provider maps to its SDK's
+ * schema form. The handler is expected to return a text result rather than
+ * throw — provider adapters add no safety net, so an uncaught throw would
  * surface into the agent loop. (core's `buildManageRunTool` guarantees this with
  * an outer try/catch around its dispatch.)
  */
 export interface NativeTool {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: NativeToolInputSchema;
   handler: (input: Record<string, unknown>) => Promise<string>;
 }
 
@@ -522,8 +625,7 @@ export interface NodeConfig {
    * across the @archon/providers/types contract boundary.
    */
   pi?: Pick<PiProviderDefaults, 'enableExtensions' | 'interactive' | 'extensionFlags'>;
-  effort?: string;
-  thinking?: unknown;
+  effort?: EffortRung;
   sandbox?: unknown;
   betas?: string[];
   output_format?: Record<string, unknown>;
@@ -577,6 +679,11 @@ export interface SendQueryOptions extends AgentRequestOptions {
  */
 export interface ProviderCapabilities {
   sessionResume: boolean;
+  /**
+   * Given a session ID, create a new session containing the source history
+   * while leaving the source unchanged. Omission means unsupported.
+   */
+  sessionFork?: boolean;
   mcp: boolean;
   hooks: boolean;
   skills: boolean;
@@ -611,10 +718,36 @@ export interface ProviderCapabilities {
    *  - `false`         — the provider cannot produce structured output at all.
    */
   structuredOutput: 'enforced' | 'best-effort' | false;
+  /**
+   * Whether the provider enforces OpenAI Structured Outputs strict-mode's
+   * required-coverage rule: every key declared in `properties` MUST also
+   * appear in `required`. A schema that violates this rule is rejected by the
+   * provider's API with HTTP 400 `invalid_json_schema` before any work starts.
+   *
+   * Only relevant when `structuredOutput` is `'enforced'`. Among enforced
+   * providers, only Codex (OpenAI) enforces this rule; Claude accepts
+   * optional-by-omission. Best-effort providers never reject schemas at the
+   * API level and declare `false`.
+   */
+  requiresAllPropertiesRequired: boolean;
   envInjection: boolean;
+  /**
+   * Whether the provider enforces the per-run spend limit (`maxBudgetUsd`) — it
+   * can stop a run once the limit is exceeded. Says nothing about whether a turn
+   * reports what it cost; see {@link costReporting}.
+   */
   costControl: boolean;
+  /**
+   * Whether the provider emits a monetary `cost` on a turn's usage, which the
+   * engine surfaces as `costUsd` on node results and rolls up into run totals.
+   * True means the translation from the SDK's cost field exists; a turn may still
+   * omit the figure when the SDK reports none.
+   *
+   * Independent of {@link costControl}: an uncappable provider still prices every
+   * turn, and a cappable one is not made cheaper by reporting.
+   */
+  costReporting: boolean;
   effortControl: boolean;
-  thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
   /**
@@ -706,6 +839,13 @@ export interface ProviderRegistration {
    * GET /api/auth/providers are derived from these declarations.
    */
   credentials: ProviderCredentialCatalog;
+
+  /**
+   * Validate and normalize provider defaults selected for one workflow run.
+   * Ordinary config remains defensive and tolerant; explicit run config must
+   * reject values the provider would otherwise silently discard.
+   */
+  parseRunConfig: ProviderRunConfigParser;
 }
 
 /**
@@ -717,6 +857,8 @@ export interface ProviderInfo {
   displayName: string;
   capabilities: ProviderCapabilities;
   builtIn: boolean;
+  /** The shared ladder when this provider accepts `effort:`; absent otherwise. */
+  effortLevels?: readonly EffortRung[];
 }
 
 /**

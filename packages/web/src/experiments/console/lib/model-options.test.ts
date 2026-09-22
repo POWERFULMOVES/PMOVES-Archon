@@ -21,6 +21,7 @@ import type {
   AgentCredentials,
   OpencodeCredentialProvider,
   PiModelInfo,
+  ProviderInfo,
 } from '../skills';
 
 function cred(over: Partial<AgentCredentialStatus> & { vendor: string }): AgentCredentialStatus {
@@ -78,33 +79,48 @@ describe('curatedOptionsForAgent', () => {
   });
 });
 
+const LADDER: NonNullable<ProviderInfo['effortLevels']> = ['minimal', 'high', 'persistent'];
+
+/** `GET /api/providers` shape, trimmed to what the effort helpers read. */
+const PROVIDERS = [
+  { id: 'claude', effortLevels: LADDER },
+  { id: 'codex', effortLevels: LADDER },
+  { id: 'pi', effortLevels: LADDER },
+  { id: 'copilot', effortLevels: LADDER },
+  { id: 'opencode' },
+];
+
 describe('effortOptionsForAgent', () => {
-  test('claude and codex expose their (distinct) vocabularies', () => {
-    expect(effortOptionsForAgent('claude')).toEqual(['low', 'medium', 'high', 'max']);
-    expect(effortOptionsForAgent('codex')).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh']);
+  // #2556: one ladder, and the capability — not a hardcoded id list — decides
+  // who shows the field. Pi and Copilot were previously hidden despite having
+  // the control, so a tier's effort silently vanished on them.
+  test('returns the ladder supplied by the provider API', () => {
+    for (const id of ['claude', 'codex', 'pi', 'copilot']) {
+      expect(effortOptionsForAgent(id, PROVIDERS)).toEqual(LADDER);
+    }
   });
 
-  test('agents where tier effort does not route get null (field hidden)', () => {
-    expect(effortOptionsForAgent('pi')).toBeNull();
-    expect(effortOptionsForAgent('opencode')).toBeNull();
-    expect(effortOptionsForAgent('copilot')).toBeNull();
-    expect(effortOptionsForAgent('')).toBeNull();
+  test('agents with no reasoning control get null (field hidden)', () => {
+    expect(effortOptionsForAgent('opencode', PROVIDERS)).toBeNull();
+    expect(effortOptionsForAgent('', PROVIDERS)).toBeNull();
+    expect(effortOptionsForAgent('claude', [])).toBeNull();
   });
 });
 
 describe('normalizeEffortForAgent', () => {
-  test('keeps a value the new vocabulary accepts (codex→claude keeps high)', () => {
-    expect(normalizeEffortForAgent('claude', 'high')).toBe('high');
+  test('carries any rung across a switch between effort-capable agents', () => {
+    expect(normalizeEffortForAgent('claude', 'high', PROVIDERS)).toBe('high');
+    expect(normalizeEffortForAgent('claude', 'minimal', PROVIDERS)).toBe('minimal');
+    expect(normalizeEffortForAgent('codex', 'persistent', PROVIDERS)).toBe('persistent');
   });
 
-  test('clears values the new vocabulary rejects (claude max → codex)', () => {
-    expect(normalizeEffortForAgent('codex', 'max')).toBe('');
-    expect(normalizeEffortForAgent('claude', 'minimal')).toBe('');
+  test('clears a value that is not a rung', () => {
+    expect(normalizeEffortForAgent('claude', 'extreme', PROVIDERS)).toBe('');
   });
 
   test('clears any value for agents without an effort concept', () => {
-    expect(normalizeEffortForAgent('pi', 'high')).toBe('');
-    expect(normalizeEffortForAgent('', 'high')).toBe('');
+    expect(normalizeEffortForAgent('opencode', 'high', PROVIDERS)).toBe('');
+    expect(normalizeEffortForAgent('', 'high', PROVIDERS)).toBe('');
   });
 });
 

@@ -1000,6 +1000,10 @@ nodes:
           (we've nudged before — don't badger the contributor again).
         - Skip if the PR is marked `draft` (contributors often fill
           templates later on drafts).
+        - Skip if the PR author ends with `[bot]`. AGENTS.md and
+          CONTRIBUTING.md exempt bot-authored dependency PRs
+          (`renovate[bot]`) from the template, and a bot cannot act on
+          the nudge anyway.
         - Build the comment:
 
               Hi @<pr-author> — thanks for opening this PR.
@@ -1017,8 +1021,9 @@ nodes:
               helps reviewers understand scope, risk, and rollback — it
               speeds up review significantly.
 
-              If a section genuinely doesn't apply, just write "N/A" in
-              it rather than leaving it blank.
+              If a section genuinely doesn't apply, delete it rather
+              than leaving it blank. The template asks you not to write
+              "N/A" to preserve a section.
 
         - Idempotency: `gh pr view <pr> --json comments` — skip if an
           existing comment already mentions "pull_request_template.md"
@@ -1156,6 +1161,9 @@ nodes:
       For each item:
         - Skip PRs where `isDraft == true` — drafts are often WIP, nudging
           them is rude.
+        - Skip any item whose author ends with `[bot]`. A bot cannot act on
+          a nudge, and `renovate[bot]` dependency PRs are deliberately
+          long-lived until a human reviews them.
         - Skip any item with a label matching `wontfix`, `blocked`,
           `needs-maintainer`, `pinned`, `keep-open` (common "do not bother"
           signals). Check current labels via the fetched JSON.

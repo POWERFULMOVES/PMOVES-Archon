@@ -24,7 +24,8 @@ Workflows are YAML files discovered from `.archon/workflows/` (recursively) plus
 - **Used by**: Router prompt — this is the primary signal the AI uses to select a workflow. Include `Use when:` and `NOT for:` sections.
 
 ### `provider` (optional)
-- **Type**: `'claude'` | `'codex'`
+- **Type**: any registered provider id — `'claude'` | `'codex'` | `'pi'` | `'copilot'` | `'opencode'`
+  (validated at load against the registry, so the list follows what is registered)
 - **Default**: falls back to `.archon/config.yaml` assistants default (Claude)
 
 ### `model` (optional)
@@ -33,9 +34,21 @@ Workflows are YAML files discovered from `.archon/workflows/` (recursively) plus
 - **Codex models**: anything that does NOT match Claude patterns
 - **Validation**: incompatible provider/model fails loading
 
-### `modelReasoningEffort` (optional, Codex only)
+### `effort` (optional)
+- **Type**: `'minimal'` | `'low'` | `'medium'` | `'high'` | `'xhigh'` | `'max'`
+- **Applies to**: every provider with a reasoning control (Claude, Codex, Pi, Copilot).
+  Pi takes all six; the others clamp a rung their SDK lacks to the nearest one
+  they have (`max` → `xhigh` on Codex/Copilot; `minimal` → `low` on
+  Claude/Copilot). OpenCode has none.
+- **Also valid per-node**, where it overrides the workflow-level value.
+
+### `modelReasoningEffort` (was Codex-only) — DEPRECATED
 - **Type**: `'minimal'` | `'low'` | `'medium'` | `'high'` | `'xhigh'`
+- **Use `effort:` instead.** Still accepted: the loader translates it into
+  `effort:` and warns. If both are declared, `effort:` wins and this one is
+  dropped. Will be removed.
 - **Default**: from `.archon/config.yaml` `assistants.codex.modelReasoningEffort`
+  (that config key is NOT deprecated)
 
 ### `webSearchMode` (optional, Codex only)
 - **Type**: `'disabled'` | `'cached'` | `'live'`
@@ -105,7 +118,7 @@ prompt: |
 
 **Signal detection** supports two formats:
 - `<promise>SIGNAL</promise>` (recommended, case-insensitive)
-- Plain signal at end-of-output or on its own line
+- Plain signal only as the trimmed final line of the output, with nothing else on it
 
 ---
 

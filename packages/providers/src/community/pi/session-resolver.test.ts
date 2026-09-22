@@ -4,12 +4,14 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 const mockCreate = mock((_cwd: string) => ({ __kind: 'created' }));
 const mockOpen = mock((_path: string) => ({ __kind: 'opened' }));
+const mockForkFrom = mock(async (_path: string, _cwd: string) => ({ __kind: 'forked' }));
 const mockList = mock(async (_cwd: string) => [] as { id: string; path: string; cwd: string }[]);
 
 mock.module('@earendil-works/pi-coding-agent', () => ({
   SessionManager: {
     create: mockCreate,
     open: mockOpen,
+    forkFrom: mockForkFrom,
     list: mockList,
   },
 }));
@@ -20,6 +22,7 @@ describe('resolvePiSession', () => {
   beforeEach(() => {
     mockCreate.mockClear();
     mockOpen.mockClear();
+    mockForkFrom.mockClear();
     mockList.mockClear();
     mockList.mockImplementation(async () => []);
   });
@@ -41,6 +44,19 @@ describe('resolvePiSession', () => {
     const result = await resolvePiSession('/tmp/proj', 'def-456');
     expect(result.resumeFailed).toBe(false);
     expect(mockOpen).toHaveBeenCalledWith('/sessions/def-456.jsonl');
+    expect(mockForkFrom).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test('fork request matches existing session → fork by path without opening source', async () => {
+    mockList.mockImplementationOnce(async () => [
+      { id: 'abc-123', path: '/sessions/abc-123.jsonl', cwd: '/tmp/proj' },
+    ]);
+
+    const result = await resolvePiSession('/tmp/proj', 'abc-123', true);
+    expect(result.resumeFailed).toBe(false);
+    expect(mockForkFrom).toHaveBeenCalledWith('/sessions/abc-123.jsonl', '/tmp/proj');
+    expect(mockOpen).not.toHaveBeenCalled();
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
@@ -49,10 +65,11 @@ describe('resolvePiSession', () => {
       { id: 'abc-123', path: '/sessions/abc-123.jsonl', cwd: '/tmp/proj' },
     ]);
 
-    const result = await resolvePiSession('/tmp/proj', 'missing-id');
+    const result = await resolvePiSession('/tmp/proj', 'missing-id', true);
     expect(result.resumeFailed).toBe(true);
     expect(mockCreate).toHaveBeenCalledWith('/tmp/proj');
     expect(mockOpen).not.toHaveBeenCalled();
+    expect(mockForkFrom).not.toHaveBeenCalled();
   });
 
   test('list() throws ENOENT → treated as not-found, fresh session', async () => {

@@ -17,7 +17,7 @@ mock.module('@archon/paths', () => ({
 import { IsolationResolver } from './resolver';
 import type { IsolationResolverDeps } from './resolver';
 import type { IIsolationStore } from './store';
-import type { IsolationEnvironmentRow, IsolatedEnvironment } from './types';
+import type { IsolationEnvironmentRow, IsolatedEnvironment, IsolationRequest } from './types';
 
 function makeEnvRow(overrides?: Partial<IsolationEnvironmentRow>): IsolationEnvironmentRow {
   return {
@@ -31,6 +31,7 @@ function makeEnvRow(overrides?: Partial<IsolationEnvironmentRow>): IsolationEnvi
     status: 'active',
     created_at: new Date(),
     created_by_platform: 'web',
+    created_by_user_id: null,
     metadata: {},
     ...overrides,
   };
@@ -61,7 +62,7 @@ function makeMockProvider() {
       id: '/worktrees/new-branch',
       provider: 'worktree',
       workingPath: '/worktrees/new-branch',
-      branchName: 'new-branch',
+      branchName: git.toBranchName('new-branch'),
       status: 'active',
       createdAt: new Date(),
       metadata: { adopted: false },
@@ -314,7 +315,7 @@ describe('IsolationResolver', () => {
     const result = await resolver.resolve({
       existingEnvId: null,
       codebase: defaultCodebase,
-      hints: { workflowType: 'pr', workflowId: '99', prBranch: 'feature-branch' },
+      hints: { workflowType: 'pr', workflowId: '99', prBranch: git.toBranchName('feature-branch') },
       platformType: 'web',
     });
 
@@ -343,7 +344,7 @@ describe('IsolationResolver', () => {
     }
   });
 
-  test('passes fromBranch hint when creating task isolation', async () => {
+  test('passes new-branch selection when creating task isolation', async () => {
     let capturedRequest: unknown;
     const resolver = createResolver({
       provider: {
@@ -354,7 +355,7 @@ describe('IsolationResolver', () => {
             id: '/worktrees/new-branch',
             provider: 'worktree',
             workingPath: '/worktrees/new-branch',
-            branchName: 'new-branch',
+            branchName: git.toBranchName('new-branch'),
             status: 'active',
             createdAt: new Date(),
             metadata: { adopted: false },
@@ -369,7 +370,10 @@ describe('IsolationResolver', () => {
       hints: {
         workflowType: 'task',
         workflowId: 'test-adapters',
-        fromBranch: 'feature/extract-adapters',
+        taskBranch: {
+          kind: 'new',
+          fromBranch: git.toBranchName('feature/extract-adapters'),
+        },
       },
       platformType: 'web',
     });
@@ -378,7 +382,53 @@ describe('IsolationResolver', () => {
       expect.objectContaining({
         workflowType: 'task',
         identifier: 'test-adapters',
-        fromBranch: 'feature/extract-adapters',
+        taskBranch: {
+          kind: 'new',
+          fromBranch: git.toBranchName('feature/extract-adapters'),
+        },
+      })
+    );
+  });
+
+  test('passes exact existing-branch selection when adopting a task estate', async () => {
+    let capturedRequest: unknown;
+    const resolver = createResolver({
+      provider: {
+        ...makeMockProvider(),
+        create: async request => {
+          capturedRequest = request;
+          return {
+            id: '/worktrees/existing',
+            provider: 'worktree',
+            workingPath: '/worktrees/existing',
+            branchName: git.toBranchName('feature/live-pr'),
+            status: 'active',
+            createdAt: new Date(),
+            metadata: { adopted: true },
+          };
+        },
+      },
+    });
+
+    await resolver.resolve({
+      existingEnvId: null,
+      codebase: defaultCodebase,
+      hints: {
+        workflowType: 'task',
+        workflowId: 'adopt-run-1',
+        taskBranch: {
+          kind: 'existing',
+          branch: git.toBranchName('feature/live-pr'),
+        },
+      },
+      platformType: 'web',
+    });
+
+    expect(capturedRequest).toEqual(
+      expect.objectContaining({
+        workflowType: 'task',
+        identifier: 'adopt-run-1',
+        taskBranch: { kind: 'existing', branch: 'feature/live-pr' },
       })
     );
   });
@@ -429,7 +479,7 @@ describe('IsolationResolver', () => {
       platformType: 'web',
     });
 
-    expect(updatedStatus).toBe('destroyed');
+    expect(updatedStatus as string | null).toBe('destroyed');
   });
 
   test('findReusable marks stale DB record as destroyed when worktree gone', async () => {
@@ -458,8 +508,8 @@ describe('IsolationResolver', () => {
     });
 
     // Should have cleaned up the stale record and then created a new environment
-    expect(updatedId).toBe('env-1');
-    expect(updatedStatus).toBe('destroyed');
+    expect(updatedId as string | null).toBe('env-1');
+    expect(updatedStatus as string | null).toBe('destroyed');
     expect(result.status).toBe('resolved');
     if (result.status === 'resolved') {
       expect(result.method.type).toBe('created');
@@ -497,8 +547,8 @@ describe('IsolationResolver', () => {
       platformType: 'web',
     });
 
-    expect(updatedId).toBe('env-linked');
-    expect(updatedStatus).toBe('destroyed');
+    expect(updatedId as string | null).toBe('env-linked');
+    expect(updatedStatus as string | null).toBe('destroyed');
     // Should proceed to create new since linked env was stale
     expect(result.status).toBe('resolved');
     if (result.status === 'resolved') {
@@ -655,7 +705,7 @@ describe('IsolationResolver', () => {
           id: '/worktrees/new-branch',
           provider: 'worktree',
           workingPath: '/worktrees/new-branch',
-          branchName: 'new-branch',
+          branchName: git.toBranchName('new-branch'),
           status: 'active',
           createdAt: new Date(),
           metadata: { adopted: false },
@@ -700,13 +750,13 @@ describe('IsolationResolver', () => {
     const resolver = createResolver({
       provider: {
         ...makeMockProvider(),
-        create: async (request: unknown) => {
+        create: async (request: IsolationRequest): Promise<IsolatedEnvironment> => {
           capturedRequests.push(request);
           return {
             id: '/worktrees/new-branch',
             provider: 'worktree' as const,
             workingPath: '/worktrees/new-branch',
-            branchName: 'new-branch',
+            branchName: git.toBranchName('new-branch'),
             status: 'active' as const,
             createdAt: new Date(),
             metadata: { adopted: false },
@@ -735,13 +785,13 @@ describe('IsolationResolver', () => {
     const resolver = createResolver({
       provider: {
         ...makeMockProvider(),
-        create: async (request: unknown) => {
+        create: async (request: IsolationRequest): Promise<IsolatedEnvironment> => {
           capturedRequests.push(request);
           return {
             id: '/worktrees/new-branch',
             provider: 'worktree' as const,
             workingPath: '/worktrees/new-branch',
-            branchName: 'new-branch',
+            branchName: git.toBranchName('new-branch'),
             status: 'active' as const,
             createdAt: new Date(),
             metadata: { adopted: false },
@@ -773,13 +823,13 @@ describe('IsolationResolver', () => {
     const resolver = createResolver({
       provider: {
         ...makeMockProvider(),
-        create: async (request: unknown) => {
+        create: async (request: IsolationRequest): Promise<IsolatedEnvironment> => {
           capturedRequests.push(request);
           return {
             id: '/worktrees/new-branch',
             provider: 'worktree' as const,
             workingPath: '/worktrees/new-branch',
-            branchName: 'new-branch',
+            branchName: git.toBranchName('new-branch'),
             status: 'active' as const,
             createdAt: new Date(),
             metadata: { adopted: false },
@@ -811,7 +861,7 @@ describe('IsolationResolver', () => {
     const resolver = createResolver({
       provider: {
         ...makeMockProvider(),
-        create: async (request: unknown): Promise<IsolatedEnvironment> => {
+        create: async (request: IsolationRequest): Promise<IsolatedEnvironment> => {
           capturedRequests.push(request);
           throw new Error('provider.create must not be called for folder projects');
         },
@@ -1161,6 +1211,39 @@ describe('IsolationResolver', () => {
   // become a `blocked` result; unknown errors propagate as crashes.
   // -------------------------------------------------------------------------
   describe('canonical path resolution failure handling', () => {
+    test('uses an exact registered external-git-dir checkout as the worktree anchor', async () => {
+      const defaultCwd = '/workspace/external-linked';
+      getCanonicalSpy.mockRejectedValue(
+        new git.CanonicalRepoPathUnavailableError(defaultCwd, '/metadata/repository')
+      );
+      const createSpy = mock(
+        async (_request: IsolationRequest): Promise<IsolatedEnvironment> => ({
+          id: '/worktrees/new-branch',
+          provider: 'worktree',
+          workingPath: '/worktrees/new-branch',
+          branchName: git.toBranchName('new-branch'),
+          status: 'active',
+          createdAt: new Date(),
+          metadata: { adopted: false },
+        })
+      );
+      const resolver = createResolver({
+        provider: { ...makeMockProvider(), create: createSpy },
+      });
+
+      const result = await resolver.resolve({
+        existingEnvId: null,
+        codebase: { ...defaultCodebase, defaultCwd },
+        hints: { workflowType: 'issue', workflowId: '42' },
+        platformType: 'web',
+      });
+
+      expect(result.status).toBe('resolved');
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ canonicalRepoPath: defaultCwd })
+      );
+    });
+
     test('known infrastructure error returns blocked with classified user message', async () => {
       const eaccesError = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
       eaccesError.code = 'EACCES';

@@ -42,6 +42,13 @@ export { type CleanupOperationResult } from '../services/cleanup-service';
 /**
  * Reconcile DB state with filesystem — mark environments as destroyed
  * if their worktree path no longer exists on disk.
+ *
+ * An env a run can still claim is left active even with its directory gone: marking
+ * it destroyed invalidates that run's resume handle, and this runs from
+ * `listEnvironments()` ahead of the per-item live-run guard in the `isolation
+ * cleanup` commands, so a row ghosted here never reaches that guard. Same rule as
+ * the scheduled sweep's path-missing branch. The env stays visible in `isolation
+ * list` with its missing path, which is the operator's signal to act.
  */
 async function reconcileGhosts(
   envs: readonly {
@@ -56,6 +63,14 @@ async function reconcileGhosts(
     try {
       const exists = await worktreeExists(toWorktreePath(env.working_path));
       if (!exists) {
+        const liveRun = await isolationDb.getLiveRunOwningEnv(env.id);
+        if (liveRun) {
+          getLog().info(
+            { envId: env.id, path: env.working_path, runId: liveRun.id, runStatus: liveRun.status },
+            'isolation.ghost_kept_for_live_run'
+          );
+          continue;
+        }
         await isolationDb.updateStatus(env.id, 'destroyed');
         getLog().info({ envId: env.id, path: env.working_path }, 'isolation.ghost_reconciled');
         reconciled++;

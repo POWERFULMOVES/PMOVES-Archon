@@ -406,12 +406,13 @@ nodes:
   #
   # Exiting non-zero fails the node, and therefore the run, before any reviewer or
   # PR node spends anything. A run with nothing to show should fail, not go green.
-  # `.archon/` is excluded deliberately. Archon copies the operator's workflow and
-  # command edits into every run worktree — that is the feature that lets a workflow
-  # be iterated on before it is committed — so those files are present BEFORE
-  # `implement` runs and are not its output. A first version of this guard counted
-  # them and passed three consecutive runs on an empty implementation, which is the
-  # exact failure it exists to catch.
+  # `.archon/` used to be excluded here. Archon copied the operator's workflow and
+  # command edits into every run worktree, so those files were present BEFORE
+  # `implement` ran and were not its output — a first version of this guard counted
+  # them and passed three consecutive runs on an empty implementation. A run now reads
+  # its workflow from a frozen copy outside the worktree and copies nothing in, so the
+  # exclusion no longer has anything to exclude, and keeping it would hide a real fix
+  # whose changes legitimately live under `.archon/`.
   #
   # BOTH the working tree and the commit count are inspected, and both branches are
   # load-bearing. The original version checked only the working tree, on the
@@ -429,18 +430,18 @@ nodes:
   - id: assert-implemented
     bash: |
       base=$BASE_BRANCH
-      tracked=$(git diff --name-only HEAD -- ':(exclude).archon' | head -1)
-      untracked=$(git ls-files --others --exclude-standard -- ':(exclude).archon' | head -1)
+      tracked=$(git diff --name-only HEAD | head -1)
+      untracked=$(git ls-files --others --exclude-standard | head -1)
       if commits=$(git rev-list --count "origin/$base..HEAD" 2>/dev/null); then :; else commits=unknown; fi
 
       if [ -n "$tracked" ] || [ -n "$untracked" ]; then
-        git --no-pager diff --stat HEAD -- ':(exclude).archon' | tail -1
+        git --no-pager diff --stat HEAD | tail -1
       elif [ "$commits" = "unknown" ]; then
         echo "WARNING: cannot compare against origin/$base — not failing on an unknown"
       elif [ "$commits" != "0" ]; then
         echo "$commits commit(s) ahead of origin/$base"
       else
-        echo "implement produced neither a commit nor a working-tree change outside .archon/ — failing before the review phase" >&2
+        echo "implement produced neither a commit nor a working-tree change — failing before the review phase" >&2
         exit 1
       fi
     depends_on: [implement]

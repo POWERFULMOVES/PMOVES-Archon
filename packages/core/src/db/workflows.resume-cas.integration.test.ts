@@ -10,12 +10,27 @@
  * Runs in its own `bun test` invocation (see package.json) — it mock.module's
  * ./connection with a real adapter, conflicting with workflows.test.ts's fake.
  */
-import { describe, test, expect, mock } from 'bun:test';
+import { describe, test, expect, mock, afterEach } from 'bun:test';
+import { mkdtemp, mkdir, writeFile, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { getRunArtifactsDirForRoot } from '@archon/paths/archon-paths';
+import { trackTempRoots, removeTempTree } from '@archon/paths/test-utils';
+import {
+  terminalRecordSchema,
+  RUN_GRAPH_METADATA_KEY,
+} from '@archon/workflows/schemas/terminal-record';
+import { getTerminalRecord } from '@archon/workflows/terminal-record';
+import type { TokenUsage } from '@archon/providers/types';
+import { isWorkflowWaitContext } from '@archon/workflows/schemas/workflow-run';
+import type { GateResolutionEvent } from './workflows';
+
+const workflowWarnings = mock((_context: unknown, _message: string) => {});
 
 mock.module('@archon/paths', () => ({
   createLogger: () => ({
     info() {},
-    warn() {},
+    warn: workflowWarnings,
     error() {},
     debug() {},
     trace() {},
@@ -27,6 +42,12 @@ mock.module('@archon/paths', () => ({
 
 const { SqliteAdapter, sqliteDialect } = await import('./adapters/sqlite');
 const db = new SqliteAdapter(':memory:');
+const trackTempRoot = trackTempRoots();
+const initialArchonHome = process.env.ARCHON_HOME;
+afterEach(() => {
+  if (initialArchonHome === undefined) delete process.env.ARCHON_HOME;
+  else process.env.ARCHON_HOME = initialArchonHome;
+});
 
 mock.module('./connection', () => ({
   pool: db,
@@ -40,14 +61,27 @@ mock.module('./connection', () => ({
 
 const {
   resumeWorkflowRun,
+  recoverCancelledFanOutRun,
+  cancelWorkflowRun,
+  cancelFanOutRun,
   pauseWorkflowRun,
+  pauseWorkflowRunForWait,
+  failPausedAttentionWait,
+  clearWorkflowWaitContext,
+  signalWorkflowWait,
+  listDueWorkflowContinuations,
+  listWorkflowEventSignalCandidates,
+  deferWorkflowContinuation,
   getWorkflowRun,
   findResumableRun,
   findResumableRunByParentConversation,
+  cancelResumableRunsForConversation,
   resolveApprovalGate,
   resolveAndCancelApprovalGate,
   claimWriteback,
   releaseWritebackClaim,
+  completeWorkflowRun,
+  failWorkflowRun,
   WorkflowNotResumableError,
 } = await import('./workflows');
 const { approveWorkflow, rejectWorkflow } = await import('../operations/workflow-operations');
@@ -91,7 +125,7 @@ describe('resumeWorkflowRun — real SQLite (CAS + orphan recovery)', () => {
   test('clears a failed run error when resuming, preserving it as an event', async () => {
     // #2329: a run that failed, resumed and completed kept rendering its old
     // error. #2348: for the motivating run the error lived ONLY in metadata —
-    // the CLI's SIGTERM handler calls failWorkflowRun and writes no event — so
+    // older CLI SIGTERM handlers could leave only this metadata error — so
     // clearing it silently destroyed the only record that the run ever failed.
     await seed('failed-with-error', 'failed', "datetime('now')", {
       error: 'Process terminated (SIGTERM)',
@@ -193,6 +227,79 @@ describe('resumeWorkflowRun — real SQLite (CAS + orphan recovery)', () => {
   });
 });
 
+describe('cancelResumableRunsForConversation — real SQLite', () => {
+  test('cancels paused roots once across a running status gap (#2731 R4)', async () => {
+    await db.query(
+      `INSERT INTO remote_agent_conversations (id, platform_type, platform_conversation_id)
+       VALUES ('conv-reset-gap', 'web', 'conv-reset-gap-platform')`,
+      []
+    );
+    await db.query(
+      `INSERT INTO remote_agent_workflow_runs
+         (id, workflow_name, conversation_id, user_message, status, started_at, metadata)
+       VALUES
+         ('reset-a', 'wf', 'conv-reset-gap', 'msg', 'paused', datetime('now', '-3 seconds'), '{}')`,
+      []
+    );
+    await db.query(
+      `INSERT INTO remote_agent_workflow_runs
+         (id, workflow_name, conversation_id, user_message, status, started_at, metadata, parent_run_id)
+       VALUES
+         ('reset-b', 'wf', 'conv-reset-gap', 'msg', 'running', datetime('now', '-2 seconds'), '{}', 'reset-a'),
+         ('reset-c', 'wf', 'conv-reset-gap', 'msg', 'paused', datetime('now', '-1 second'), '{}', 'reset-b')`,
+      []
+    );
+
+    const cancelled = await cancelResumableRunsForConversation('conv-reset-gap');
+
+    expect(cancelled.map(run => run.id).sort()).toEqual(['reset-a', 'reset-c']);
+    const final = await db.query<{ id: string; status: string; completed_at: string | null }>(
+      `SELECT id, status, completed_at FROM remote_agent_workflow_runs
+       WHERE conversation_id = $1 ORDER BY id`,
+      ['conv-reset-gap']
+    );
+    expect(final.rows).toEqual([
+      { id: 'reset-a', status: 'cancelled', completed_at: expect.any(String) },
+      { id: 'reset-b', status: 'running', completed_at: null },
+      { id: 'reset-c', status: 'cancelled', completed_at: expect.any(String) },
+    ]);
+    const events = await db.query<{ workflow_run_id: string }>(
+      `SELECT workflow_run_id FROM remote_agent_workflow_events
+       WHERE workflow_run_id IN ('reset-a', 'reset-b', 'reset-c')
+         AND event_type = 'workflow_cancelled'
+       ORDER BY workflow_run_id`,
+      []
+    );
+    expect(events.rows).toEqual([{ workflow_run_id: 'reset-a' }, { workflow_run_id: 'reset-c' }]);
+    expect((await terminalRecord('reset-a')).status).toBe('cancelled');
+    expect((await terminalRecord('reset-c')).status).toBe('cancelled');
+  });
+
+  test('rolls back every cancellation when an event cannot be stored', async () => {
+    await seed('reset-atomic-a', 'paused', "datetime('now')");
+    await seed('reset-atomic-b', 'failed', "datetime('now')");
+
+    await db.query('ALTER TABLE remote_agent_workflow_events RENAME TO events_stash', []);
+    try {
+      await expect(cancelResumableRunsForConversation('conv-1')).rejects.toThrow(
+        'Failed to cancel resumable runs for conversation'
+      );
+    } finally {
+      await db.query('ALTER TABLE events_stash RENAME TO remote_agent_workflow_events', []);
+    }
+
+    const runs = await db.query<{ id: string; status: string; completed_at: string | null }>(
+      `SELECT id, status, completed_at FROM remote_agent_workflow_runs
+       WHERE id IN ('reset-atomic-a', 'reset-atomic-b') ORDER BY id`,
+      []
+    );
+    expect(runs.rows).toEqual([
+      { id: 'reset-atomic-a', status: 'paused', completed_at: null },
+      { id: 'reset-atomic-b', status: 'failed', completed_at: null },
+    ]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // claimWriteback CAS (R2-F4) — retry-safe container write-back apply. Real SQLite
 // json_patch: exactly one caller wins the claim; release makes it claimable again.
@@ -220,11 +327,11 @@ describe('claimWriteback — real SQLite CAS', () => {
 // ---------------------------------------------------------------------------
 // Gate approve/reject staging (#2075) — the run stays 'paused' after a gate
 // resolution instead of masquerading as 'failed'. This exercises the REAL
-// SQLite json_patch path end-to-end: staging write, resumable pickup (both the
+// SQLite JSON write path end-to-end: staging write, resumable pickup (both the
 // parent-conversation query the orchestrator uses and the working-path query
 // the CLI uses), the resume CAS, the double-resolution guard, and — critically
-// — that a fresh pause clears the previous gate's `resolved` marker despite
-// json_patch's deep-merge semantics.
+// — that a fresh pause carries nothing from the previous gate, which only a
+// real engine can prove (the mock suite runs the Postgres dialect).
 // ---------------------------------------------------------------------------
 
 /**
@@ -292,12 +399,12 @@ describe('gate approve staging — real SQLite end-to-end (#2075)', () => {
     await expect(resumeWorkflowRun('gate-1')).rejects.toThrow(WorkflowNotResumableError);
   });
 
-  test('a fresh pause clears the previous resolution despite json_patch deep-merge', async () => {
+  test('a fresh pause replaces the previous gate context, clearing its resolution', async () => {
     // Continue the run from the previous test: it is 'running' with
     // approval.resolved = 'approved' still in metadata (never cleared on
-    // resume by design). The next gate's pause MUST reset it — on SQLite
-    // json_patch deep-merges the new approval context into the old one, so an
-    // omitted key would leak the stale 'approved' and falsely block this gate.
+    // resume by design). The next gate's pause MUST reset it — the write
+    // replaces the whole approval object, so a key this gate does not set
+    // cannot carry the stale 'approved' over and falsely block it.
     await pauseWorkflowRun('gate-1', {
       nodeId: 'second-gate',
       message: 'Approve step 2?',
@@ -308,7 +415,6 @@ describe('gate approve staging — real SQLite end-to-end (#2075)', () => {
     expect(repaused?.status).toBe('paused');
     const approval = repaused?.metadata.approval as Record<string, unknown>;
     expect(approval.nodeId).toBe('second-gate');
-    // json_patch removes keys patched with null — 'resolved' must be gone/null.
     expect(approval.resolved ?? null).toBeNull();
 
     // And the second gate is approvable again.
@@ -316,6 +422,140 @@ describe('gate approve staging — real SQLite end-to-end (#2075)', () => {
     const staged = await getWorkflowRun('gate-1');
     expect((staged?.metadata.approval as Record<string, unknown>).resolved).toBe('approved');
     expect(staged?.status).toBe('paused');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2673 — a later gate must not inherit an earlier gate's approval data. The
+// numeric half is the dangerous one: SQLite's json_patch is RFC 7396 and
+// recurses, so before the wholesale-replace write, interior keys of the nested
+// `signaledTokens` object survived from the previous gate and became real token
+// accounting on resume (readSignaledTokens in dag-executor). Only a real engine
+// can catch this; the mock suite runs the Postgres dialect, where `||` already
+// replaced the object.
+// ---------------------------------------------------------------------------
+describe('fresh gate usage is its own — real SQLite end-to-end (#2673)', () => {
+  /** Pause `runId` on a gate carrying `signaledTokens` and read the stored object back. */
+  async function pauseWithTokens(
+    runId: string,
+    nodeId: string,
+    signaledTokens: TokenUsage
+  ): Promise<Record<string, unknown> | undefined> {
+    await pauseWorkflowRun(runId, {
+      nodeId,
+      message: `gate ${nodeId}`,
+      type: 'interactive_loop',
+      iteration: 1,
+      signaledTokens,
+    });
+    const run = await getWorkflowRun(runId);
+    const approval = run?.metadata.approval as Record<string, unknown> | undefined;
+    return approval?.signaledTokens as Record<string, unknown> | undefined;
+  }
+
+  test('a second gate whose usage omits the cache axes does not inherit them', async () => {
+    await seedPausedRun('usage-cache', 'wf-usage-cache', { nodeId: 'seed', message: 'seed' });
+
+    // Gate 1: a provider that reports cache telemetry.
+    await resumeWorkflowRun('usage-cache');
+    const first = await pauseWithTokens('usage-cache', 'gate-1', {
+      input: 40,
+      output: 4,
+      cacheRead: 20,
+      cacheWrite: 3,
+    });
+    expect(first).toEqual({ input: 40, output: 4, cacheRead: 20, cacheWrite: 3 });
+
+    // Gate 2: a provider with no cache telemetry at all.
+    await resumeWorkflowRun('usage-cache');
+    const second = await pauseWithTokens('usage-cache', 'gate-2', { input: 90, output: 9 });
+
+    // Exactly the second gate's usage — no fabricated cache counts.
+    expect(second).toEqual({ input: 90, output: 9 });
+  });
+
+  test("a second gate's exact total is not flagged as a floor by the first gate", async () => {
+    await seedPausedRun('usage-partial', 'wf-usage-partial', { nodeId: 'seed', message: 'seed' });
+
+    // Gate 1 paused on a FLOOR (#2671): its cache totals are known-incomplete.
+    await resumeWorkflowRun('usage-partial');
+    await pauseWithTokens('usage-partial', 'gate-1', {
+      input: 10,
+      output: 1,
+      cacheRead: 50,
+      cacheWrite: 2,
+      cachePartial: true,
+    });
+
+    // Gate 2 knows its complete usage, so it declares no cachePartial.
+    await resumeWorkflowRun('usage-partial');
+    const second = await pauseWithTokens('usage-partial', 'gate-2', {
+      input: 90,
+      output: 9,
+      cacheRead: 5,
+      cacheWrite: 1,
+    });
+
+    expect(second).toEqual({ input: 90, output: 9, cacheRead: 5, cacheWrite: 1 });
+    expect(second?.cachePartial).toBeUndefined();
+  });
+
+  test('a gate that sets no optional fields stores none of them', async () => {
+    await seedPausedRun('usage-reset', 'wf-usage-reset', { nodeId: 'seed', message: 'seed' });
+
+    // A loop gate with the full optional payload.
+    await resumeWorkflowRun('usage-reset');
+    await pauseWorkflowRun('usage-reset', {
+      nodeId: 'loop-gate',
+      message: 'Review?',
+      type: 'interactive_loop',
+      iteration: 2,
+      sessionId: 'sess-1',
+      sessionProvider: 'claude',
+      completionSignaled: true,
+      signaledOutput: 'REPORT',
+      signaledTokens: { input: 40, output: 4, cacheRead: 20, cacheWrite: 3 },
+      signaledCostUsd: 0.02,
+      commandSnapshot: 'loop body',
+      onRejectPrompt: 'Fix: $REJECTION_REASON',
+      childRunId: 'child-1',
+    });
+
+    // A plain approval gate that declares none of them.
+    await resumeWorkflowRun('usage-reset');
+    await pauseWorkflowRun('usage-reset', {
+      nodeId: 'plain-gate',
+      message: 'Approve?',
+      type: 'approval',
+    });
+
+    const run = await getWorkflowRun('usage-reset');
+    expect(run?.metadata.approval).toEqual({
+      nodeId: 'plain-gate',
+      message: 'Approve?',
+      type: 'approval',
+    });
+  });
+
+  test('run-level metadata outside the approval object still merges', async () => {
+    await seedPausedRun(
+      'usage-extra',
+      'wf-usage-extra',
+      { nodeId: 'seed', message: 'seed' },
+      { rejection_count: 2 }
+    );
+
+    await resumeWorkflowRun('usage-extra');
+    await pauseWorkflowRun(
+      'usage-extra',
+      { nodeId: 'writeback', message: 'Apply changes?', type: 'writeback' },
+      { pending_writeback: true }
+    );
+
+    const run = await getWorkflowRun('usage-extra');
+    expect(run?.metadata.pending_writeback).toBe(true);
+    // Pre-existing top-level key untouched by the approval replace.
+    expect(run?.metadata.rejection_count).toBe(2);
   });
 });
 
@@ -357,7 +597,7 @@ describe('gate reject staging — real SQLite end-to-end (#2075)', () => {
     expect((await resumeWorkflowRun('gate-reject')).status).toBe('running');
   });
 
-  test('reject without on_reject cancels the run', async () => {
+  test('reject without on_reject cancels the run and records the terminal event', async () => {
     await seedPausedRun('gate-cancel', 'wf-gate-cancel', {
       nodeId: 'review',
       message: 'Approve?',
@@ -368,6 +608,24 @@ describe('gate reject staging — real SQLite end-to-end (#2075)', () => {
     const result = await rejectWorkflow('gate-cancel', 'no');
     expect(result.cancelled).toBe(true);
     expect((await getWorkflowRun('gate-cancel'))?.status).toBe('cancelled');
+
+    // #2906: the terminal status write and its lifecycle event are one thing.
+    // Before the fix this path wrote 'cancelled' with only the approval_received
+    // row, so a consumer reading the event log missed the cancellation entirely.
+    expect(await countEvents('gate-cancel', 'approval_received')).toBe(1);
+    expect(await countEvents('gate-cancel', 'workflow_cancelled')).toBe(1);
+    expect((await terminalRecord('gate-cancel')).status).toBe('cancelled');
+    const cancelled = await db.query<{ step_name: string | null; data: string }>(
+      `SELECT step_name, data FROM remote_agent_workflow_events
+       WHERE workflow_run_id = $1 AND event_type = 'workflow_cancelled'`,
+      ['gate-cancel']
+    );
+    expect(cancelled.rows[0]?.step_name).toBe('review');
+    // A stable token, not the user's rejection prose (that stays on the
+    // approval_received row).
+    expect(JSON.parse(cancelled.rows[0]?.data ?? '{}')).toMatchObject({
+      reason: 'approval_rejected',
+    });
   });
 });
 
@@ -381,13 +639,12 @@ describe('gate reject staging — real SQLite end-to-end (#2075)', () => {
 // ---------------------------------------------------------------------------
 
 /** A minimal audit event for the gate CAS calls (content is not asserted here). */
-function approvalEvent(decision: 'approved' | 'rejected'): {
-  event_type: string;
-  step_name: string;
-  data: Record<string, unknown>;
-} {
+function approvalEvent(decision: 'approved' | 'rejected'): GateResolutionEvent {
   return { event_type: 'approval_received', step_name: 'review', data: { decision } };
 }
+
+/** The terminal-event details rejectWorkflow passes for a reject-to-cancel (#2906). */
+const gateCancellation = { step_name: 'review', reason: 'approval_rejected' };
 
 /** Count workflow_events rows of a given type for a run (atomicity assertions). */
 async function countEvents(runId: string, eventType: string): Promise<number> {
@@ -398,6 +655,487 @@ async function countEvents(runId: string, eventType: string): Promise<number> {
   );
   return Number(result.rows[0]?.cnt ?? 0);
 }
+
+describe('terminal workflow transitions — real SQLite', () => {
+  test.each(['completed', 'cancelled'] as const)(
+    'malformed metadata does not prevent %s without a metadata merge',
+    async status => {
+      const runId = `terminal-malformed-${status}`;
+      const rawMetadata = '{"private":"must-not-be-logged"';
+      await seed(runId, 'running', "datetime('now')");
+      await db.query('UPDATE remote_agent_workflow_runs SET metadata = $1 WHERE id = $2', [
+        rawMetadata,
+        runId,
+      ]);
+      expect((await getWorkflowRun(runId))?.metadata).toEqual({});
+      if (status === 'completed') await completeWorkflowRun(runId, { duration_ms: 5 });
+      else await expect(cancelWorkflowRun(runId)).resolves.toEqual({ cancelled: true });
+      expect((await getWorkflowRun(runId))?.status).toBe(status);
+      const record = await terminalRecord(runId);
+      expect(record.status).toBe(status);
+      expect(record.returns).toEqual({
+        availability: 'unavailable',
+        node_id: null,
+        reason: 'graph_unavailable',
+      });
+      const stored = await db.query<{ metadata: string }>(
+        'SELECT metadata FROM remote_agent_workflow_runs WHERE id = $1',
+        [runId]
+      );
+      expect(stored.rows[0]?.metadata).toBe(rawMetadata);
+      expect(workflowWarnings).toHaveBeenCalledWith(
+        { workflowRunId: runId, errorType: 'SyntaxError' },
+        'db.workflow_run_metadata_parse_failed'
+      );
+      expect(JSON.stringify(workflowWarnings.mock.calls)).not.toContain('must-not-be-logged');
+    }
+  );
+
+  test.each([
+    { label: 'object', raw: '{"kept":true}', expected: { kept: true } },
+    { label: 'JSON null', raw: 'null', expected: null },
+    { label: 'SQL null', raw: null, expected: null },
+  ])('preserves $label metadata when reading and terminating', async ({ label, raw, expected }) => {
+    const runId = `terminal-valid-${label}`;
+    await seed(runId, 'running', "datetime('now')");
+    await db.query('UPDATE remote_agent_workflow_runs SET metadata = $1 WHERE id = $2', [
+      raw,
+      runId,
+    ]);
+    const metadataBefore: unknown = (await getWorkflowRun(runId))?.metadata;
+    expect(metadataBefore).toEqual(expected);
+    await cancelWorkflowRun(runId);
+    const metadataAfter: unknown = (await getWorkflowRun(runId))?.metadata;
+    expect(metadataAfter).toEqual(expected);
+    expect((await terminalRecord(runId)).status).toBe('cancelled');
+    const stored = await db.query<{ metadata: string | null }>(
+      'SELECT metadata FROM remote_agent_workflow_runs WHERE id = $1',
+      [runId]
+    );
+    expect(stored.rows[0]?.metadata).toBe(raw);
+  });
+
+  test('commits completion and its matching event together', async () => {
+    await seed('terminal-complete', 'running', "datetime('now')");
+
+    await completeWorkflowRun('terminal-complete', { duration_ms: 321 });
+
+    expect((await getWorkflowRun('terminal-complete'))?.status).toBe('completed');
+    expect((await terminalRecord('terminal-complete')).status).toBe('completed');
+    expect(await countEvents('terminal-complete', 'workflow_completed')).toBe(1);
+    const event = await db.query<{ data: string }>(
+      `SELECT data FROM remote_agent_workflow_events
+       WHERE workflow_run_id = $1 AND event_type = 'workflow_completed'`,
+      ['terminal-complete']
+    );
+    expect(JSON.parse(event.rows[0]?.data ?? '{}')).toMatchObject({ duration_ms: 321 });
+  });
+
+  test('commits failure and its matching event together', async () => {
+    await seed('terminal-fail', 'pending', "datetime('now')");
+
+    await failWorkflowRun('terminal-fail', 'node exploded');
+
+    expect((await getWorkflowRun('terminal-fail'))?.status).toBe('failed');
+    expect(await terminalRecord('terminal-fail')).toMatchObject({
+      status: 'failed',
+      error: 'node exploded',
+      nodes: [],
+    });
+    expect(await countEvents('terminal-fail', 'workflow_failed')).toBe(1);
+    const event = await db.query<{ data: string }>(
+      `SELECT data FROM remote_agent_workflow_events
+       WHERE workflow_run_id = $1 AND event_type = 'workflow_failed'`,
+      ['terminal-fail']
+    );
+    expect(JSON.parse(event.rows[0]?.data ?? '{}')).toMatchObject({ error: 'node exploded' });
+  });
+
+  test('only the winning terminal transition inserts an event', async () => {
+    await seed('terminal-race', 'running', "datetime('now')");
+
+    const outcomes = await Promise.allSettled([
+      completeWorkflowRun('terminal-race', { duration_ms: 7 }),
+      failWorkflowRun('terminal-race', 'lost race'),
+    ]);
+
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+    const run = await getWorkflowRun('terminal-race');
+    expect(
+      (await countEvents('terminal-race', 'workflow_completed')) +
+        (await countEvents('terminal-race', 'workflow_failed'))
+    ).toBe(1);
+    expect(run?.status).toBe(
+      (await countEvents('terminal-race', 'workflow_completed')) === 1 ? 'completed' : 'failed'
+    );
+  });
+
+  test('rolls back both terminal transitions when the event table is unavailable', async () => {
+    await seed('terminal-complete-atomic', 'running', "datetime('now')");
+    await seed('terminal-fail-atomic', 'running', "datetime('now')");
+
+    await db.query('ALTER TABLE remote_agent_workflow_events RENAME TO events_stash', []);
+    try {
+      await expect(
+        completeWorkflowRun('terminal-complete-atomic', { duration_ms: 9 })
+      ).rejects.toThrow('Failed to complete workflow run');
+      await expect(failWorkflowRun('terminal-fail-atomic', 'boom')).rejects.toThrow(
+        'Failed to fail workflow run'
+      );
+    } finally {
+      await db.query('ALTER TABLE events_stash RENAME TO remote_agent_workflow_events', []);
+    }
+
+    expect((await getWorkflowRun('terminal-complete-atomic'))?.status).toBe('running');
+    expect((await getWorkflowRun('terminal-fail-atomic'))?.status).toBe('running');
+  });
+});
+
+describe('workflow cancellation — real SQLite', () => {
+  test('commits cancellation and its matching event together', async () => {
+    await seed('cancelled-with-event', 'running', "datetime('now')");
+
+    await expect(
+      cancelWorkflowRun('cancelled-with-event', {
+        step_name: 'stop',
+        reason: 'requested by operator',
+      })
+    ).resolves.toEqual({ cancelled: true });
+
+    expect((await getWorkflowRun('cancelled-with-event'))?.status).toBe('cancelled');
+    expect((await terminalRecord('cancelled-with-event')).status).toBe('cancelled');
+    expect(await countEvents('cancelled-with-event', 'workflow_cancelled')).toBe(1);
+    const event = await db.query<{ step_name: string; data: string }>(
+      `SELECT step_name, data FROM remote_agent_workflow_events
+       WHERE workflow_run_id = $1 AND event_type = 'workflow_cancelled'`,
+      ['cancelled-with-event']
+    );
+    expect(event.rows[0]?.step_name).toBe('stop');
+    expect(JSON.parse(event.rows[0]?.data ?? '{}')).toMatchObject({
+      reason: 'requested by operator',
+    });
+  });
+
+  test('rolls back cancellation when its event cannot be stored', async () => {
+    await seed('cancel-atomic', 'running', "datetime('now')");
+
+    await db.query('ALTER TABLE remote_agent_workflow_events RENAME TO events_stash', []);
+    try {
+      await expect(cancelWorkflowRun('cancel-atomic')).rejects.toThrow(
+        'Failed to cancel workflow run'
+      );
+    } finally {
+      await db.query('ALTER TABLE events_stash RENAME TO remote_agent_workflow_events', []);
+    }
+
+    const run = await getWorkflowRun('cancel-atomic');
+    expect(run?.status).toBe('running');
+    expect(run?.completed_at).toBeNull();
+  });
+});
+
+describe('fan-out cancellation recovery — real SQLite', () => {
+  test('stores the engine reason and matching event when it cancels the child', async () => {
+    await seed('fan-out-cancel', 'running', "datetime('now')", { existing: true });
+
+    await expect(cancelFanOutRun('fan-out-cancel', 'fan_out_gate')).resolves.toEqual({
+      cancelled: true,
+    });
+
+    const cancelled = await getWorkflowRun('fan-out-cancel');
+    expect(cancelled?.status).toBe('cancelled');
+    expect(cancelled?.completed_at).not.toBeNull();
+    expect(cancelled?.metadata).toEqual({ existing: true, cancelled_reason: 'fan_out_gate' });
+    expect(await countEvents('fan-out-cancel', 'workflow_cancelled')).toBe(1);
+    expect((await terminalRecord('fan-out-cancel')).status).toBe('cancelled');
+    const event = await db.query<{ data: string }>(
+      `SELECT data FROM remote_agent_workflow_events
+       WHERE workflow_run_id = $1 AND event_type = 'workflow_cancelled'`,
+      ['fan-out-cancel']
+    );
+    expect(JSON.parse(event.rows[0]?.data ?? '{}')).toMatchObject({ reason: 'fan_out_gate' });
+  });
+
+  test('claims an engine-cancelled child and removes its obsolete terminal event', async () => {
+    await seed('fan-out-recover', 'running', "datetime('now')");
+    await cancelFanOutRun('fan-out-recover', 'fan_out_orphan');
+
+    const recovered = await recoverCancelledFanOutRun('fan-out-recover');
+
+    expect(recovered.status).toBe('running');
+    expect(recovered.completed_at).toBeNull();
+    expect(recovered.metadata.cancelled_reason).toBeUndefined();
+    expect(await countEvents('fan-out-recover', 'workflow_cancelled')).toBe(0);
+    expect(await countEvents('fan-out-recover', 'workflow_failed')).toBe(0);
+  });
+
+  test('rolls back fan-out cancellation when its event cannot be stored', async () => {
+    await seed('fan-out-cancel-atomic', 'running', "datetime('now')", { existing: true });
+
+    await db.query('ALTER TABLE remote_agent_workflow_events RENAME TO events_stash', []);
+    try {
+      await expect(cancelFanOutRun('fan-out-cancel-atomic', 'fan_out_gate')).rejects.toThrow(
+        'Failed to cancel fan-out run'
+      );
+    } finally {
+      await db.query('ALTER TABLE events_stash RENAME TO remote_agent_workflow_events', []);
+    }
+
+    const run = await getWorkflowRun('fan-out-cancel-atomic');
+    expect(run?.status).toBe('running');
+    expect(run?.completed_at).toBeNull();
+    expect(run?.metadata).toEqual({ existing: true });
+  });
+
+  test('does not recover a user-cancelled child', async () => {
+    await seed('user-cancelled', 'cancelled', "datetime('now')");
+
+    await expect(recoverCancelledFanOutRun('user-cancelled')).rejects.toThrow(
+      'not an engine-cancelled fan-out child'
+    );
+    expect((await getWorkflowRun('user-cancelled'))?.status).toBe('cancelled');
+  });
+});
+
+describe('durable wait continuation races — real SQLite', () => {
+  const waitA = {
+    owner: 'loop_group' as const,
+    nodeId: 'release-loop',
+    bodyWaitId: 'await-checks',
+    iteration: 1,
+    sessionId: null,
+    sessionProvider: null,
+    kind: 'event' as const,
+    event: 'checks.complete',
+    waitingSince: '2026-08-24T10:00:00.000Z',
+    resumeAt: '2099-08-25T10:00:00.000Z',
+  };
+
+  test('finds typed outputs only for exact open waits and signals with their cursor', async () => {
+    const pullRequest = {
+      repo: { host: 'github.com', path: 'example/repo' },
+      number: 42,
+    };
+    await seed('event-candidate', 'paused', "datetime('now')", { wait: waitA });
+    await seed('other-event-candidate', 'paused', "datetime('now')", {
+      wait: { ...waitA, event: 'deploy.complete' },
+    });
+    await seed('expired-event-candidate', 'paused', "datetime('now')", {
+      wait: { ...waitA, resumeAt: '2026-08-24T09:00:00.000Z' },
+    });
+
+    for (const [runId, outputType, structuredOutput] of [
+      ['event-candidate', 'pull-request', pullRequest],
+      ['event-candidate', 'plan', { summary: 'not a PR identity' }],
+      ['other-event-candidate', 'pull-request', pullRequest],
+      ['expired-event-candidate', 'pull-request', pullRequest],
+    ] as const) {
+      await db.query(
+        `INSERT INTO remote_agent_workflow_events
+           (workflow_run_id, event_type, step_name, data)
+         VALUES ($1, 'node_completed', 'producer', $2)`,
+        [runId, JSON.stringify({ output_type: outputType, structured_output: structuredOutput })]
+      );
+    }
+
+    const candidates = await listWorkflowEventSignalCandidates(
+      'checks.complete',
+      new Date('2026-08-24T10:00:00.000Z')
+    );
+    expect(
+      candidates
+        .map(candidate => ({ runId: candidate.runId, outputType: candidate.outputType }))
+        .sort((left, right) => left.outputType.localeCompare(right.outputType))
+    ).toEqual([
+      { runId: 'event-candidate', outputType: 'plan' },
+      { runId: 'event-candidate', outputType: 'pull-request' },
+    ]);
+
+    const candidate = candidates.find(item => item.outputType === 'pull-request');
+    if (!candidate) throw new Error('Expected the pull-request signal candidate');
+    expect(candidate.wait).toEqual(waitA);
+    await expect(
+      signalWorkflowWait(candidate.runId, candidate.wait, { conclusion: 'success' })
+    ).resolves.toEqual({ signaled: true });
+
+    const signaled = await getWorkflowRun('event-candidate');
+    expect(signaled?.metadata.wait).toMatchObject({
+      ...waitA,
+      payload: { conclusion: 'success' },
+    });
+  });
+
+  test('never schedules an action-required wait and consumes it only after explicit resume', async () => {
+    const attentionA = {
+      owner: 'node' as const,
+      nodeId: 'rerun-ci',
+      kind: 'attention' as const,
+      waitingSince: '2026-08-24T10:00:00.000Z',
+      message: 'Re-run the failing check, then resume.',
+    };
+    await seed('attention-explicit-resume', 'paused', "datetime('now')", { wait: attentionA });
+
+    const due = await listDueWorkflowContinuations(new Date('2099-08-24T10:00:00.000Z'), 25);
+    expect(due.map(run => run.id)).not.toContain('attention-explicit-resume');
+
+    await expect(resumeWorkflowRun('attention-explicit-resume')).resolves.toMatchObject({
+      id: 'attention-explicit-resume',
+      status: 'running',
+    });
+    await expect(
+      clearWorkflowWaitContext('attention-explicit-resume', attentionA, {
+        stepName: 'rerun-ci',
+        result: { status: 'satisfied', waited_ms: 1000 },
+      })
+    ).resolves.toMatchObject({ cleared: true });
+
+    const attentionB = {
+      ...attentionA,
+      waitingSince: '2026-08-24T10:01:00.000Z',
+      message: 'The check is still red. Re-run it, then resume.',
+    };
+    await pauseWorkflowRunForWait('attention-explicit-resume', attentionB, {
+      kind: 'started',
+      stepName: 'rerun-ci',
+    });
+    await resumeWorkflowRun('attention-explicit-resume');
+    await expect(
+      clearWorkflowWaitContext('attention-explicit-resume', attentionA, {
+        stepName: 'rerun-ci',
+        result: { status: 'satisfied', waited_ms: 1000 },
+      })
+    ).resolves.toEqual({ cleared: false });
+    expect((await getWorkflowRun('attention-explicit-resume'))?.metadata.wait).toEqual(attentionB);
+  });
+
+  test('makes an undeliverable action-required pause visibly failed', async () => {
+    const attention = {
+      owner: 'node' as const,
+      nodeId: 'rerun-ci',
+      kind: 'attention' as const,
+      waitingSince: '2026-08-24T11:00:00.000Z',
+      message: 'Re-run the failing check, then resume.',
+    };
+    await seed('attention-notification-failed', 'paused', "datetime('now')", { wait: attention });
+
+    await expect(
+      failPausedAttentionWait(
+        'attention-notification-failed',
+        attention,
+        'action-required notification was not delivered'
+      )
+    ).resolves.toEqual({ failed: true });
+
+    const failed = await getWorkflowRun('attention-notification-failed');
+    expect(failed?.status).toBe('failed');
+    expect(failed?.completed_at).not.toBeNull();
+    expect(failed?.metadata).toMatchObject({
+      wait: attention,
+      error: 'action-required notification was not delivered',
+    });
+    expect(await countEvents('attention-notification-failed', 'workflow_failed')).toBe(1);
+    expect((await terminalRecord('attention-notification-failed')).status).toBe('failed');
+
+    await expect(
+      failPausedAttentionWait(
+        'attention-notification-failed',
+        attention,
+        'duplicate notification failure'
+      )
+    ).resolves.toEqual({ failed: false });
+    expect(await countEvents('attention-notification-failed', 'workflow_failed')).toBe(1);
+    expect((await terminalRecord('attention-notification-failed')).status).toBe('failed');
+  });
+
+  test('rejects a stale signal after the same event advances to a later occurrence', async () => {
+    await seed('wait-signal-cursor', 'paused', "datetime('now')", { wait: waitA });
+    await resumeWorkflowRun('wait-signal-cursor', {
+      kind: 'wait',
+      nodeId: waitA.nodeId,
+      resumeAt: waitA.resumeAt,
+    });
+    await clearWorkflowWaitContext('wait-signal-cursor', waitA, {
+      stepName: 'release-loop.await-checks',
+      result: { status: 'satisfied', waited_ms: 1, event: waitA.event },
+    });
+
+    const waitB = {
+      ...waitA,
+      iteration: 2,
+      waitingSince: '2026-08-24T10:01:00.000Z',
+      resumeAt: '2099-08-25T10:01:00.000Z',
+    };
+    await pauseWorkflowRunForWait('wait-signal-cursor', waitB, {
+      kind: 'started',
+      stepName: 'release-loop.await-checks',
+    });
+
+    await expect(
+      signalWorkflowWait('wait-signal-cursor', waitA, { conclusion: 'stale' })
+    ).resolves.toEqual({ signaled: false });
+
+    const run = await getWorkflowRun('wait-signal-cursor');
+    expect(run?.status).toBe('paused');
+    expect(run?.metadata.wait).toEqual(waitB);
+    expect(await countEvents('wait-signal-cursor', 'wait_signaled')).toBe(0);
+  });
+
+  test('gives one resume competitor ownership and leaves every loser side effect free', async () => {
+    await seed('wait-three-way-race', 'paused', "datetime('now')", {
+      wait: waitA,
+      error: 'prior attempt interrupted',
+    });
+    await expect(
+      signalWorkflowWait('wait-three-way-race', waitA, { conclusion: 'success' })
+    ).resolves.toEqual({ signaled: true });
+
+    const due = await listDueWorkflowContinuations(new Date('2026-08-24T10:02:00.000Z'), 25);
+    const dueRun = due.find(run => run.id === 'wait-three-way-race');
+    if (
+      !dueRun ||
+      !isWorkflowWaitContext(dueRun.metadata.wait) ||
+      dueRun.metadata.wait.kind === 'attention'
+    ) {
+      throw new Error('Expected the signaled wait to be selected as a due continuation');
+    }
+    const cursor = {
+      kind: 'wait' as const,
+      nodeId: dueRun.metadata.wait.nodeId,
+      resumeAt: dueRun.metadata.wait.resumeAt,
+    };
+    let dispatchCount = 0;
+    const claimAndDispatch = async (expectedCursor?: typeof cursor): Promise<void> => {
+      await resumeWorkflowRun('wait-three-way-race', expectedCursor);
+      dispatchCount += 1;
+    };
+
+    const claims = await Promise.allSettled([claimAndDispatch(cursor), claimAndDispatch()]);
+    expect(claims.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(dispatchCount).toBe(1);
+    expect(await countEvents('wait-three-way-race', 'workflow_resumed')).toBe(1);
+    expect(await countEvents('wait-three-way-race', 'wait_signaled')).toBe(1);
+
+    await deferWorkflowContinuation('wait-three-way-race', '2026-08-24T10:03:00.000Z', cursor);
+    expect((await getWorkflowRun('wait-three-way-race'))?.metadata.continuation_retry_at).toBe(
+      undefined
+    );
+
+    await clearWorkflowWaitContext('wait-three-way-race', waitA, {
+      stepName: 'release-loop.await-checks',
+      result: {
+        status: 'satisfied',
+        waited_ms: 120_000,
+        event: waitA.event,
+        payload: { conclusion: 'success' },
+      },
+    });
+    const consumed = await getWorkflowRun('wait-three-way-race');
+    expect(consumed?.status).toBe('running');
+    expect(consumed?.metadata.wait).toBeUndefined();
+    expect(await countEvents('wait-three-way-race', 'wait_completed')).toBe(1);
+    expect(await countEvents('wait-three-way-race', 'node_completed')).toBe(1);
+  });
+});
 
 describe('resolveApprovalGate — CAS at the DB layer (#2113)', () => {
   test('wins once on an open gate and merges the resolution metadata', async () => {
@@ -540,11 +1278,13 @@ describe('resolveApprovalGate — CAS at the DB layer (#2113)', () => {
       resolved: null,
     });
 
-    const badEvent = {
-      // Simulates an event-write failure inside the transaction.
-      event_type: null as unknown as string,
+    const circularData: Record<string, unknown> = {};
+    circularData.self = circularData;
+    const badEvent: GateResolutionEvent = {
+      // JSON serialization fails inside the event write transaction.
+      event_type: 'approval_received',
       step_name: 'review',
-      data: { decision: 'approved' },
+      data: circularData,
     };
     await expect(
       resolveApprovalGate(
@@ -593,15 +1333,21 @@ describe('resolveAndCancelApprovalGate — atomic reject+cancel CAS (#2113)', ()
       resolved: null,
     });
 
-    const outcome = await resolveAndCancelApprovalGate('rc-open', [approvalEvent('rejected')]);
+    const outcome = await resolveAndCancelApprovalGate(
+      'rc-open',
+      [approvalEvent('rejected')],
+      gateCancellation
+    );
     expect(outcome.resolved).toBe(true);
 
     // Single atomic transition: paused → cancelled with a completion stamp, plus
-    // the audit event committed in the same transaction (#2146).
+    // the audit event committed in the same transaction (#2146) and the terminal
+    // lifecycle event the CAS writes itself (#2906).
     const row = await getWorkflowRun('rc-open');
     expect(row?.status).toBe('cancelled');
     expect(row?.completed_at).not.toBeNull();
     expect(await countEvents('rc-open', 'approval_received')).toBe(1);
+    expect(await countEvents('rc-open', 'workflow_cancelled')).toBe(1);
   });
 
   test('a second call on an already-cancelled gate loses (guard excludes non-paused)', async () => {
@@ -614,14 +1360,25 @@ describe('resolveAndCancelApprovalGate — atomic reject+cancel CAS (#2113)', ()
       resolved: null,
     });
     expect(
-      (await resolveAndCancelApprovalGate('rc-cancelled', [approvalEvent('rejected')])).resolved
+      (
+        await resolveAndCancelApprovalGate(
+          'rc-cancelled',
+          [approvalEvent('rejected')],
+          gateCancellation
+        )
+      ).resolved
     ).toBe(true);
 
-    const outcome = await resolveAndCancelApprovalGate('rc-cancelled', [approvalEvent('rejected')]);
+    const outcome = await resolveAndCancelApprovalGate(
+      'rc-cancelled',
+      [approvalEvent('rejected')],
+      gateCancellation
+    );
     expect(outcome.resolved).toBe(false);
     expect((await getWorkflowRun('rc-cancelled'))?.status).toBe('cancelled');
-    // The loser wrote no second audit event.
+    // The loser wrote no second audit event — and no duplicate terminal event.
     expect(await countEvents('rc-cancelled', 'approval_received')).toBe(1);
+    expect(await countEvents('rc-cancelled', 'workflow_cancelled')).toBe(1);
   });
 
   test('an approve CAS loses against a concurrent reject-cancel on the same gate', async () => {
@@ -634,7 +1391,13 @@ describe('resolveAndCancelApprovalGate — atomic reject+cancel CAS (#2113)', ()
 
     // reject-cancel wins the open gate first...
     expect(
-      (await resolveAndCancelApprovalGate('rc-vs-approve', [approvalEvent('rejected')])).resolved
+      (
+        await resolveAndCancelApprovalGate(
+          'rc-vs-approve',
+          [approvalEvent('rejected')],
+          gateCancellation
+        )
+      ).resolved
     ).toBe(true);
     // ...so a racing approve (guarded on status='paused') can no longer resolve it.
     const approveOutcome = await resolveApprovalGate(
@@ -646,5 +1409,171 @@ describe('resolveAndCancelApprovalGate — atomic reject+cancel CAS (#2113)', ()
     );
     expect(approveOutcome.resolved).toBe(false);
     expect((await getWorkflowRun('rc-vs-approve'))?.status).toBe('cancelled');
+  });
+});
+
+async function terminalRecord(runId: string) {
+  const rows = await db.query<{ data: string }>(
+    `SELECT data FROM remote_agent_workflow_events WHERE workflow_run_id = $1
+     AND event_type IN ('workflow_completed', 'workflow_failed', 'workflow_cancelled')
+     ORDER BY event_order DESC`,
+    [runId]
+  );
+  const data: unknown = JSON.parse(rows.rows[0]?.data ?? '{}');
+  expect(data).toHaveProperty('terminal_record');
+  return terminalRecordSchema.parse(
+    typeof data === 'object' && data !== null && 'terminal_record' in data
+      ? data.terminal_record
+      : undefined
+  );
+}
+
+async function seedNodeEvent(
+  runId: string,
+  nodeId: string,
+  eventType: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  await db.query(
+    `INSERT INTO remote_agent_workflow_events (id, workflow_run_id, event_type, step_name, data)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [crypto.randomUUID(), runId, eventType, nodeId, JSON.stringify(data)]
+  );
+}
+
+describe('terminal records retain durable run evidence', () => {
+  test('failure before flip keeps discoveries, authored result and cascade provenance after files disappear', async () => {
+    const root = trackTempRoot(await realpath(await mkdtemp(join(tmpdir(), 'terminal-record-'))));
+    process.env.ARCHON_HOME = root;
+    const runId = 'delivery-died-before-flip';
+    await seed(runId, 'running', "datetime('now')", {
+      [RUN_GRAPH_METADATA_KEY]: {
+        node_ids: ['discover', 'pr', 'validate', 'deliver', 'flip', 'report'],
+        returns: 'pr',
+      },
+    });
+    await db.query(
+      "UPDATE remote_agent_workflow_runs SET output_root = $2, outcome = 'succeeded' WHERE id = $1",
+      [runId, root]
+    );
+    const artifactsDir = getRunArtifactsDirForRoot(root, runId);
+    await mkdir(join(artifactsDir, 'discoveries'), { recursive: true });
+    await writeFile(
+      join(artifactsDir, 'discoveries', 'implement.json'),
+      '{"title":"Found a defect"}'
+    );
+    await mkdir(join(artifactsDir, 'nodes'));
+    await writeFile(join(artifactsDir, 'nodes', 'discover.md'), 'Discovery details');
+    await writeFile(
+      join(artifactsDir, 'nodes', 'discover.meta.json'),
+      JSON.stringify({
+        nodeId: 'discover',
+        outputType: 'discovery',
+        path: 'nodes/discover.md',
+        runId,
+        producedAt: '2026-09-09T10:00:00.000Z',
+        size: 17,
+      })
+    );
+    await seedNodeEvent(runId, 'discover', 'node_completed', { node_output: 'Discovery details' });
+    const authoredValue = { pr: 123, ready: true };
+    await seedNodeEvent(runId, 'pr', 'node_completed', {
+      node_output: JSON.stringify(authoredValue),
+      structured_output: authoredValue,
+    });
+    await seedNodeEvent(runId, 'validate', 'node_failed', { error: 'tests failed' });
+    for (const nodeId of ['deliver', 'flip', 'report']) {
+      await seedNodeEvent(runId, nodeId, 'node_skipped', {
+        reason: 'trigger_rule',
+        cause: { kind: 'upstream_failed', origin: 'validate' },
+      });
+    }
+
+    await failWorkflowRun(runId, 'Delivery failed: tests failed');
+    const record = await terminalRecord(runId);
+    expect(record).toMatchObject({
+      run_id: runId,
+      status: 'failed',
+      outcome: 'succeeded',
+      error: 'Delivery failed: tests failed',
+      first_failed_node: 'validate',
+      returns: { availability: 'available', node_id: 'pr', value: authoredValue },
+    });
+    expect(record.nodes).toContainEqual(
+      expect.objectContaining({
+        node_id: 'report',
+        state: 'skipped',
+        cause: { kind: 'upstream_failed', origin: 'validate' },
+      })
+    );
+    expect(record.artifacts.files).toContainEqual(
+      expect.objectContaining({
+        path: 'discoveries/implement.json',
+      })
+    );
+    expect(record.artifacts.files).toContainEqual(
+      expect.objectContaining({
+        path: 'nodes/discover.md',
+        metadata: expect.objectContaining({ outputType: 'discovery' }),
+      })
+    );
+    await removeTempTree(root);
+    expect(await terminalRecord(runId)).toEqual(record);
+  });
+
+  test('cancellation preserves an in-flight state instead of inventing a terminal node result', async () => {
+    const runId = 'terminal-in-flight';
+    await seed(runId, 'running', "datetime('now')", {
+      [RUN_GRAPH_METADATA_KEY]: { node_ids: ['working', 'later'], returns: 'later' },
+    });
+    await seedNodeEvent(runId, 'working', 'node_started', {});
+    await cancelWorkflowRun(runId);
+    expect((await terminalRecord(runId)).nodes).toEqual([
+      { node_id: 'working', state: 'running' },
+      { node_id: 'later', state: 'pending' },
+    ]);
+  });
+
+  test('event insertion rejection rolls status back even after projection reads succeed', async () => {
+    const runId = 'terminal-insert-rejected';
+    await seed(runId, 'running', "datetime('now')");
+    await db.query(
+      `CREATE TRIGGER reject_terminal_record BEFORE INSERT ON remote_agent_workflow_events
+      WHEN NEW.workflow_run_id = '${runId}'
+      BEGIN SELECT RAISE(ABORT, 'record insertion denied'); END`,
+      []
+    );
+    try {
+      await expect(failWorkflowRun(runId, 'original failure')).rejects.toThrow(
+        'record insertion denied'
+      );
+    } finally {
+      await db.query('DROP TRIGGER reject_terminal_record', []);
+    }
+    expect((await getWorkflowRun(runId))?.status).toBe('running');
+    expect(await countEvents(runId, 'workflow_failed')).toBe(0);
+  });
+
+  test('a resumed run hides its old record, and a later cancellation records the new observation', async () => {
+    const runId = 'terminal-record-resume';
+    await seed(runId, 'running', "datetime('now')");
+    await failWorkflowRun(runId, 'first attempt failed');
+    const original = await terminalRecord(runId);
+    await resumeWorkflowRun(runId);
+    const events = await db.query<{ event_type: string; step_name: string | null; data: string }>(
+      'SELECT event_type, step_name, data FROM remote_agent_workflow_events WHERE workflow_run_id = $1 ORDER BY event_order',
+      [runId]
+    );
+    expect(
+      getTerminalRecord(
+        'running',
+        events.rows.map(event => ({ ...event, data: JSON.parse(event.data) }))
+      )
+    ).toBeNull();
+    await cancelWorkflowRun(runId);
+    expect((await terminalRecord(runId)).status).toBe('cancelled');
+    expect(original.status).toBe('failed');
+    expect(await countEvents(runId, 'workflow_failed')).toBe(1);
+    expect(await countEvents(runId, 'workflow_cancelled')).toBe(1);
   });
 });

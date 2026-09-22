@@ -1,5 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import { classifyAndFormatError } from './error-formatter';
+import { WorkflowAdoptionError } from '../operations/workflow-adoption';
+import { TerminalStatusWriteError } from '@archon/workflows/terminal-status-write';
+import { buildAiProfile, resolveTierWithFallback } from '@archon/workflows/model-validation';
 
 describe('classifyAndFormatError', () => {
   describe('rate limit errors', () => {
@@ -183,7 +186,7 @@ describe('classifyAndFormatError', () => {
   });
 
   describe('Codex auth errors', () => {
-    test('detects Codex 401 retry exhaustion', () => {
+    test('detects Codex 401 retry exhaustion via "Codex query failed:" wrapper', () => {
       const result = classifyAndFormatError(
         new Error('Codex query failed: exceeded retry limit, last status: 401 Unauthorized')
       );
@@ -191,10 +194,263 @@ describe('classifyAndFormatError', () => {
       expect(result).toContain('codex login');
     });
 
+    test('detects Codex 401 auth failure via "Codex auth error:" wrapper (provider-enriched shape)', () => {
+      // classifyAndEnrichCodexError wraps messages whose AUTH_PATTERNS match
+      // (here: "401" and "Unauthorized") as `Codex auth error: <inner>`. This
+      // is the shape the provider actually emits for a 401 auth failure
+      // (#2509 R1) — the `auth` class is excluded from retry and thrown
+      // immediately (provider.ts:856), not the synthetic `Codex query
+      // failed:` shape.
+      const result = classifyAndFormatError(
+        new Error('Codex auth error: exceeded retry limit, last status: 401 Unauthorized')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
     test('detects Codex query failed with Unauthorized', () => {
       const result = classifyAndFormatError(new Error('Codex query failed: Unauthorized'));
       expect(result).toContain('Codex authentication error');
       expect(result).toContain('codex login');
+    });
+
+    describe('"Codex auth error:" wrapper routes unconditionally (#2509 R1)', () => {
+      // The provider only wraps a message as `Codex auth error:` after its own
+      // AUTH_PATTERNS check already classified it as auth
+      // (packages/providers/src/codex/provider.ts:307-315, 848-851). These
+      // inner phrases don't appear in the formatter's OAuth-refresh substring
+      // list, so before the fix they fell through to a generic message
+      // instead of Codex guidance — the same misdirection #2509 reports, for
+      // different real phrasing the provider already classifies as auth.
+      test.each([
+        ['authentication failed', 'authentication'],
+        ['unauthorized', 'unauthorized'],
+        ['403 Forbidden: insufficient scope', '403'],
+        ['Your credit balance is too low to access the API', 'credit balance'],
+        ['invalid token provided', 'invalid token'],
+      ])('routes "%s" (AUTH_PATTERNS: %s) to Codex auth guidance', inner => {
+        const result = classifyAndFormatError(new Error(`Codex auth error: ${inner}`));
+        expect(result).toContain('Codex authentication error');
+        expect(result).toContain('codex login');
+        expect(result).not.toContain('Claude authentication');
+        // "invalid token provided" contains the word "token", which the
+        // generic fallback's sensitive-data filter used to strip along with
+        // all other detail — the unconditional route must bypass that filter.
+        expect(result).not.toContain('unexpected error occurred');
+      });
+    });
+  });
+
+  describe('Codex OAuth refresh-token errors (#2509)', () => {
+    // Regression for GitHub #2509: a Codex-wrapped OAuth refresh error used
+    // to be routed to Claude `/login` guidance because the OAuth-refresh
+    // branch matched provider-agnostic refresh phrases without a Codex-side
+    // prefix check, so provider-wrapped shapes (Codex auth error: / Codex
+    // unknown: / codex_turn_failed: / codex_stream_incomplete:) fell through
+    // to the Claude branch. The Codex-side prefix check now catches every
+    // shape the provider/orchestrator actually emits.
+
+    test('routes "Codex query failed:" refresh-token race to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error(
+          'Codex query failed: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+        )
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
+    test('routes "Codex auth error:" refresh-token race to Codex auth guidance (provider throw shape)', () => {
+      // The actual provider throw shape when AUTH_PATTERNS doesn't match
+      // (refresh-token messages don't match AUTH_PATTERNS, so this is the
+      // `Codex unknown:` path; using `Codex auth error:` here to also cover
+      // the case where a future AUTH_PATTERNS addition wraps it as auth).
+      const result = classifyAndFormatError(
+        new Error(
+          'Codex auth error: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+        )
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
+    test('routes "Codex unknown:" refresh-token race to Codex auth guidance (provider throw shape)', () => {
+      // The actual provider throw shape when AUTH_PATTERNS doesn't match
+      // (none of "credit balance", "unauthorized", "authentication",
+      // "invalid token", "401", "403" appears in a refresh-token message),
+      // so classifyAndEnrichCodexError wraps it as `Codex unknown: <inner>`
+      // (provider.ts:854). This was the unreachable shape #2509 R1
+      // identified — it must now route to Codex auth guidance, not Claude.
+      const result = classifyAndFormatError(
+        new Error(
+          'Codex unknown: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+        )
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
+    test('routes "codex_turn_failed:" synthetic shape to Codex auth guidance (orchestrator isError shape)', () => {
+      // The orchestrator's isError branch joins errorSubtype + errors[] into
+      // `codex_turn_failed: <inner>` (orchestrator-agent.ts:2522-2524). When
+      // the underlying provider turn.failed message is a refresh-token race,
+      // this is the shape the formatter sees.
+      const result = classifyAndFormatError(
+        new Error(
+          'codex_turn_failed: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+        )
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
+    test('routes "codex_stream_incomplete:" synthetic shape to Codex auth guidance (orchestrator isError shape)', () => {
+      // The orchestrator's isError branch also emits `codex_stream_incomplete:
+      // <inner>` for the post-loop fail-stop path (orchestrator-agent.ts:
+      // 2756-2758). The provider's `streamCodexEvents` yields this chunk
+      // when the iterator closes without turn.completed / turn.failed (e.g.
+      // model rejected before the turn started).
+      const result = classifyAndFormatError(
+        new Error(
+          'codex_stream_incomplete: Your refresh token was already used. Please log out and sign in again.'
+        )
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+
+    test('routes Codex-wrapped "refresh token" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: refresh token already used')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+
+    test('routes Codex-wrapped "log out and sign in" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: Please log out and sign in again.')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+
+    test('routes Codex-wrapped "OAuth token has expired" to Codex auth guidance', () => {
+      // No "401" / "Unauthorized" present, so the auth-indicator half of
+      // the branch must still fire on the refresh-phrase half.
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: OAuth token has expired')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+
+    test('routes Codex-wrapped "sign-in has expired" to Codex auth guidance (#2509 R2 coverage)', () => {
+      // The "sign-in has expired" phrase is in the Codex-side branch's OR
+      // chain but had no Codex-wrapped test (#2509 R2). A future refactor
+      // that drops this phrase from the OR would otherwise let the next
+      // branch (Claude-OAuth) match and re-introduce #2509's misroute.
+      const result = classifyAndFormatError(new Error('Codex query failed: sign-in has expired'));
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+      expect(result).not.toContain('Claude authentication');
+    });
+  });
+
+  describe('raw orchestrator prefixes reject a bare "401" (#2509 R2)', () => {
+    // Codex query failed:/codex_turn_failed:/codex_stream_incomplete: carry
+    // raw upstream text (provider.ts / orchestrator-agent.ts) that never
+    // passes through the provider's own classifyCodexError/AUTH_PATTERNS
+    // check, unlike every `Codex auth error:`-classified shape above. A bare
+    // "401" in that raw text is not a reliable auth signal — it can appear
+    // in unrelated internal errors like a port or a byte offset — so these
+    // three prefixes require the more specific word "Unauthorized" instead.
+    test('does not route "Codex query failed:" with an unrelated "401" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: connect ECONNREFUSED 127.0.0.1:401')
+      );
+      expect(result).not.toContain('Codex authentication');
+      expect(result).not.toContain('codex login');
+    });
+
+    test('does not route "codex_turn_failed:" with an unrelated "401" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('codex_turn_failed: internal error at offset 401 while parsing response body')
+      );
+      expect(result).not.toContain('Codex authentication');
+      expect(result).not.toContain('codex login');
+    });
+
+    test('does not route "codex_stream_incomplete:" with an unrelated "401" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('codex_stream_incomplete: retry counter reached 401 before stream closed')
+      );
+      expect(result).not.toContain('Codex authentication');
+      expect(result).not.toContain('codex login');
+    });
+
+    test('still routes "Codex query failed:" carrying "Unauthorized" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: connect refused, 401 Unauthorized')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+
+    test('still routes "codex_turn_failed:" carrying "Unauthorized" to Codex auth guidance', () => {
+      const result = classifyAndFormatError(new Error('codex_turn_failed: 401 Unauthorized'));
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+
+    test('routes a lowercase "unauthorized" in a raw-prefixed message to Codex auth guidance (#2509 R8)', () => {
+      // The provider's own classifyCodexError lowercases before comparing against
+      // AUTH_PATTERNS, so it treats "unauthorized" and "Unauthorized" identically.
+      // This raw-prefix guard must not require the capitalized form specifically.
+      const result = classifyAndFormatError(
+        new Error('Codex query failed: request failed: unauthorized')
+      );
+      expect(result).toContain('Codex authentication error');
+      expect(result).toContain('codex login');
+    });
+  });
+
+  describe('non-auth-classified Codex prefixes reject a bare "401"/"403" (#2509 R7, R9)', () => {
+    // Before the fix, AUTH_PATTERNS's bare "401"/"403" match meant a message
+    // containing either digit sequence could never reach classifyCodexError's
+    // 'crash'/'unknown' branches — it was always classified 'auth' first and
+    // wrapped as `Codex auth error:`, which error-formatter.ts trusts
+    // unconditionally. With AUTH_PATTERNS tightened, a message like this one
+    // now genuinely reaches the provider's `Codex unknown:`/`Codex crash:`
+    // wrap — proving the misroute doesn't just relocate to this branch's own
+    // (now-removed) bare-401 fallback.
+    //
+    // Asserting the exact returned string (not just the absence of
+    // Codex-specific phrasing) matters: the general auth branch a few lines
+    // below also used to accept a bare "401" with no prefix gate at all, so
+    // these two inputs used to land on generic-but-still-wrong "check your
+    // API key" guidance instead of the accurate branch two lines further
+    // down (#2509 R9). A negative-only assertion can't tell the difference.
+    test('routes "Codex unknown:" with an unrelated "401" to the ECONNREFUSED/database branch, not any auth guidance', () => {
+      const result = classifyAndFormatError(
+        new Error('Codex unknown: connect ECONNREFUSED 127.0.0.1:401')
+      );
+      expect(result).toBe('⚠️ Database connection issue. Please try again in a moment.');
+      expect(result).not.toContain('authentication');
+    });
+
+    test('routes "Codex crash:" with an unrelated "401" to the timeout branch, not any auth guidance', () => {
+      const result = classifyAndFormatError(new Error('Codex crash: timeout after 401ms'));
+      expect(result).toBe(
+        '⚠️ Request timed out. The AI service may be slow. Try again or use /reset.'
+      );
+      expect(result).not.toContain('authentication');
     });
   });
 
@@ -214,9 +470,16 @@ describe('classifyAndFormatError', () => {
       expect(result).toContain('authentication error');
     });
 
-    test('detects "401" in message', () => {
+    test('does not treat a bare "401" alone as sufficient auth signal (#2509 R9)', () => {
+      // A bare "401" used to be enough on its own — same "bare digits aren't
+      // enough signal" defect already fixed on the Codex-specific checks
+      // above (#2509 R2, R7, R8). This message carries no other auth word
+      // ("API key" / "authentication_error" / "authentication error"), so it
+      // now falls through to the generic fallback instead of the auth
+      // message.
       const result = classifyAndFormatError(new Error('HTTP 401 Unauthorized'));
-      expect(result).toContain('authentication error');
+      expect(result).toBe('⚠️ Error: HTTP 401 Unauthorized. Try /reset if issue persists.');
+      expect(result).not.toContain('authentication error');
     });
 
     test('does not false-positive on generic messages containing "auth"', () => {
@@ -442,5 +705,56 @@ describe('classifyAndFormatError', () => {
       const result = classifyAndFormatError(new Error('Codex query failed: token limit reached'));
       expect(result).toBe('⚠️ AI error: token limit reached. Try /reset if issue persists.');
     });
+  });
+
+  describe('workflow adoption refusals', () => {
+    // Adoption refusals are authored guidance (fail-loud contract, #2747 R9); they
+    // must reach chat/web users verbatim instead of the generic fallback.
+    test('delivers a WorkflowAdoptionError message verbatim', () => {
+      const refusal =
+        "Cannot adopt run 'prior-run': this conversation already continues run 'x' (paused).";
+      const result = classifyAndFormatError(new WorkflowAdoptionError(refusal));
+      expect(result).toBe(`⚠️ ${refusal}`);
+    });
+  });
+
+  describe('terminal status write failures', () => {
+    // #2910: this is the terminus for the orchestrator's /invoke-workflow and
+    // /workflow run dispatch paths — neither has a closer catch, so handleMessage's
+    // catch formats the error here. A run whose status was never recorded must not
+    // read as a generic error the user is told to /reset away from.
+    test('names the unrecorded status instead of the generic fallback', () => {
+      const result = classifyAndFormatError(
+        new TerminalStatusWriteError(new Error('SQLITE_BUSY: database is locked'))
+      );
+      expect(result).toContain('final status could not be saved');
+      expect(result).toContain('/workflow status');
+      expect(result).not.toContain('/reset');
+    });
+
+    test('an ordinary database error still gets the generic database guidance', () => {
+      const result = classifyAndFormatError(new Error('database is locked'));
+      expect(result).not.toContain('final status could not be saved');
+    });
+  });
+});
+
+describe('TierResolutionError', () => {
+  test('delivers the real tier-resolution guidance verbatim (never the generic fallback)', () => {
+    // The actual error the chat path hits when the default provider ships no
+    // built-in tiers and none are configured — derived, not restated.
+    let thrown: Error | undefined;
+    try {
+      resolveTierWithFallback(buildAiProfile('pi'), 'large');
+    } catch (err) {
+      thrown = err as Error;
+    }
+    if (!thrown) throw new Error('expected resolveTierWithFallback to throw');
+
+    const formatted = classifyAndFormatError(thrown);
+    expect(formatted).toBe(`⚠️ ${thrown.message}`);
+    expect(formatted).toContain('archon ai tier set');
+    expect(formatted).toContain('https://archon.diy/');
+    expect(formatted).not.toContain('/reset');
   });
 });

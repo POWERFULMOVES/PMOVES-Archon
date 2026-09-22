@@ -258,6 +258,7 @@ export class MessagePersistence {
         }));
         const metadata = {
           ...(toolCalls.length > 0 ? { toolCalls } : {}),
+          ...(seg.category ? { category: seg.category } : {}),
           ...(seg.workflowDispatch ? { workflowDispatch: seg.workflowDispatch } : {}),
           ...(seg.workflowResult ? { workflowResult: seg.workflowResult } : {}),
         };

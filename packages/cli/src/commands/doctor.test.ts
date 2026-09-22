@@ -10,8 +10,11 @@
 import { describe, it, expect, spyOn, afterEach, beforeEach } from 'bun:test';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import * as git from '@archon/git';
+import { canonicalizeProjectPath } from '@archon/paths';
+import { removeTempTree } from '@archon/paths/test-utils';
+import { copyArchonSkill } from './skill';
 import {
   checkClaudeBinary,
   checkCodexBinary,
@@ -26,6 +29,7 @@ import {
   checkTelegram,
   checkTelemetry,
   checkFolderProject,
+  checkArchonSkill,
   defaultLoadClaudeBinaryDeps,
   doctorCommand,
   type ClaudeBinaryDeps,
@@ -267,6 +271,23 @@ describe('checkCodexBinary', () => {
     );
     expect(result.status).toBe('fail');
     expect(result.message).toContain('Codex CLI binary not found');
+    expect(execSpy).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a stale-pin candidate hint verbatim', async () => {
+    const diagnostic =
+      'assistants.codex.codexBinaryPath is set to "/stale/codex" but the file does not exist.\n\n' +
+      'A Codex binary was found at /opt/codex.\n' +
+      'Update assistants.codex.codexBinaryPath to that path, or remove codexBinaryPath to let Archon detect it.';
+    const result = await checkCodexBinary(
+      { DEFAULT_AI_ASSISTANT: 'codex' },
+      loadDeps(notConfigured),
+      async () => {
+        throw new Error(diagnostic);
+      }
+    );
+
+    expect(result).toEqual({ label: 'Codex binary', status: 'fail', message: diagnostic });
     expect(execSpy).not.toHaveBeenCalled();
   });
 
@@ -650,6 +671,34 @@ describe('checkFolderProject', () => {
     expect(result.status).toBe('skip');
     expect(result.message).toContain('database unavailable');
   });
+
+  // #2927: doctor has to ask the database the same question the CLI gate asks,
+  // or it reports "not a registered folder project" for a directory every other
+  // command resolves fine. It looked the raw cwd up, so any directory reached
+  // through a link — or through a Windows 8.3 short path — missed.
+  it('looks up the shared canonicalizer output, not the raw cwd', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'archon-doctor-canon-'));
+    const target = join(root, 'platform');
+    const link = join(root, 'platform-link');
+    mkdirSync(target);
+    // 'junction' is ignored on POSIX and needs no elevated privileges on Windows.
+    symlinkSync(target, link, 'junction');
+    const lookedUp: string[] = [];
+    try {
+      const deps = makeDeps({
+        findCodebaseByDefaultCwd: async (cwd: string) => {
+          lookedUp.push(cwd);
+          return null;
+        },
+      });
+
+      await checkFolderProject(link, async () => deps);
+
+      expect(lookedUp).toEqual([await canonicalizeProjectPath(target)]);
+    } finally {
+      await removeTempTree(root);
+    }
+  });
 });
 
 describe('checkWorkspaceWritable', () => {
@@ -861,6 +910,87 @@ describe('checkTelemetry', () => {
     const result = await checkTelemetry();
     expect(result.status).toBe('skip');
     expect(result.message).toContain('ARCHON_TELEMETRY_DISABLED');
+  });
+});
+
+describe('checkArchonSkill', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'archon-doctor-skill-'));
+  });
+
+  afterEach(async () => {
+    await removeTempTree(tmp);
+  });
+
+  it('skips when no skill trees are present', async () => {
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('skip');
+    expect(result.label).toBe('Archon skill');
+  });
+
+  it('fails when a retired skill root is still on disk', async () => {
+    mkdirSync(join(tmp, '.claude', 'skills', 'archon'), { recursive: true });
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('retired skill root');
+    expect(result.message).toContain('archon skill install');
+  });
+
+  it('fails when skills exist but archon-cli is missing', async () => {
+    mkdirSync(join(tmp, '.claude', 'skills'), { recursive: true });
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('archon-cli is missing');
+  });
+
+  it('fails when one existing skills tree is missing archon-cli', async () => {
+    await copyArchonSkill(tmp);
+    await removeTempTree(join(tmp, '.agents', 'skills', 'archon-cli'));
+
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain(join(tmp, '.agents', 'skills'));
+  });
+
+  it('checks only skill trees that exist', async () => {
+    await copyArchonSkill(tmp);
+    await removeTempTree(join(tmp, '.agents'));
+
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('pass');
+  });
+
+  it('fails when an installed archon-cli differs from the bundled skill', async () => {
+    await copyArchonSkill(tmp);
+    writeFileSync(join(tmp, '.claude', 'skills', 'archon-cli', 'SKILL.md'), 'stale');
+
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('differs from the skill bundled');
+  });
+
+  it('fails when either installed archon-cli tree contains an extra file', async () => {
+    await copyArchonSkill(tmp);
+
+    for (const root of ['.claude', '.agents']) {
+      const extra = join(tmp, root, 'skills', 'archon-cli', 'retired.md');
+      writeFileSync(extra, 'retired guidance');
+
+      const result = await checkArchonSkill(tmp);
+      expect(result.status).toBe('fail');
+      expect(result.message).toContain(join(tmp, root, 'skills', 'archon-cli'));
+
+      await removeTempTree(extra);
+    }
+  });
+
+  it('passes when both installed copies match the bundled skill', async () => {
+    await copyArchonSkill(tmp);
+    const result = await checkArchonSkill(tmp);
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('archon-cli');
   });
 });
 
