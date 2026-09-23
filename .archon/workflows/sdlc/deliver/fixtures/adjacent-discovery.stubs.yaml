@@ -1,6 +1,5 @@
 # An adjacent proved defect survives in discovery artifacts and the report but
 # does not turn an otherwise-ready review into correction work.
-impl__record-start: '{"start":"recorded"}'
 impl__implement:
   done: true
   green: true
@@ -31,7 +30,13 @@ review__synthesize:
   findings_summary: "stub: no blockers; one adjacent discovery preserved"
   report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
 gate-ready: '{"ready":"true"}'
+validate__mode: '{"comparison":false}'
 validate__validate:
+  green: true
+  red_cause: ""
+  summary: "stub: full gate green"
+validate__result:
+  evidence: null
   green: true
   red_cause: ""
   summary: "stub: full gate green"

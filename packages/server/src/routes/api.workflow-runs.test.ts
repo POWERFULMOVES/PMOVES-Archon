@@ -458,6 +458,7 @@ const MOCK_RUNNING_RUN = {
   parent_run_id: null,
   adopted_from_run_id: null,
   output_root: null,
+  checkout_baseline: null,
 } satisfies MockWorkflowRun;
 
 const MOCK_COMPLETED_RUN = {
@@ -3413,6 +3414,7 @@ describe('GET /api/runs/:runId/artifacts', () => {
       id: runId,
       codebase_id: 'cb-renamed',
       output_root: root,
+      checkout_baseline: null,
     }));
     mockGetCodebase.mockImplementationOnce(async () => ({
       name: 'acme/renamed-since',
@@ -3444,6 +3446,7 @@ describe('GET /api/runs/:runId/artifacts', () => {
       codebase_id: 'cb-1',
       // A root from the OLD home — the shape every run has after a relocation.
       output_root: '/previous/archon/home/workspaces/_local/workspace',
+      checkout_baseline: null,
     }));
     mockGetCodebase.mockImplementationOnce(async () => ({
       name: 'workspace',
@@ -3468,6 +3471,7 @@ describe('GET /api/runs/:runId/artifacts', () => {
       id: 'run-escape-root',
       codebase_id: null,
       output_root: '/etc',
+      checkout_baseline: null,
     }));
     const { app } = makeApp();
     const response = await app.request('/api/runs/run-escape-root/artifacts');
@@ -3642,6 +3646,7 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
       id: runId,
       codebase_id: 'cb-1',
       output_root: '/previous/archon/home/workspaces/_local/workspace',
+      checkout_baseline: null,
     }));
     mockGetCodebase.mockImplementationOnce(async () => ({
       name: 'workspace',
@@ -3662,6 +3667,7 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
       id: 'run-serve-escape-root',
       codebase_id: null,
       output_root: '/etc',
+      checkout_baseline: null,
     }));
     const { app } = makeApp();
     const response = await app.request('/api/artifacts/run-serve-escape-root/passwd');
@@ -3688,6 +3694,38 @@ describe('GET /api/artifacts/:runId/* storage-key resolution', () => {
     expect(response.status).toBe(404);
     const body = (await response.json()) as { error: string };
     expect(body.error).toBe('Artifact file not found');
+  });
+
+  test('a backslash climb out of the artifacts directory is refused on Windows', async () => {
+    // The route's `..` segment check splits on `/` only. On Windows `\` is a
+    // separator too, so only the containment check stops `..\` from leaving the
+    // run's directory for a sibling run whose name shares this one's prefix.
+    // On POSIX `\` is an ordinary filename character and the name stays inside.
+    const runId = 'run-serve-backslash';
+    const runsDir = join(wsRoot(), '_local', 'workspace', 'artifacts', 'runs');
+    await mkdir(join(runsDir, runId), { recursive: true });
+    await mkdir(join(runsDir, `${runId}-old`), { recursive: true });
+    await writeFile(join(runsDir, `${runId}-old`, 'plan.md'), '# another run');
+    mockGetWorkflowRun.mockImplementationOnce(async () => ({
+      ...MOCK_RUNNING_RUN,
+      id: runId,
+      codebase_id: 'cb-local',
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      name: 'workspace',
+      kind: 'repo',
+      default_cwd: '/home/u/workspace',
+    }));
+    const { app } = makeApp();
+    const escape = encodeURIComponent(`..\\${runId}-old\\plan.md`);
+    const response = await app.request(`/api/artifacts/${runId}/${escape}`);
+
+    if (process.platform === 'win32') {
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Invalid filename' });
+    } else {
+      expect(response.status).toBe(404);
+    }
   });
 
   test('an artifact pointer from a run result addresses this route with no extra machinery', async () => {

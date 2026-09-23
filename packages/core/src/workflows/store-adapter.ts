@@ -61,6 +61,8 @@ function collectOAuthCredentialValues(
 export function createWorkflowStore(): IWorkflowStore {
   return {
     createWorkflowRun: workflowDb.createWorkflowRun,
+    claimPendingWorkflowRun: workflowDb.claimPendingWorkflowRun,
+    recordWorkflowRunCheckoutBaseline: workflowDb.recordWorkflowRunCheckoutBaseline,
     getWorkflowRun: workflowDb.getWorkflowRun,
     findChildRuns: workflowDb.findChildRuns,
     getRunAncestry: workflowDb.getRunAncestry,

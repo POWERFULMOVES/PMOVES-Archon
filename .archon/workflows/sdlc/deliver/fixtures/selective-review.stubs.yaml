@@ -1,7 +1,6 @@
 # Dry-run fixture: code, seams, simplify, and tests run by default while the
 # classifier selects docs. The fixture keeps deterministic code stubbed; the
 # loader test protects the classifier-binding seam itself.
-impl__record-start: '{"start":"recorded"}'
 impl__implement:
   done: true
   green: true
@@ -32,7 +31,13 @@ review__synthesize:
   findings_summary: "stub: selected review is clean"
   report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
 gate-ready: '{"ready":"true"}'
+validate__mode: '{"comparison":false}'
 validate__validate:
+  green: true
+  red_cause: ""
+  summary: "stub: full gate green"
+validate__result:
+  evidence: null
   green: true
   red_cause: ""
   summary: "stub: full gate green"

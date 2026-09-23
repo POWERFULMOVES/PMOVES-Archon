@@ -24,10 +24,11 @@ import {
   truncateSync,
   writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { getArchonHome, isDocker } from '@archon/paths';
-import { removeTempTree } from '@archon/paths/test-utils';
+import { removeTempTree, trackTempRoots } from '@archon/paths/test-utils';
 import {
   getProjectStoragePaths as getProjectStoragePathsReal,
   getRunArtifactsDirForRoot as getRunArtifactsDirForRootReal,
@@ -5138,6 +5139,7 @@ describe('workflowGetCommand', () => {
 
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-pw',
+      checkout_baseline: null,
       workflow_name: 'gated',
       working_path: '/repo',
       status: 'completed',
@@ -5170,6 +5172,7 @@ describe('workflowGetCommand', () => {
 
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-pw',
+      checkout_baseline: null,
       workflow_name: 'gated',
       working_path: '/repo',
       status: 'completed',
@@ -5200,6 +5203,7 @@ describe('workflowGetCommand', () => {
 
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-skip-cause',
+      checkout_baseline: null,
       workflow_name: 'deliver',
       working_path: '/repo',
       status: 'failed',
@@ -5232,6 +5236,7 @@ describe('workflowGetCommand', () => {
 
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-timeout-skip',
+      checkout_baseline: null,
       workflow_name: 'deliver',
       working_path: '/repo',
       status: 'completed',
@@ -5277,6 +5282,7 @@ describe('workflowGetCommand', () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-xyz',
+      checkout_baseline: null,
       workflow_name: 'implement',
       status: 'failed',
       working_path: '/tmp/wt',
@@ -5290,12 +5296,55 @@ describe('workflowGetCommand', () => {
     expect(consoleSpy).toHaveBeenCalledWith('  Name:   implement');
     expect(consoleSpy).toHaveBeenCalledWith('  Status: failed');
     expect(consoleSpy).toHaveBeenCalledWith('  Error:  Step failed: build');
+    expect(consoleSpy).toHaveBeenCalledWith('  Start:  (not recorded)');
+  });
+
+  it('prints the checkout the run started from', async () => {
+    const workflowDb = await import('@archon/core/db/workflows');
+    (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'run-start',
+      checkout_baseline: {
+        kind: 'git',
+        sampledAt: '2026-09-23T10:00:00.000Z',
+        commit: 'a'.repeat(40),
+        tree: 'b'.repeat(40),
+        worktree: {
+          status: 'dirty',
+          content: 'complete',
+          staged: 1,
+          unstaged: 2,
+          untracked: 3,
+          manifest: {
+            pointer: {
+              type: 'archon_artifact',
+              run_id: 'run-start',
+              path: '.archon/checkout/x.json',
+            },
+            sha256: 'c'.repeat(64),
+            entries: 6,
+          },
+        },
+        cutFromCommit: 'd'.repeat(40),
+      },
+      workflow_name: 'implement',
+      status: 'completed',
+      working_path: '/tmp/wt',
+      started_at: new Date(),
+      metadata: {},
+    });
+
+    await workflowGetCommand('run-start');
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      `  Start:  ${'a'.repeat(40)} (dirty: 1 staged, 2 unstaged, 3 untracked, branch cut from ${'d'.repeat(40)})`
+    );
   });
 
   it('prints contradictory status and authored outcome as separate fields', async () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-contradictory',
+      checkout_baseline: null,
       workflow_name: 'review',
       status: 'completed',
       outcome: 'failed',
@@ -5314,6 +5363,7 @@ describe('workflowGetCommand', () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-json',
+      checkout_baseline: null,
       workflow_name: 'implement',
       status: 'completed',
       working_path: '/tmp/wt',
@@ -5348,6 +5398,7 @@ describe('workflowGetCommand', () => {
         started_at: new Date(),
         metadata: {},
         output_root: outputRoot,
+        checkout_baseline: null,
         codebase_id: 'cb-1',
       });
 
@@ -5377,6 +5428,7 @@ describe('workflowGetCommand', () => {
         started_at: new Date(),
         metadata: {},
         output_root: '/old-machine/.archon/workspaces/old/name',
+        checkout_baseline: null,
         codebase_id: 'cb-relocated',
       });
       // Both readers in workflow get consult the codebase row; the resolver
@@ -5416,6 +5468,7 @@ describe('workflowGetCommand', () => {
       started_at: new Date(),
       metadata: {},
       output_root: null,
+      checkout_baseline: null,
       codebase_id: null,
     });
 
@@ -5451,6 +5504,7 @@ describe('workflowGetCommand', () => {
         started_at: new Date(),
         metadata: {},
         output_root: decoyRoot,
+        checkout_baseline: null,
         codebase_id: null,
       });
 
@@ -5499,6 +5553,7 @@ describe('workflowGetCommand', () => {
         // current ARCHON_HOME via the run's codebase row, not walk the original
         // path.
         output_root: '/old-machine/.archon/workspaces/old/name',
+        checkout_baseline: null,
         codebase_id: 'cb-relocated-artifact',
       });
       // Both readers in workflow get consult the codebase row; the resolver
@@ -5542,6 +5597,7 @@ describe('workflowGetCommand', () => {
         started_at: new Date(),
         metadata: {},
         output_root: outputRoot,
+        checkout_baseline: null,
         codebase_id: 'cb-1',
       });
 
@@ -5593,6 +5649,7 @@ describe('workflowGetCommand', () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-gate-human',
+      checkout_baseline: null,
       workflow_name: 'validate',
       status: 'paused',
       working_path: '/tmp/wt',
@@ -5621,6 +5678,7 @@ describe('workflowGetCommand', () => {
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>)
       .mockResolvedValueOnce({
         id: 'run-wait-human',
+        checkout_baseline: null,
         workflow_name: 'validate',
         status: 'paused',
         working_path: '/tmp/wt',
@@ -5638,6 +5696,7 @@ describe('workflowGetCommand', () => {
       })
       .mockResolvedValueOnce({
         id: 'run-quota-human',
+        checkout_baseline: null,
         workflow_name: 'deliver',
         status: 'failed',
         working_path: '/tmp/wt',
@@ -5669,6 +5728,7 @@ describe('workflowGetCommand', () => {
     const workflowDb = await import('@archon/core/db/workflows');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-action-human',
+      checkout_baseline: null,
       workflow_name: 'deliver',
       status: 'paused',
       working_path: '/tmp/wt',
@@ -5703,6 +5763,7 @@ describe('workflowGetCommand', () => {
     const eventsDb = await import('@archon/core/db/workflow-events');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-v',
+      checkout_baseline: null,
       workflow_name: 'implement',
       status: 'running',
       working_path: '/tmp/wt',
@@ -5728,11 +5789,45 @@ describe('workflowGetCommand', () => {
     expect(parsed.transcript_path).toBeNull();
   });
 
+  it('reads attribution and observed duration from a terminal row without a start-row join', async () => {
+    const { startNodeExecution, finishNodeExecution, newNodeInvocation } =
+      await import('@archon/workflows/node-execution');
+    const { serializeNodeStateRecord } =
+      await import('@archon/workflows/node-record-serialization');
+    const completed = finishNodeExecution(
+      startNodeExecution({
+        runId: 'terminal-only',
+        path: 'work',
+        node: { id: 'work', kind: 'agent', source: { kind: 'inline', prompt: 'work' } },
+        invocation: newNodeInvocation(),
+        provider: 'codex',
+        model: 'requested-model',
+      }),
+      { status: 'completed' },
+      { durationMs: 17, resolvedModel: 'observed-model', costUsd: 0, output: { text: 'done' } }
+    );
+    const summaries = buildNodeSummaries([
+      {
+        ...serializeNodeStateRecord(completed),
+        id: 'terminal-row',
+        step_index: null,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+    expect(summaries[0]?.durationMs).toBe(17);
+    expect(summaries[0]?.execution?.binding.model?.resolved).toEqual({
+      source: 'provider',
+      value: 'observed-model',
+    });
+    expect(summaries[0]?.execution?.spend.costUsd).toEqual({ source: 'provider', value: 0 });
+  });
+
   it('emits raw events in verbose JSON when events=true', async () => {
     const workflowDb = await import('@archon/core/db/workflows');
     const eventsDb = await import('@archon/core/db/workflow-events');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-v',
+      checkout_baseline: null,
       workflow_name: 'implement',
       status: 'running',
       working_path: '/tmp/wt',
@@ -5760,6 +5855,7 @@ describe('workflowGetCommand', () => {
     const eventsDb = await import('@archon/core/db/workflow-events');
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'run-v',
+      checkout_baseline: null,
       workflow_name: 'implement',
       status: 'running',
       working_path: '/tmp/wt',
@@ -5808,6 +5904,7 @@ describe('workflowLogsCommand', () => {
     parent_run_id: null,
     adopted_from_run_id: null,
     output_root: projectRoot,
+    checkout_baseline: null,
   });
 
   const stdoutText = (): string =>
@@ -5880,6 +5977,7 @@ describe('workflowLogsCommand', () => {
     (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
       ...run('completed'),
       output_root: '/previous/archon/home/workspaces/acme/widget',
+      checkout_baseline: null,
     });
     (codebaseDb.getCodebase as ReturnType<typeof mock>).mockResolvedValueOnce({
       id: 'cb-1',
@@ -11643,6 +11741,7 @@ describe('workflowTestCommand', () => {
 
 describe('workflowRunCommand — adopt lane source recapture (#2660/#2747)', () => {
   let consoleSpy: ReturnType<typeof spyOn>;
+  const trackTempRoot = trackTempRoots();
 
   beforeEach(() => {
     consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
@@ -11707,6 +11806,46 @@ describe('workflowRunCommand — adopt lane source recapture (#2660/#2747)', () 
       adoptedRun: { id: 'run-old' },
       lane,
     });
+  }
+
+  // Keep source-capture I/O real: equal run IDs replace one physical directory.
+  // This exposes cleanup deleting the replacement even with the executor mocked.
+  async function stageRealCapture(
+    tempRoot: string,
+    opts: { sourceRoot: string; runId?: string }
+  ): Promise<WorkflowExecutor.PreparedWorkflowSource> {
+    const runId = opts.runId ?? randomUUID();
+    const captureRoot = join(tempRoot, 'staged-source', runId);
+    await removeTempTree(captureRoot);
+    mkdirSync(captureRoot, { recursive: true });
+    const anchor = {
+      root: captureRoot,
+      digest: `digest-${opts.sourceRoot}`,
+      config: { load_default_workflows: true, load_default_commands: true },
+    };
+    const manifest = {
+      version: 1 as const,
+      engine_version: 'test',
+      origin: opts.sourceRoot,
+      captured_at: new Date().toISOString(),
+      digest: anchor.digest,
+      file_count: 0,
+      byte_count: 0,
+      scopes: [],
+      source_config: anchor.config,
+    };
+    writeFileSync(join(captureRoot, 'manifest.json'), JSON.stringify(manifest));
+    const roots: WorkflowExecutor.WorkflowSourceRoots = {
+      project: join(captureRoot, 'project'),
+      globalWorkflows: join(captureRoot, 'global', 'workflows'),
+      globalCommands: join(captureRoot, 'global', 'commands'),
+      globalScripts: join(captureRoot, 'global', 'scripts'),
+      bundledWorkflows: join(captureRoot, 'bundled', 'workflows'),
+      bundledCommands: join(captureRoot, 'bundled', 'commands', 'defaults'),
+      kind: 'captured',
+      anchor,
+    };
+    return { runId, origin: opts.sourceRoot, manifest, anchor, roots };
   }
 
   it('adopts a normal run from a unique short run id prefix', async () => {
@@ -11833,6 +11972,44 @@ describe('workflowRunCommand — adopt lane source recapture (#2660/#2747)', () 
     expect(opts.adoptedFromRunId).toBe('run-old');
   });
 
+  it('preserves an explicit source when adoption recreates the prior branch checkout', async () => {
+    setupAdoptMocks({
+      kind: 'checkout-branch',
+      taskBranch: { kind: 'existing', branch: 'feature/live-pr' },
+    });
+    const isolation = await import('@archon/isolation');
+    const { executeWorkflow, prepareWorkflowSource } = await import('@archon/workflows/executor');
+    (isolation.getIsolationProvider as ReturnType<typeof mock>).mockReturnValueOnce({
+      create: mock(() =>
+        Promise.resolve({
+          provider: 'worktree' as const,
+          id: '/wt/recreated',
+          workingPath: '/wt/recreated',
+          branchName: 'feature/live-pr',
+          status: 'active' as const,
+          createdAt: new Date(),
+          metadata: { adopted: true },
+        })
+      ),
+      healthCheck: mock(() => Promise.resolve(true)),
+    });
+
+    // Explicit selection matters even when it names the invoking checkout.
+    await workflowRunCommand('/test/path', 'assist', 'hello', {
+      adoptRunId: 'run-old',
+      discoveryCwd: '/test/path',
+    });
+
+    expect(prepareWorkflowSource).toHaveBeenCalledTimes(1);
+    expect(prepareWorkflowSource).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sourceRoot: '/test/path' })
+    );
+    const executed = (executeWorkflow as ReturnType<typeof mock>).mock.calls.at(-1) as unknown[];
+    expect(executed[3]).toBe('/wt/recreated');
+    expect((executed[4] as { description: string }).description).toBe('Parent vintage');
+  });
+
   it('re-judges the declared-input gate against the branch vintage after recapture', async () => {
     // The parent checkout's YAML declares no inputs, so the invocation gate on entry
     // passes an input-less call; only the adopted branch's YAML requires one.
@@ -11862,6 +12039,95 @@ describe('workflowRunCommand — adopt lane source recapture (#2660/#2747)', () 
       workflowRunCommand('/test/path', 'assist', 'hello', { adoptRunId: 'run-old' })
     ).rejects.toThrow(/requires input/);
     expect(executeWorkflow).not.toHaveBeenCalled();
+  });
+
+  it(
+    'preserves the replacement capture when a detached child recaptures onto its own ' +
+      'pre-created run id (real files, #3217)',
+    async () => {
+      // Both capture calls use the detached child's pre-created run ID.
+      setupAdoptMocks();
+      const workflowDb = await import('@archon/core/db/workflows');
+      (workflowDb.getWorkflowRun as ReturnType<typeof mock>).mockResolvedValueOnce({
+        id: 'run-detached-child',
+        workflow_name: 'assist',
+        status: 'pending',
+      });
+      const { prepareWorkflowSource } = await import('@archon/workflows/executor');
+      const prepareMock = prepareWorkflowSource as ReturnType<typeof mock>;
+
+      const tempRoot = trackTempRoot(mkdtempSync(join(tmpdir(), 'archon-recapture-same-root-')));
+      // Matches the mocked DETACHED_RUN_OWNER_ENV value the SUT reads from
+      // '../utils/detached-run-control' (mocked at the top of this file).
+      const ownerEnvVar = 'ARCHON_DETACHED_RUN_OWNER';
+      const previousOwnerEnv = process.env[ownerEnvVar];
+      process.env[ownerEnvVar] = '1';
+      try {
+        prepareMock
+          .mockImplementationOnce((_deps: unknown, opts: { sourceRoot: string; runId?: string }) =>
+            stageRealCapture(tempRoot, opts)
+          )
+          .mockImplementationOnce((_deps: unknown, opts: { sourceRoot: string; runId?: string }) =>
+            stageRealCapture(tempRoot, opts)
+          );
+
+        await workflowRunCommand('/test/path', 'assist', 'hello', {
+          adoptRunId: 'run-old',
+          detachedRunId: 'run-detached-child',
+        });
+
+        const calls = prepareMock.mock.calls;
+        expect(calls).toHaveLength(2);
+        expect((calls[0][1] as { runId?: string }).runId).toBe('run-detached-child');
+        expect((calls[1][1] as { runId?: string }).runId).toBe('run-detached-child');
+
+        const replacementRoot = join(tempRoot, 'staged-source', 'run-detached-child');
+        const manifestPath = join(replacementRoot, 'manifest.json');
+        // The assertion the old code fails: the recapture's own cleanup deleted this
+        // file right after writing it, because stale.anchor.root === replacement's.
+        expect(existsSync(manifestPath)).toBe(true);
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { origin: string };
+        expect(manifest.origin).toBe('/wt/adopted');
+      } finally {
+        if (previousOwnerEnv === undefined) delete process.env[ownerEnvVar];
+        else process.env[ownerEnvVar] = previousOwnerEnv;
+      }
+    }
+  );
+
+  it('still cleans up the superseded staged capture when the replacement lands at a different root', async () => {
+    // Ordinary adoption uses separate roots and must reclaim the first capture.
+    setupAdoptMocks();
+    const { prepareWorkflowSource } = await import('@archon/workflows/executor');
+    const prepareMock = prepareWorkflowSource as ReturnType<typeof mock>;
+
+    const tempRoot = trackTempRoot(mkdtempSync(join(tmpdir(), 'archon-recapture-distinctroot-')));
+    const capturedRoots: string[] = [];
+    prepareMock
+      .mockImplementationOnce(
+        async (_deps: unknown, opts: { sourceRoot: string; runId?: string }) => {
+          const prepared = await stageRealCapture(tempRoot, opts);
+          capturedRoots.push(prepared.anchor.root);
+          return prepared;
+        }
+      )
+      .mockImplementationOnce(
+        async (_deps: unknown, opts: { sourceRoot: string; runId?: string }) => {
+          const prepared = await stageRealCapture(tempRoot, opts);
+          capturedRoots.push(prepared.anchor.root);
+          return prepared;
+        }
+      );
+
+    await workflowRunCommand('/test/path', 'assist', 'hello', { adoptRunId: 'run-old' });
+
+    expect(capturedRoots).toHaveLength(2);
+    const [originalRoot, replacementRoot] = capturedRoots;
+    expect(originalRoot).not.toBe(replacementRoot);
+    // The superseded original is reclaimed...
+    expect(existsSync(originalRoot as string)).toBe(false);
+    // ...and the replacement it was superseded BY survives.
+    expect(existsSync(join(replacementRoot as string, 'manifest.json'))).toBe(true);
   });
 });
 

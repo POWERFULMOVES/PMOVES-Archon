@@ -14,14 +14,33 @@ import '@archon/paths/strip-cwd-env-boot';
 // <cwd>/.archon/.env (repo scope, wins over user). Both with override: true.
 // See packages/paths/src/env-loader.ts and the three-path model (#1302 / #1303).
 import { loadArchonEnv } from '@archon/paths/env-loader';
-import { captureDetachedInstallContext, restoreDetachedInstallContext } from '@archon/paths';
+import {
+  captureDetachedInstallContext,
+  getArchonConfigPath,
+  getArchonHome,
+  restoreDetachedInstallContext,
+  setLogDestination,
+} from '@archon/paths';
+// A command's stdout is its output (`archon … > file`, `| jq`, an agent reading
+// it); logs are diagnostics. Set before anything below can log.
+setLogDestination('stderr');
 const hasDetachedRunConfigHandoff = process.argv
   .slice(2)
   .includes('--internal-detached-run-config');
 const inheritedInstallContext = hasDetachedRunConfigHandoff
   ? captureDetachedInstallContext()
   : undefined;
-loadArchonEnv(process.cwd());
+let forgeConfigPath = '';
+let forgeTrustedEnv: NodeJS.ProcessEnv = {};
+loadArchonEnv(process.cwd(), {
+  afterUserLoad: () => {
+    forgeConfigPath = getArchonConfigPath();
+    // Discovery receives this snapshot only through its constrained process
+    // boundary. Resolve ARCHON_HOME so Docker and HOME-based installs keep the
+    // same user-scoped plugin location after repo env loads.
+    forgeTrustedEnv = { ...process.env, ARCHON_HOME: getArchonHome() };
+  },
+});
 // The detached parent sealed this payload with its effective install key. Repo
 // env still loads normally, but it cannot replace any input that derives the
 // install home before the child consumes the accepted snapshot.
@@ -30,9 +49,8 @@ if (inheritedInstallContext) {
 }
 
 // Install the pipe-safe `console.log` shim BEFORE any command module imports.
-// `console.log` reaches fd 1 via a non-blocking pipe (pino opens it that way at
-// module load via `@archon/paths/strip-cwd-env-boot` above), and short writes
-// are silently dropped against a slow reader. The shim delegates through
+// `console.log` can reach fd 1 as a non-blocking pipe, and short writes are
+// silently dropped against a slow reader. The shim delegates through
 // `writeStdout` so the stream layer queues short writes and retries `EAGAIN`
 // instead of dropping the tail — but delivery is fire-and-forget, so the
 // patched `console.log` returns synchronously and the exit path below must
@@ -71,6 +89,7 @@ if (!process.env.CLAUDE_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
 
 import {
   setLogLevel,
+  getLogLevel,
   createLogger,
   checkForUpdate,
   BUNDLED_IS_BINARY,
@@ -81,6 +100,9 @@ import {
   refreshCompiledInstallManifest,
   canonicalizeProjectPath,
 } from '@archon/paths';
+import { publishArchonCliCommand } from '@archon/paths/cli-command';
+
+publishArchonCliCommand();
 
 let providersRegistered = false;
 let databaseRouteLoaded = false;
@@ -269,17 +291,21 @@ async function main(): Promise<number> {
   const command = positionals[0];
   const subcommand = positionals[1];
 
-  // setup/doctor/telemetry default to warn to avoid Pino info JSON interleaving with their human-readable output; lazy loggers pick up this level at first creation
-  const isInteractiveCommand =
-    command === 'setup' || command === 'doctor' || command === 'telemetry';
-  const suppressByDefault = isInteractiveCommand && !values.verbose && !isVerboseBoot();
+  // Commands default to warn: info records are engine internals that bury the
+  // command's own output, even on stderr. `serve` is the exception: its logs are
+  // its output, so they stay at info on stdout, as when the server runs directly.
+  // Lazy loggers pick up this level at first creation.
+  const isServe = command === 'serve';
+  if (isServe) setLogDestination('stdout');
+  const suppressByDefault = !isServe && !values.verbose && !isVerboseBoot();
   const rawTranscriptCommand = command === 'workflow' && subcommand === 'logs';
   // Apply output policy before install discovery: its best-effort debug logs
   // must never prefix a machine-readable response.
   if (jsonFlag || rawTranscriptCommand) {
     setLogLevel('silent');
   } else if (values.quiet || suppressByDefault) {
-    setLogLevel('warn');
+    // Only ever quieter: an explicit LOG_LEVEL of error, fatal, or silent stays.
+    if (['trace', 'debug', 'info'].includes(getLogLevel())) setLogLevel('warn');
   } else if (values.verbose) {
     setLogLevel('debug');
   }
@@ -296,6 +322,7 @@ async function main(): Promise<number> {
 
   // Commands that don't require git repo validation
   const noGitCommands = [
+    'trigger',
     'version',
     'help',
     'setup',
@@ -327,6 +354,15 @@ async function main(): Promise<number> {
       // forks — so this only fires on a hand-built `--internal-detached-run-config`, and
       // saves it a database round-trip on the way to the same message.
       if (resumeFlag) throw new Error(RESUME_RUN_CONFIG_CONFLICT);
+    }
+
+    if (command === 'forge') {
+      const { forgeCommand } = await loadRoute(() => import('./commands/forge'));
+      return await forgeCommand(subcommand, {
+        data: typeof values.data === 'string' ? values.data : undefined,
+        configPath: forgeConfigPath,
+        trustedEnv: forgeTrustedEnv,
+      });
     }
 
     const configOutsideRun = rejectConfigOutsideRun(command, subcommand, values.config);
@@ -469,6 +505,21 @@ async function main(): Promise<number> {
     }
 
     switch (command) {
+      case 'trigger': {
+        const { triggerCommand } = await loadRoute(() => import('./commands/trigger'), {
+          providers: subcommand === 'fire' || subcommand === 'drain' || subcommand === 'execute',
+          database: true,
+        });
+        await triggerCommand(subcommand, positionals.slice(2), {
+          config: typeof values.config === 'string' ? values.config : undefined,
+          host: typeof values.host === 'string' ? values.host : undefined,
+          owner: typeof values.owner === 'string' ? values.owner : undefined,
+          limit: typeof values.limit === 'string' ? values.limit : undefined,
+          yes: values.yes === true,
+        });
+        break;
+      }
+
       case 'version': {
         const { versionCommand } = await loadRoute(() => import('./commands/version'));
         await versionCommand();
