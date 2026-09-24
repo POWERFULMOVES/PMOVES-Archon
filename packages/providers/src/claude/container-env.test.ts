@@ -42,3 +42,90 @@ describe('buildRequestSubprocessEnv — container env isolation', () => {
     expect(env[CANARY]).toBeUndefined();
   });
 });
+
+/**
+ * Auth precedence. The Claude CLI prefers ANTHROPIC_API_KEY over
+ * CLAUDE_CODE_OAUTH_TOKEN, so a key sitting in the host environment silently
+ * outranks a subscription token that was deliberately provided for the run —
+ * rebilling it, or failing it outright when that key has no credit.
+ *
+ * Verified against Claude Code 2.1.209:
+ *   key + token -> "Credit balance is too low"  (the key wins)
+ *   token alone -> "401 Invalid bearer token"   (the token is used)
+ */
+describe('buildRequestSubprocessEnv — inherited ANTHROPIC_API_KEY vs OAuth token', () => {
+  const KEY = 'ANTHROPIC_API_KEY';
+  const TOKEN = 'CLAUDE_CODE_OAUTH_TOKEN';
+  const AUTH = 'ANTHROPIC_AUTH_TOKEN';
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of [KEY, TOKEN, AUTH]) saved[k] = process.env[k];
+    delete process.env[AUTH];
+  });
+  afterEach(() => {
+    for (const k of [KEY, TOKEN, AUTH]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('drops an INHERITED api key when an OAuth token is present', () => {
+    process.env[KEY] = 'sk-ant-inherited-dead-key';
+    process.env[TOKEN] = 'sk-ant-oat01-subscription';
+    const env = buildRequestSubprocessEnv(undefined);
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-subscription');
+  });
+
+  test('KEEPS an inherited api key when there is no bearer credential at all', () => {
+    process.env[KEY] = 'sk-ant-only-credential';
+    delete process.env[TOKEN];
+    const env = buildRequestSubprocessEnv(undefined);
+    // The key is the ONLY credential here — dropping it would break api-key installs.
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-only-credential');
+  });
+
+  test('drops an INHERITED api key when ANTHROPIC_AUTH_TOKEN is present', () => {
+    // ANTHROPIC_AUTH_TOKEN is the variable the shipped CLI actually reads — measured
+    // against Claude Code 2.1.209, one identical plan token authenticates via this
+    // var and 401s via CLAUDE_CODE_OAUTH_TOKEN. Keying only on the latter would miss
+    // the configuration that works and keep the key that shadows it.
+    process.env[KEY] = 'sk-ant-inherited-dead-key';
+    process.env[AUTH] = 'sk-ant-oat01-plan-token';
+    delete process.env[TOKEN];
+    const env = buildRequestSubprocessEnv(undefined);
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-ant-oat01-plan-token');
+  });
+
+  test('a per-request ANTHROPIC_AUTH_TOKEN also clears an inherited api key', () => {
+    process.env[KEY] = 'sk-ant-inherited-dead-key';
+    const env = buildRequestSubprocessEnv({ env: { ANTHROPIC_AUTH_TOKEN: 'sk-ant-oat01-req' } });
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  test('KEEPS an EXPLICIT managed api key even alongside an OAuth token', () => {
+    process.env[TOKEN] = 'sk-ant-oat01-subscription';
+    const env = buildRequestSubprocessEnv({ env: { ANTHROPIC_API_KEY: 'sk-managed' } });
+    // Archon-managed per-user credential: an explicit delivery, not inheritance.
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-managed');
+  });
+
+  test('respects an EXPLICIT empty string as a deliberate decision', () => {
+    process.env[KEY] = 'sk-ant-inherited';
+    process.env[TOKEN] = 'sk-ant-oat01-subscription';
+    const env = buildRequestSubprocessEnv({ env: { ANTHROPIC_API_KEY: '' } });
+    // hasOwnProperty, not truthiness — the caller said '' and we do not second-guess it.
+    expect(env.ANTHROPIC_API_KEY).toBe('');
+  });
+
+  test('container run is unaffected — host env never crossed the boundary anyway', () => {
+    process.env[KEY] = 'sk-ant-inherited';
+    const env = buildRequestSubprocessEnv({
+      execContext: { kind: 'container', containerId: 'c1' },
+      env: { ANTHROPIC_API_KEY: 'sk-managed', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01' },
+    });
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-managed');
+  });
+});
