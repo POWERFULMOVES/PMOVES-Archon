@@ -1,7 +1,6 @@
 # Dry-run fixture: the initial review is ready, so the correction loop stays
 # skipped and gate-ready binds the review verdict directly (the corrections
 # binding takes its if_skipped default).
-impl__record-start: '{"start":"recorded"}'
 impl__implement:
   done: true
   green: true
@@ -25,7 +24,13 @@ review__synthesize:
   findings_summary: "stub: clean on initial review"
   report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
 gate-ready: '{"ready":"true"}'
+validate__mode: '{"comparison":false}'
 validate__validate:
+  green: true
+  red_cause: ""
+  summary: "stub: full gate green"
+validate__result:
+  evidence: null
   green: true
   red_cause: ""
   summary: "stub: full gate green"

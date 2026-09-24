@@ -3,6 +3,8 @@
  */
 
 import { getTerminalRecord } from '@archon/workflows/terminal-record';
+import { readNodeRecordEvent } from '@archon/workflows/node-record-reader';
+import type { NodeExecutionMetadata } from '@archon/workflows/schemas/node-execution';
 import { existsSync, readdirSync, type Dirent } from 'node:fs';
 import * as archonPaths from '@archon/paths';
 import {
@@ -164,7 +166,7 @@ import * as userDb from '@archon/core/db/users';
 import * as git from '@archon/git';
 import { CLIAdapter } from '../adapters/cli-adapter';
 import { writeJsonLine, writeStderr, writeStdout } from '../utils/stdout';
-import { exitWithDrain } from '../utils/exit-with-drain';
+import { registerOwnedRunTermination } from '../utils/owned-run-termination';
 import { DETACHED_RUN_FAILED_EXIT_CODE, WorkflowRunFailedError } from '../utils/workflow-exit-code';
 export {
   DETACHED_RUN_FAILED_EXIT_CODE,
@@ -1067,7 +1069,9 @@ function renderWorkflowEvent(event: WorkflowEmitterEvent, verbose: boolean): voi
       break;
     }
     case 'node_completed':
-      process.stderr.write(`[${event.nodeName}] Completed (${formatDuration(event.duration)})\n`);
+      process.stderr.write(
+        `[${event.nodeName}] Completed${event.duration === undefined ? '' : ` (${formatDuration(event.duration)})`}\n`
+      );
       break;
     case 'node_failed':
       process.stderr.write(`[${event.nodeName}] Failed: ${event.error}\n`);
@@ -1707,8 +1711,8 @@ async function runWorkflowWithOwnedSource(
 
   // A resolved continuation already discovered over its own roots; reusing that result is
   // what keeps a resume from paying digest verification and full discovery twice.
-  // Mutable: an adopt lane that runs inside the adopted run's worktree re-freezes and
-  // re-discovers from THAT checkout once its path is known (see recaptureForLane).
+  // Mutable: without an explicit source, an adopt lane re-freezes and re-discovers
+  // from the adopted checkout once its path is known (see recaptureForLane).
   let { workflows: workflowEntries, errors } = continuation
     ? { workflows: continuation.workflows, errors: continuation.errors }
     : preparedSource
@@ -1740,11 +1744,10 @@ async function runWorkflowWithOwnedSource(
   let workflowEntry = workflow ? workflowEntries.find(ws => ws.workflow === workflow) : undefined;
   let workflowSource = workflowEntry?.source;
 
-  // An adoption lane that executes inside an inherited or freshly cut worktree must run
-  // THAT checkout's `.archon`, not the parent checkout's bytes captured on entry — the
-  // branch may carry a different workflow YAML, and executing one against the other is
-  // exactly the mixed-vintage defect (#2660/#2747). Re-freeze the source and re-discover
-  // from the lane path once the lane resolves it.
+  // By default, adoption reads the inherited or freshly cut worktree's `.archon`:
+  // the branch may carry a different workflow than the invoking checkout (#2660/#2747).
+  // An explicit source instead owns the graph, commands, and scripts for the new run;
+  // adoption changes only its execution target. The caller recaptures only the default.
   const recaptureForLane = async (sourceRoot: string): Promise<void> => {
     try {
       const replacement = await prepareWorkflowSource(createWorkflowDeps(), {
@@ -1755,7 +1758,9 @@ async function runWorkflowWithOwnedSource(
       originalStagedRoot = replacement.anchor.root;
       const stale = preparedSource;
       preparedSource = replacement;
-      if (stale) {
+      // Detached recapture replaces the same run directory in place.
+      // Remove only a distinct capture so the replacement manifest survives.
+      if (stale && stale.anchor.root !== replacement.anchor.root) {
         rmSync(stale.anchor.root, { recursive: true, force: true });
       }
     } catch (error) {
@@ -2475,6 +2480,8 @@ async function runWorkflowWithOwnedSource(
   // Handle isolation (worktree creation)
   let workingCwd = cwd;
   let isolationEnvId: string | undefined;
+  // Set only when this invocation created the run's branch (#3305).
+  let cutFromCommit: string | undefined;
   // Execution context for the run. Repo/worktree and folder-in-place both run on
   // the host; the folder-backend seam sets this and is where `--container` flips
   // it to a container context.
@@ -2921,6 +2928,7 @@ async function runWorkflowWithOwnedSource(
 
       workingCwd = isolatedEnv.workingPath;
       isolationEnvId = envRecord.id;
+      if (!isolatedEnv.metadata.adopted) cutFromCommit = isolatedEnv.metadata.cutFromCommit;
       getLog().info({ path: workingCwd }, 'worktree_created');
     }
   } else if (options.noWorktree) {
@@ -2935,9 +2943,9 @@ async function runWorkflowWithOwnedSource(
     });
   }
 
-  // The lane's checkout is final here — reuse-worktree set it in the lane block, and
-  // checkout-branch when the resolver materialized its exact branch above.
-  if (adoptLaneRunsIsolatedCheckout) {
+  // The lane's checkout is final here. Preserve an explicitly selected authoring
+  // source; only default discovery follows the adopted execution checkout.
+  if (adoptLaneRunsIsolatedCheckout && options.discoveryCwd === undefined) {
     console.log(`Capturing workflow source from ${workingCwd}.`);
     await recaptureForLane(workingCwd);
   }
@@ -3006,20 +3014,11 @@ async function runWorkflowWithOwnedSource(
     }
   })();
 
-  // Register cleanup handlers for graceful termination.
-  //
-  // Guard rails (#1123): a signal must only ever fail THE run this process is
-  // driving, and only while that run is still 'running'. The run id is reserved
-  // by source capture before a fresh execution and already exists on resume or a
-  // detached handoff — never from a
-  // conversation-wide "active run" query, which can match a run driven by
-  // another process (children share parent_conversation_id). When the run has
-  // already transitioned elsewhere — paused at a gate, completed, cancelled —
-  // the handler leaves it alone; see "No Autonomous Lifecycle Mutation Across
-  // Process Boundaries" in CLAUDE.md. The handlers themselves are removed in
-  // the finally below once executeWorkflow returns, so a late signal can never
-  // touch a settled run (and repeated workflowRunCommand calls in one process
-  // don't stack handlers).
+  // Graceful-termination guard rails (#1123) settle only THE run this process is
+  // driving. The run id is reserved by source capture before a fresh execution and
+  // already exists on resume or a detached handoff — never from a conversation-wide
+  // "active run" query, which can match a run driven by another process (children
+  // share parent_conversation_id).
   const ownedRunId = resumable?.id ?? detachedPreCreatedRun?.id ?? preparedSource?.runId;
   if (ownedRunId === undefined) throw new Error('Workflow execution has no resolved run ID');
   let runLiveOwner: Awaited<ReturnType<typeof startRunLiveOwner>> | undefined = undefined;
@@ -3029,73 +3028,28 @@ async function runWorkflowWithOwnedSource(
     runLiveOwnerClose ??= runLiveOwner.close();
     return runLiveOwnerClose;
   };
-  let terminating = false;
-  const cleanup = (signal: string): void => {
-    if (terminating) return;
-    terminating = true;
-    getLog().info({ conversationId: conversation.id, signal }, 'workflow.process_terminating');
-    const interruptedRunId = ownedRunId;
-    (async (): Promise<void> => {
-      if (!interruptedRunId) {
-        // Signal before this process created/resumed a run — nothing it owns.
-        // A pre-created 'pending' row is covered by the stale-pending hygiene.
-        getLog().info(
-          { conversationId: conversation.id, signal },
-          'workflow.termination_no_owned_run'
-        );
-        return;
-      }
-      if (runLiveOwner?.isStopRequested()) {
-        // The exact-run controller has proved ownership and is terminating this
-        // process tree. It records `cancelled` only after termination succeeds;
-        // do not race it by translating the operator's stop into generic failure.
-        getLog().info(
-          { runId: interruptedRunId, signal },
-          'workflow.operator_stop_leaves_lifecycle_to_controller'
-        );
-        return;
-      }
-      const status = await workflowDb.getWorkflowRunStatus(interruptedRunId);
-      if (status !== 'running') {
-        // Externally transitioned (paused at a new gate, completed, cancelled,
-        // failed) — not this handler's to mutate.
-        getLog().info(
-          { runId: interruptedRunId, status, signal },
-          'workflow.termination_skip_not_running'
-        );
-        return;
-      }
-      // Genuine interrupt of the run this process is driving. failWorkflowRun's
-      // own status='running' CAS closes the read-then-write window: if the
-      // executor commits a gate pause between the read above and this write,
-      // the CAS misses and throws (caught below) — the run stays paused.
-      await workflowDb.failWorkflowRun(interruptedRunId, `Process terminated (${signal})`);
-    })()
-      .catch((err: unknown) => {
-        const e = err as Error;
-        getLog().error(
-          { err: e, errorType: e.constructor.name },
-          'workflow.termination_cleanup_failed'
-        );
-      })
+  const deregisterTermination = registerOwnedRunTermination({
+    runId: ownedRunId,
+    logModule: 'cli.workflow',
+    liveOwner: {
+      isStopRequested: () => runLiveOwner?.isStopRequested() ?? false,
+      close: closeRunLiveOwner,
+    },
+    teardown: async signal => {
       // Destroy the isolation container so Ctrl-C / SIGTERM doesn't orphan a
-      // PRIVILEGED container — the forced exit below bypasses the teardown
-      // `finally`, so we must tear it down explicitly here first.
-      .then(async () => {
-        if (containerBackend && containerEnvId) {
-          try {
-            await containerBackend.destroy(containerEnvId);
-          } catch (destroyErr) {
-            console.error(
-              `\nWARNING: could not remove the isolation container on ${signal}: ` +
-                `${(destroyErr as Error).message}. Remove it manually: ` +
-                'docker ps -a --filter label=diy.archon.managed=true'
-            );
-          }
+      // PRIVILEGED container — the forced exit bypasses the teardown `finally`.
+      if (containerBackend && containerEnvId) {
+        try {
+          await containerBackend.destroy(containerEnvId);
+        } catch (destroyErr) {
+          console.error(
+            `\nWARNING: could not remove the isolation container on ${signal}: ` +
+              `${(destroyErr as Error).message}. Remove it manually: ` +
+              'docker ps -a --filter label=diy.archon.managed=true'
+          );
         }
-      })
-      // Reclaim the staged capture for the same reason the container is destroyed above:
-      // the forced exit below never returns up the stack, so the ownership `finally` —
+      }
+      // Reclaim the staged capture for the same reason: the ownership `finally` —
       // whose whole premise is "whichever way we leave" — never runs. Ctrl-C during
       // isolation resolution or worktree creation would otherwise strand a complete
       // frozen tree.
@@ -3105,39 +3059,11 @@ async function runWorkflowWithOwnedSource(
       // For container runs that path was renamed away by `finalizeWorkflowSource`
       // and `preparedSource.anchor.root` is now the LIVE source directory —
       // rm-ing it mid-execution would destroy the run's source.
-      .then(async () => {
-        if (originalStagedRoot) {
-          await disposeWorkflowSource({ captureRoot: originalStagedRoot });
-        }
-      })
-      .catch(() => undefined)
-      .then(async () => {
-        // A detached cancel already rang the handoff frame and must keep its lease
-        // open while the controller terminates this process tree. Every other
-        // graceful signal rings ordinary attention before the forced exit.
-        if (!runLiveOwner?.isStopRequested()) await closeRunLiveOwner();
-      })
-      .catch((error: unknown) => {
-        getLog().error({ err: error as Error }, 'workflow.live_owner_close_failed');
-      })
-      .finally(() => {
-        // Route through the same drain helper cli.ts's top-level exit chain
-        // uses so queued `console.log` output (this command streams progress
-        // through 101 call sites) reaches a slow reader before the process
-        // exits — a bare `process.exit(1)` here would reopen #2400's
-        // truncation on Ctrl-C/SIGTERM specifically. See R16 in the review
-        // report.
-        void exitWithDrain(1);
-      });
-  };
-  const sigtermHandler = (): void => {
-    cleanup('SIGTERM');
-  };
-  const sigintHandler = (): void => {
-    cleanup('SIGINT');
-  };
-  process.once('SIGTERM', sigtermHandler);
-  process.once('SIGINT', sigintHandler);
+      if (originalStagedRoot) {
+        await disposeWorkflowSource({ captureRoot: originalStagedRoot });
+      }
+    },
+  });
 
   // One-time-per-version notice when the workflow uses unconfigured tier keywords.
   await maybePrintTierNotice(workflow, workingCwd, cliUserId, options.quiet);
@@ -3295,6 +3221,7 @@ async function runWorkflowWithOwnedSource(
         // continuation fields above are still passed: the executor consumes them only
         // when IT creates the row, and this row already carries them.
         ...(detachedPreCreatedRun ? { preCreatedRun: detachedPreCreatedRun } : {}),
+        ...(cutFromCommit !== undefined ? { cutFromCommit } : {}),
       };
       result = await engine.submit({
         platform: adapter,
@@ -3316,8 +3243,7 @@ async function runWorkflowWithOwnedSource(
     // failWorkflowRun cleanup must never fire against a settled run (#1123),
     // and removal keeps repeated workflowRunCommand calls in one process from
     // stacking handlers.
-    process.off('SIGTERM', sigtermHandler);
-    process.off('SIGINT', sigintHandler);
+    deregisterTermination();
 
     // Container teardown (Phase C) — in `finally` so a throw from executeWorkflow
     // BEFORE its own try/catch (malformed config, env resolvers, unknown provider)
@@ -3762,6 +3688,7 @@ export interface NodeSummary {
   outputPreview?: string;
   error?: string;
   cause?: SkipCause;
+  execution?: NodeExecutionMetadata;
 }
 
 function formatSkipCause(cause: SkipCause): string {
@@ -3801,13 +3728,30 @@ export function buildNodeSummaries(events: WorkflowEventRow[]): NodeSummary[] {
   for (const event of events) {
     const nodeId = event.step_name;
     if (!nodeId) continue;
+    const record = readNodeRecordEvent(event);
+    if (!record) continue;
+    const execution = record.metadata;
 
-    switch (event.event_type) {
+    switch (record.eventType) {
       case 'node_started': {
         startTimes.set(nodeId, toHydratedTimestamp(event.created_at).getTime());
         // A retry is a new active attempt, so stale terminal details must not
         // leak into the compact current-state summary.
-        summaries.set(nodeId, { nodeId, state: 'running', startedAt: event.created_at });
+        summaries.set(nodeId, {
+          nodeId,
+          state: 'running',
+          startedAt: event.created_at,
+          ...(execution === undefined ? {} : { execution }),
+        });
+        break;
+      }
+      case 'node_suspended': {
+        summaries.set(nodeId, {
+          nodeId,
+          state: 'running',
+          startedAt: summaries.get(nodeId)?.startedAt,
+          ...(execution === undefined ? {} : { execution }),
+        });
         break;
       }
       case 'node_completed': {
@@ -3817,8 +3761,10 @@ export function buildNodeSummaries(events: WorkflowEventRow[]): NodeSummary[] {
           nodeId,
           state: 'completed',
           startedAt: summaries.get(nodeId)?.startedAt,
-          durationMs: started !== undefined ? endTime - started : undefined,
-          outputPreview: outputPreviewOf(event.data.node_output),
+          durationMs:
+            execution?.timing.durationMs ?? (started !== undefined ? endTime - started : undefined),
+          outputPreview: outputPreviewOf(record.data.node_output),
+          ...(execution === undefined ? {} : { execution }),
         });
         break;
       }
@@ -3829,17 +3775,20 @@ export function buildNodeSummaries(events: WorkflowEventRow[]): NodeSummary[] {
           nodeId,
           state: 'failed',
           startedAt: summaries.get(nodeId)?.startedAt,
-          durationMs: started !== undefined ? endTime - started : undefined,
-          error: typeof event.data.error === 'string' ? event.data.error : 'Unknown error',
+          durationMs:
+            execution?.timing.durationMs ?? (started !== undefined ? endTime - started : undefined),
+          error: record.data.error ?? 'Unknown error',
+          ...(execution === undefined ? {} : { execution }),
         });
         break;
       }
       case 'node_skipped': {
-        const parsedCause = skipCauseSchema.safeParse(event.data.cause);
+        const parsedCause = skipCauseSchema.safeParse(record.data.cause);
         summaries.set(nodeId, {
           nodeId,
           state: 'skipped',
           ...(parsedCause.success ? { cause: parsedCause.data } : {}),
+          ...(execution === undefined ? {} : { execution }),
         });
         break;
       }
@@ -3857,7 +3806,7 @@ export function buildNodeSummaries(events: WorkflowEventRow[]): NodeSummary[] {
         summaries.set(nodeId, {
           nodeId,
           state: 'completed',
-          outputPreview: outputPreviewOf(event.data.node_output),
+          outputPreview: outputPreviewOf(record.data.node_output),
         });
         break;
       }
@@ -4272,6 +4221,28 @@ export async function workflowLogsCommand(
   }
 }
 
+/** One line for the checkout a run started from (#3305); `--json` carries the full record. */
+export function describeCheckoutBaseline(baseline: WorkflowRun['checkout_baseline']): string {
+  if (baseline === null) return '(not recorded)';
+  switch (baseline.kind) {
+    case 'not_git':
+      return 'not a Git checkout';
+    case 'unavailable':
+      return `checkout unavailable (${baseline.reason})`;
+    case 'git': {
+      const worktree = baseline.worktree;
+      const state =
+        worktree.status === 'clean'
+          ? 'clean'
+          : `dirty: ${String(worktree.staged)} staged, ${String(worktree.unstaged)} unstaged, ${String(worktree.untracked)} untracked` +
+            (worktree.content === 'incomplete' ? ', content not fully identified' : '');
+      const cut =
+        baseline.cutFromCommit !== undefined ? `, branch cut from ${baseline.cutFromCommit}` : '';
+      return `${baseline.commit ?? '(unborn branch)'} (${state}${cut})`;
+    }
+  }
+}
+
 /**
  * Show detail for a single workflow run by ID (any status).
  *
@@ -4384,6 +4355,7 @@ export async function workflowGetCommand(
   console.log(`  ID:     ${run.id}`);
   console.log(`  Name:   ${run.workflow_name}`);
   console.log(`  Path:   ${run.working_path ?? '(none)'}`);
+  console.log(`  Start:  ${describeCheckoutBaseline(run.checkout_baseline)}`);
   console.log(`  Transcript: ${transcriptPath ?? '(unavailable)'}`);
   console.log(`  Status: ${run.status}`);
   if (run.outcome) console.log(`  Authored outcome: ${run.outcome}`);

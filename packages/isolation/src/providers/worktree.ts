@@ -6,7 +6,7 @@
 
 import { createHash } from 'crypto';
 import { access, rm } from 'fs/promises';
-import { isAbsolute, join, normalize as normalizePath, resolve, sep } from 'path';
+import { isAbsolute, join, normalize as normalizePath, resolve } from 'path';
 
 import { createLogger } from '@archon/paths';
 import {
@@ -29,7 +29,7 @@ import {
   CanonicalRepoPathUnavailableError,
 } from '@archon/git';
 import type { WorktreeBaseOverride } from '@archon/git';
-import { getArchonWorkspacesPath } from '@archon/paths';
+import { isInsideArchonWorkspaces, isPathInside } from '@archon/paths';
 import type { BranchName, RepoPath, WorktreeInfo } from '@archon/git';
 import { copyWorktreeFiles } from '../worktree-copy';
 import type {
@@ -65,7 +65,7 @@ interface GitCommandAnchors {
 }
 
 type WorktreeCreationResult =
-  | { kind: 'created'; warnings: string[] }
+  | { kind: 'created'; warnings: string[]; cutFromCommit?: string }
   | { kind: 'adopted'; environment: WorktreeEnvironment };
 
 function getForkReviewBranch(prNumber: string): BranchName {
@@ -141,10 +141,8 @@ function resolveRepoLocalOverride(
 
   // Double-check via resolved absolute paths — catches edge cases like a path that
   // normalizes clean but still escapes when joined (e.g. leading `./../` on some platforms).
-  // Uses `path.sep` so the "is inside repoRoot" check works on Windows (\\) as well as POSIX (/).
   const resolved = resolve(repoRoot, normalized);
-  const repoRootResolved = resolve(repoRoot);
-  if (resolved !== repoRootResolved && !resolved.startsWith(repoRootResolved + sep)) {
+  if (!isPathInside(resolve(repoRoot), resolved, { includeRoot: true, lexical: true })) {
     throw new Error(
       `.archon/config.yaml worktree.path resolves outside the repo root (got: ${trimmed} → ${resolved}).`
     );
@@ -212,7 +210,13 @@ export class WorktreeProvider implements IIsolationProvider {
       createdAt: new Date(),
       metadata: existingTaskBranch
         ? { adopted: true, adoptedFrom: 'branch', request }
-        : { adopted: false, request },
+        : {
+            adopted: false,
+            request,
+            ...(creation.cutFromCommit !== undefined
+              ? { cutFromCommit: creation.cutFromCommit }
+              : {}),
+          },
       ...(creation.warnings.length > 0 ? { warnings: creation.warnings } : {}),
     };
   }
@@ -801,6 +805,8 @@ export class WorktreeProvider implements IIsolationProvider {
     // recursively is enough.
     await mkdirAsync(worktreeBase, { recursive: true });
 
+    // Only a branch this call creates has a cut-from commit; reuse and adoption never do.
+    let cutFromCommit: string | undefined;
     if (request.workflowType === 'task' && request.taskBranch?.kind === 'existing') {
       // Adoption continues the local branch exactly as the prior run left it.
       // Do not fetch, sync, reset, or create a child branch here.
@@ -828,7 +834,14 @@ export class WorktreeProvider implements IIsolationProvider {
         }
       } else {
         // For issues, tasks, threads: create new branch
-        await this.createNewBranch(request, repoPath, worktreePath, branchName, baseBranch, remote);
+        cutFromCommit = await this.createNewBranch(
+          request,
+          repoPath,
+          worktreePath,
+          branchName,
+          baseBranch,
+          remote
+        );
       }
     }
 
@@ -853,7 +866,11 @@ export class WorktreeProvider implements IIsolationProvider {
         'Config file could not be loaded — copyFiles configuration was not applied. Check your .archon/config.yaml for syntax errors.'
       );
     }
-    return { kind: 'created', warnings };
+    return {
+      kind: 'created',
+      warnings,
+      ...(cutFromCommit !== undefined ? { cutFromCommit } : {}),
+    };
   }
 
   /**
@@ -936,9 +953,7 @@ export class WorktreeProvider implements IIsolationProvider {
       );
       // Only hard-reset for Archon-managed clones when creating isolated worktrees.
       // Locally-registered repos keep the non-destructive fast-forward mode.
-      const isManagedClone = repoPath
-        .replace(/\\/g, '/')
-        .startsWith(getArchonWorkspacesPath().replace(/\\/g, '/'));
+      const isManagedClone = isInsideArchonWorkspaces(repoPath);
       const { branch } = await syncWorkspace(
         repoPath,
         configuredBaseBranch ? toBranchName(configuredBaseBranch) : undefined,
@@ -1276,7 +1291,7 @@ export class WorktreeProvider implements IIsolationProvider {
   }
 
   /**
-   * Create worktree with new branch
+   * Create worktree with new branch. Returns the commit the branch was cut from.
    */
   private async createNewBranch(
     request: IsolationRequest,
@@ -1285,7 +1300,7 @@ export class WorktreeProvider implements IIsolationProvider {
     branchName: string,
     baseBranch: string,
     remote = 'origin'
-  ): Promise<void> {
+  ): Promise<string> {
     // Clean up any orphan directory before creating worktree
     await this.cleanOrphanDirectoryIfExists(worktreePath);
 
@@ -1349,6 +1364,15 @@ export class WorktreeProvider implements IIsolationProvider {
         throw error;
       }
     }
+    // The branch was created at its start point a moment ago and nothing has written to
+    // it since, so its commit IS the cut-from commit -- read from the branch itself rather
+    // than re-resolving a start ref that may have moved in between.
+    const { stdout: cutFrom } = await execFileAsync(
+      'git',
+      ['-C', worktreePath, 'rev-parse', '--verify', 'HEAD^{commit}'],
+      { timeout: GIT_OPERATION_TIMEOUT_MS }
+    );
+    return cutFrom.trim();
   }
 
   /**

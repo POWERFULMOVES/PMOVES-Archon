@@ -7,6 +7,8 @@ export {
   getWSLDistroName,
   getArchonHome,
   getArchonWorkspacesPath,
+  isPathInside,
+  isInsideArchonWorkspaces,
   ensureArchonWorkspacesPath,
   getArchonWorktreesPath,
   getArchonTempPath,
@@ -52,7 +54,6 @@ export {
   getFolderProjectLogsPath,
   getFolderRunArtifactsPath,
   ensureFolderProjectStructure,
-  resolveProjectRootFromCwd,
   ensureProjectStructure,
   createProjectSourceSymlink,
   findMarkdownFilesRecursive,
@@ -74,7 +75,7 @@ export type { DetachedInstallContext, DetachedInstallContextKey } from './detach
 export { loadArchonEnv, isVerboseBoot } from './env-loader';
 
 // Logger
-export { createLogger, setLogLevel, getLogLevel, rootLogger } from './logger';
+export { createLogger, setLogLevel, getLogLevel, setLogDestination, rootLogger } from './logger';
 export type { Logger } from './logger';
 
 // Build-time constants (rewritten by scripts/build-binaries.sh)

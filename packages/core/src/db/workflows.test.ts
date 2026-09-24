@@ -78,6 +78,7 @@ describe('workflows database', () => {
     parent_run_id: null,
     adopted_from_run_id: null,
     output_root: null,
+    checkout_baseline: null,
   };
 
   function mockTerminalSnapshot(
@@ -1786,7 +1787,7 @@ describe('workflows database', () => {
       expect(result.completed_at).toBeNull();
       // First call: the row-pinning read of the error the CAS is about to clear.
       const [priorQuery, priorParams] = mockQuery.mock.calls[0] as [string, unknown[]];
-      expect(priorQuery).toContain('SELECT status, metadata');
+      expect(priorQuery).toContain('SELECT w.status, w.metadata, q.resource_key');
       // Postgres row lock — without it the value read is not guaranteed to be the
       // value the CAS clears, so the preserved error could be stale (#2348).
       expect(priorQuery).toContain('FOR UPDATE');

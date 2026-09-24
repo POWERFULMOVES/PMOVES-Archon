@@ -11,6 +11,7 @@ import type { IWorkflowPlatform, WorkflowMessageMetadata } from './deps';
 import type { WorkflowDeps } from './deps';
 import * as archonPaths from '@archon/paths';
 import { createLogger, captureWorkflowInvoked, captureWorkflowCompleted } from '@archon/paths';
+import { recordCheckoutSample, sampleCheckout, type CheckoutSample } from './checkout-observation';
 import { getDefaultBranch, toRepoPath } from '@archon/git';
 import type {
   DagNode,
@@ -42,6 +43,7 @@ import {
   WORKFLOW_SOURCE_METADATA_KEY,
   readWorkflowSourceState,
   type ContinuationMode,
+  type WorkflowSourceMetadata,
 } from './schemas';
 import {
   WorkflowSourceIntegrityError,
@@ -709,6 +711,12 @@ export type ExecuteWorkflowOptions = ResumePayload & {
    */
   preparedSource?: PreparedWorkflowSource;
   /**
+   * The commit the run's worktree branch was cut from, supplied only by a caller whose
+   * isolation step created that branch for this run (#3305). Recorded on the run's
+   * checkout baseline; never inferred when absent. Ignored on a resume.
+   */
+  cutFromCommit?: string;
+  /**
    * The owner's adopt/hold handle from the surrounding `withCapturedSource`. When set,
    * `executeWorkflow` calls `adopt()` itself — at the rename success site — so a rename
    * failure leaves the staged directory un-adopted and the wrap's `finally` reclaims
@@ -965,6 +973,22 @@ export async function finalizeWorkflowSource(
     ...prepared,
     anchor,
     roots: capturedSourceRoots(anchor),
+  };
+}
+
+/** Build the durable source pointer for a capture already moved to its final run path. */
+export function preparedWorkflowSourceRecord(
+  prepared: PreparedWorkflowSource
+): WorkflowSourceMetadata {
+  return {
+    version: 1,
+    root: prepared.anchor.root,
+    origin: prepared.origin,
+    captured_at: prepared.manifest.captured_at,
+    digest: prepared.manifest.digest,
+    source_config: prepared.anchor.config,
+    file_count: prepared.manifest.file_count,
+    byte_count: prepared.manifest.byte_count,
   };
 }
 
@@ -1488,6 +1512,9 @@ async function runChildWorkflow(
           resolveChildIsolation,
           preparedSource: childSource,
           ...(runConfig ? { runConfig } : {}),
+          ...(childIsolationEnv?.cutFromCommit !== undefined
+            ? { cutFromCommit: childIsolationEnv.cutFromCommit }
+            : {}),
         };
         childRunId = childRun.id;
       }
@@ -1795,6 +1822,7 @@ export async function executeWorkflow(
     preparedSource,
     adoptedFromRunId,
     continuationMode,
+    cutFromCommit,
   } = opts;
 
   const executionUserId = preCreatedRun ? (preCreatedRun.user_id ?? undefined) : userId;
@@ -2202,6 +2230,48 @@ export async function executeWorkflow(
     }
   }
 
+  let checkoutBaselineSample: CheckoutSample | undefined;
+  if (!isContinuation) {
+    const pendingRun = workflowRun;
+    let claimed: WorkflowRun | null;
+    try {
+      claimed = await deps.store.claimPendingWorkflowRun(workflowRun.id);
+    } catch (error) {
+      getLog().error(
+        { err: error, workflowRunId: workflowRun.id },
+        'workflow.pending_claim_failed'
+      );
+      // A lost connection may hide a committed claim. Do not release ownership or
+      // write a terminal state when this process cannot confirm the transition.
+      await sendCriticalMessage(
+        platform,
+        conversationId,
+        `Unable to confirm execution ownership for workflow run '${workflowRun.id}'. Please inspect the run before retrying.`
+      );
+      return {
+        success: false,
+        workflowRunId: workflowRun.id,
+        error: 'Unable to confirm workflow execution claim; inspect the run before retrying',
+      };
+    }
+    if (!claimed) {
+      getLog().warn({ workflowRunId: workflowRun.id }, 'workflow.pending_claim_lost');
+      return {
+        success: false,
+        workflowRunId: workflowRun.id,
+        error: 'Workflow run is no longer pending or no longer owns its admitted resource',
+      };
+    }
+    pendingRun.status = claimed.status;
+    pendingRun.started_at = claimed.started_at;
+    workflowRun = pendingRun;
+    // The run's starting checkout is sampled the moment execution ownership is won, with
+    // the final cwd and backend bound and before anything else can touch the checkout.
+    // Its manifest is written, and the baseline persisted, once the artifacts directory
+    // exists below. A resume never samples: it keeps the baseline the run started with.
+    checkoutBaselineSample = await sampleCheckout(cwd, execContext);
+  }
+
   if (preCreatedRun && !isContinuation) {
     // The stamps a fresh row would have received at creation, for a row someone
     // else created. `isolation` + `isolation_env_id` are what a later resume reads
@@ -2532,6 +2602,45 @@ export async function executeWorkflow(
   }
   getLog().debug({ artifactsDir, logDir, stateDir, outputRoot }, 'workflow_paths_resolved');
 
+  if (checkoutBaselineSample !== undefined) {
+    // Persisting the baseline is run infrastructure: a run that cannot record where it
+    // started fails here, before its first node. An unobservable checkout is not a
+    // failure — it is recorded as an `unavailable` observation.
+    try {
+      workflowRun.checkout_baseline = await deps.store.recordWorkflowRunCheckoutBaseline(
+        workflowRun.id,
+        await recordCheckoutSample(
+          checkoutBaselineSample,
+          { runId: workflowRun.id, artifactsDir },
+          cutFromCommit !== undefined ? { cutFromCommit } : {}
+        )
+      );
+    } catch (error) {
+      const err = error as Error;
+      getLog().error(
+        { err, workflowRunId: workflowRun.id },
+        'workflow.checkout_baseline_persist_failed'
+      );
+      await sendCriticalMessage(
+        platform,
+        conversationId,
+        '❌ **Workflow failed**: Unable to record the run checkout baseline.'
+      );
+      await requireTerminalStatusWrite(
+        deps.store.failWorkflowRun(
+          workflowRun.id,
+          `Checkout baseline could not be recorded: ${err.message}`
+        ),
+        { workflowRunId: workflowRun.id, site: 'workflow.checkout_baseline_fail_db_record_failed' }
+      );
+      return {
+        success: false,
+        workflowRunId: workflowRun.id,
+        error: `Checkout baseline could not be recorded: ${err.message}`,
+      };
+    }
+  }
+
   // Between-run continuation (#2747): resolve $ADOPTED_RUN_DIR through the
   // adopted run's persisted `output_root` (rename-safe per #2200) and announce
   // the continuation on THIS run's own event log so the chain renders without a
@@ -2714,16 +2823,10 @@ export async function executeWorkflow(
     }
     const sourceAnchor = { ...preparedSource.anchor, root: finalCaptureRoot };
     workflowSourceRoots = capturedSourceRoots(sourceAnchor);
-    const sourceRecord = {
-      version: 1 as const,
-      root: finalCaptureRoot,
-      origin: preparedSource.origin,
-      captured_at: preparedSource.manifest.captured_at,
-      digest: preparedSource.manifest.digest,
-      source_config: sourceAnchor.config,
-      file_count: preparedSource.manifest.file_count,
-      byte_count: preparedSource.manifest.byte_count,
-    };
+    const sourceRecord = preparedWorkflowSourceRecord({
+      ...preparedSource,
+      anchor: sourceAnchor,
+    });
     // Mirror the record onto the IN-MEMORY run as well as the row. `workflowRun` is what
     // gets handed to child, fan-out, and `workflow:` dispatch, and those read the record
     // to find the parent's authoring origin — a stale in-memory copy sends them to the
@@ -2968,24 +3071,6 @@ export async function executeWorkflow(
             'workflow_event_persist_failed'
           );
         });
-    }
-
-    // Set status to running now that execution has started (skip for resumed runs — already running)
-    if (!dagPriorCompletedNodes) {
-      try {
-        await deps.store.updateWorkflowRun(workflowRun.id, { status: 'running' });
-      } catch (dbError) {
-        getLog().error(
-          { err: dbError as Error, workflowRunId: workflowRun.id },
-          'db_workflow_status_update_failed'
-        );
-        await sendCriticalMessage(
-          platform,
-          conversationId,
-          'Workflow blocked: Unable to update status. Please try again.'
-        );
-        return { success: false, error: 'Database error setting workflow to running' };
-      }
     }
 
     // Context for error logging

@@ -1,7 +1,7 @@
 /**
  * Unit tests for command handler
  *
- * Note: We avoid using mock.module() for internal modules (utils/git, utils/path-validation)
+ * Note: We avoid using mock.module() for internal modules (utils/git)
  * that have their own test files. Mocking internal modules causes test isolation issues
  * since Bun's mock.module() persists globally across test files.
  *
@@ -18,7 +18,6 @@ import type { IsolationEnvironmentRow } from '@archon/isolation';
 import { join } from 'path';
 import * as fsPromises from 'fs/promises';
 import * as gitUtils from '@archon/git';
-import * as pathValidation from '../utils/path-validation';
 import * as workflowDiscovery from '@archon/workflows/workflow-discovery';
 import type * as CodebaseDb from '../db/codebases';
 import type * as ConversationDb from '../db/conversations';
@@ -101,6 +100,7 @@ function makeWorkflowRun(overrides: Partial<WorkflowRun> = {}): WorkflowRun {
     parent_run_id: null,
     adopted_from_run_id: null,
     output_root: null,
+    checkout_baseline: null,
     ...overrides,
   };
 }
@@ -250,7 +250,6 @@ const mockCreateWorkflowEvent = mock<typeof WorkflowEventDb.createWorkflowEvent>
 );
 
 // Spies for internal modules (use spyOn instead of mock.module to avoid global pollution)
-let spyIsPathWithinWorkspace: ReturnType<typeof spyOn>;
 let spyExecFileAsync: ReturnType<typeof spyOn>;
 let spyWorktreeExists: ReturnType<typeof spyOn>;
 let spyListWorktrees: ReturnType<typeof spyOn>;
@@ -438,6 +437,7 @@ mock.module('@archon/paths', () => ({
 }));
 
 import { parseCommand, handleCommand } from './command-handler';
+import { quoteCommandArg } from '../utils/command-args';
 
 // Helper to clear all mocks
 function clearAllMocks(): void {
@@ -480,9 +480,6 @@ function clearAllMocks(): void {
 
 // Setup spies for internal modules
 function setupSpies(): void {
-  // Path validation spy
-  spyIsPathWithinWorkspace = spyOn(pathValidation, 'isPathWithinWorkspace').mockReturnValue(true);
-
   // Git utility spies
   spyExecFileAsync = spyOn(gitUtils, 'execFileAsync').mockResolvedValue({ stdout: '', stderr: '' });
   spyWorktreeExists = spyOn(gitUtils, 'worktreeExists').mockResolvedValue(false);
@@ -519,7 +516,6 @@ function setupSpies(): void {
 
 // Restore all spies
 function restoreSpies(): void {
-  spyIsPathWithinWorkspace?.mockRestore();
   spyExecFileAsync?.mockRestore();
   spyWorktreeExists?.mockRestore();
   spyListWorktrees?.mockRestore();
@@ -584,6 +580,12 @@ describe('CommandHandler', () => {
       const result = parseCommand('/setcwd /workspace/my repo');
       expect(result.command).toBe('setcwd');
       expect(result.args).toEqual(['/workspace/my', 'repo']);
+    });
+
+    test('parses a quoteCommandArg value back to the same string', () => {
+      const name = 'Bob"s \\Ops';
+      const result = parseCommand(`/update-project ${quoteCommandArg(name)} /new/path`);
+      expect(result.args).toEqual([name, '/new/path']);
     });
 
     test('should handle /reset command', () => {

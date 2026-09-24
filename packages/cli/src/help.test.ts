@@ -161,13 +161,17 @@ describe('CLI help output', () => {
   // string here means any future drift — a dropped Commands entry, a reordered
   // Options block, a column-width change in formatSpecLine — fails this test
   // instead of silently shipping.
-  const PRE_REFACTOR_GLOBAL_HELP = `
+  const EXPECTED_GLOBAL_HELP = `
 Archon CLI - Run AI workflows from the command line
 
 Usage:
   archon <command> [subcommand] [options] [arguments]
 
 Commands:
+  forge resolve              Resolve an explicit remote through optional forge plugins
+  forge checks               Observe checks for an explicit qualified pull request
+  trigger <fire|drain|list|inspect|withdraw|recover-preparation|schedule>
+                             Start configured workflows and inspect durable resource admission
   chat <message>             Send a message to the orchestrator
   setup                      Interactive setup wizard for credentials and config
   workflow list [name] [--full] [--json]
@@ -242,8 +246,8 @@ Options:
   --exec-code                Execute trusted bash/script nodes during --dry-run (default: require stubs)
   --pause-at-gates           Stop a dry-run at approval gates instead of auto-approving
   --spawn                    Open setup wizard in a new terminal window (for setup command)
-  --quiet, -q                Reduce log verbosity to warnings and errors only
-  --verbose, -v              Show debug-level output
+  --quiet, -q                Log warnings and errors only (the default except for serve)
+  --verbose, -v              Show debug-level logs (on stderr; on stdout for serve)
   --json                     Output machine-readable JSON (list/status/get/wait/runs/approve/reject/respond/cancel/abandon/resume)
   --events                   For verbose JSON status/get: output raw event rows instead of node summaries
   --detach                   Run 'workflow run'/'approve'/'reject'/'respond'/'resume' in a detached background child (returns immediately)
@@ -284,14 +288,14 @@ Examples:
 
 `;
 
-  it('archon --help matches the pre-refactor global index byte-for-byte', () => {
+  it('archon --help matches the supported global index byte-for-byte', () => {
     const result = spawnSync(process.execPath, [CLI_ENTRY, '--help'], {
       encoding: 'utf8',
       env: { ...process.env, ARCHON_TELEMETRY_DISABLED: '1' },
     });
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe(PRE_REFACTOR_GLOBAL_HELP);
-    expect(`${renderHelp()}\n`).toBe(PRE_REFACTOR_GLOBAL_HELP);
+    expect(result.stdout).toBe(EXPECTED_GLOBAL_HELP);
+    expect(`${renderHelp()}\n`).toBe(EXPECTED_GLOBAL_HELP);
   });
 
   it('archon help <cmd> [<subcmd>] matches archon <cmd> [<subcmd>] --help', () => {
