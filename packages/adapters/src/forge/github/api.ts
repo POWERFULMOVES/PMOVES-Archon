@@ -21,8 +21,21 @@ export class GitHubError extends Error {
   }
 }
 
+/**
+ * Strip leading and trailing '/' by scanning, not with `/^\/+|\/+$/g`: under the
+ * global flag the `\/+$` branch is retried from every '/' in a run, which is
+ * quadratic on a remote URL path full of slashes (CodeQL js/polynomial-redos).
+ */
+function trimSlashes(path: string): string {
+  let start = 0;
+  let end = path.length;
+  while (start < end && path[start] === '/') start++;
+  while (end > start && path[end - 1] === '/') end--;
+  return path.slice(start, end);
+}
+
 export function repositoryPath(path: string): { owner: string; repo: string } | null {
-  const parts = path.replace(/^\/+|\/+$/g, '').split('/');
+  const parts = trimSlashes(path).split('/');
   if (parts.length !== 2 || parts.some(part => part === '' || part === '.' || part === '..')) {
     return null;
   }
