@@ -1,7 +1,6 @@
 import { access, readdir, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, extname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { delimiter, extname, resolve } from 'node:path';
 import type { PluginMetadata } from './operations';
 import { pluginMetadataSchema } from './operations';
 import {
@@ -168,15 +167,19 @@ export async function discoverPlugins(
     env?: NodeJS.ProcessEnv;
     timeoutMs?: number;
     maxOutputBytes?: number;
-    includeDefaultDir?: boolean;
+    /**
+     * The installed plugins directory to scan, the one `archon plugin install` writes.
+     * The host owns where that is (the CLI passes `getPluginsPath()` from
+     * `@archon/paths`); forge stays a leaf package and has no rule of its own for it.
+     * Omitted, only configured plugins, `pluginDirs` and PATH are scanned.
+     */
+    pluginsDir?: string;
   } = {}
 ): Promise<PluginDiscovery> {
   const config = forgePluginConfigSchema.parse(options.config ?? {});
   const env = options.env ?? process.env;
   const dirs = [
-    ...(options.includeDefaultDir === false
-      ? []
-      : [join(env.ARCHON_HOME ?? join(homedir(), '.archon'), 'plugins')]),
+    ...(options.pluginsDir !== undefined ? [options.pluginsDir] : []),
     ...config.pluginDirs,
     ...(config.scanPath ? (env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean) : []),
   ];

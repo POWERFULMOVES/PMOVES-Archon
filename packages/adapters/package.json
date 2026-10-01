@@ -1,6 +1,6 @@
 {
   "name": "@archon/adapters",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -77,6 +77,9 @@
     ],
     [
       "src/forge/github/operations.test.ts"
+    ],
+    [
+      "src/forge/github/lifecycle.test.ts"
     ]
   ]
 }

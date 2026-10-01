@@ -400,13 +400,18 @@ export type WorkflowExecutionResult =
 
 /**
  * Workflow origin:
- * - `bundled` — embedded in the Archon binary / bundled defaults
- * - `global`  — user-level, discovered at `~/.archon/workflows/` (applies to every repo)
- * - `project` — repo-local, discovered at `<repoRoot>/.archon/workflows/`
+ * - `bundled`   — embedded in the Archon binary / bundled defaults
+ * - `global`    — user-level, discovered at `~/.archon/workflows/` (applies to every repo)
+ * - `project`   — repo-local, discovered at `<repoRoot>/.archon/workflows/`
+ * - `installed` — a workflow pack installed with `archon plugin install`, named
+ *                 `owner/plugin:entrypoint`
  *
- * Precedence for same-named files: `bundled` < `global` < `project`.
+ * Precedence for same-named files: `bundled` < `global` < `project`. Installed
+ * workflows take no part in it: their qualified names cannot collide with a file.
  */
-export type WorkflowSource = 'bundled' | 'global' | 'project';
+export const workflowSourceSchema = z.enum(['project', 'bundled', 'global', 'installed']);
+
+export type WorkflowSource = z.infer<typeof workflowSourceSchema>;
 
 /**
  * The workflow-level configuration an author WROTE, captured before composition
@@ -428,7 +433,11 @@ export interface DeclaredWorkflowConfig {
 export interface WorkflowWithSource {
   readonly workflow: ResolvedWorkflow;
   readonly source: WorkflowSource;
-  /** Warnings from YAML parsing (e.g. unknown keys) — never hard-fails. */
+  /**
+   * Author-facing warnings for this workflow: unknown keys and deprecation notices from
+   * parsing the file, plus the loop_group sink-shape verdicts discovery computes on the
+   * expanded graph (#2756). Never hard-fails.
+   */
   readonly parseWarnings?: readonly string[];
   /** What the author declared at workflow level, for display. @see DeclaredWorkflowConfig */
   readonly declared?: DeclaredWorkflowConfig;
@@ -447,6 +456,13 @@ export interface WorkflowLoadError {
  * Result of workflow discovery - includes both successful loads and errors
  */
 export interface WorkflowLoadResult {
+  /** Every dispatchable workflow: the only list a run, route, or listing may resolve against. */
   readonly workflows: readonly WorkflowWithSource[];
+  /**
+   * Installed packs' support workflows, named `owner/plugin:<name>`. Not dispatchable:
+   * only composition inside their own pack (a runtime `include:` fan-out) resolves them.
+   * Discovery always sets it; a result built by hand without installed packs may omit it.
+   */
+  readonly support?: readonly WorkflowWithSource[];
   readonly errors: readonly WorkflowLoadError[];
 }

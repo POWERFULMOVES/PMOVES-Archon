@@ -9,8 +9,14 @@ import {
   type SuspendReason,
 } from './node-state';
 import type { TokenUsage } from '@archon/providers/types';
-import { nodeExecutionMetadataSchema, type NodeExecutionMetadata } from './node-execution';
+import {
+  nodeExecutionMetadataSchema,
+  nodeFailureKindSchema,
+  type NodeExecutionMetadata,
+} from './node-execution';
 import { checkoutObservationSchema } from './checkout-observation';
+import { runStopReasonSchema, type RunStopReason } from './run-terminal-reason';
+import { workflowSourceSchema } from './workflow';
 // Type-only, so the output-ref ↔ schemas edge stays erased (no runtime cycle).
 import type { JsonValue } from '../output-ref';
 import { isAbsolute } from 'path';
@@ -230,6 +236,8 @@ export const nodeOutputSchema = z.discriminatedUnion('state', [
      *  that stdout and can read as transient. Only `false` is expressible: a producer can
      *  refuse retry, never force one past a FATAL classification. */
     retryable: z.literal(false).optional(),
+    /** Why the node failed, when the producer knows it (see `nodeFailureKindSchema`). */
+    failureKind: nodeFailureKindSchema.optional(),
   }),
   z.object({
     execution: nodeExecutionMetadataSchema.optional(),
@@ -447,12 +455,100 @@ export function readContinuationMode(
   return mode === 'adopt' || mode === 'supersede' ? mode : undefined;
 }
 
+/**
+ * The host, process and user that last took over executing this run, stamped by the
+ * executor each time it starts or resumes execution. The live-owner endpoint is
+ * local to one host and one user, so when no owner answers, this record is what
+ * `abandon` shows the operator, including whether the owner ran on another host or
+ * as another user. It is a report, never a liveness signal: nothing decides a run is
+ * dead from it.
+ */
+export const EXECUTION_OWNER_METADATA_KEY = 'execution_owner';
+
+export interface ExecutionOwnerRecord {
+  host: string;
+  pid: number;
+  /** POSIX user id; absent on Windows, where the endpoint is not scoped by uid. */
+  uid?: number;
+}
+
+/** Typed view of the execution-owner stamp; undefined on runs that predate it. */
+export function readExecutionOwner(
+  metadata: Record<string, unknown> | undefined
+): ExecutionOwnerRecord | undefined {
+  const raw = metadata?.[EXECUTION_OWNER_METADATA_KEY];
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { host, pid, uid } = raw as { host?: unknown; pid?: unknown; uid?: unknown };
+  if (typeof host !== 'string' || host.length === 0) return undefined;
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  return typeof uid === 'number' && Number.isInteger(uid) && uid >= 0
+    ? { host, pid, uid }
+    : { host, pid };
+}
+
 /** Typed view of the run-lifecycle keys on a run's metadata; undefined when unset. */
 export function readIdentityUnresolved(
   metadata: Record<string, unknown> | undefined
 ): boolean | undefined {
   const raw = metadata?.[RUN_METADATA_KEYS.identityUnresolved];
   return typeof raw === 'boolean' ? raw : undefined;
+}
+
+/**
+ * Key under which a run records WHY it stopped (#3479).
+ *
+ * A stopped run's status says `failed`, which in this codebase also means
+ * "resumable" — so an operator who pressed Ctrl-C sees the same row as an
+ * operator whose workflow broke. The categorical cause is already durable in the
+ * terminal `workflow_failed` event's `exit_reason`, but no operator surface reads
+ * events for it: `workflow get` reads the run row, and the console's list endpoint
+ * returns run rows with no events at all. This key is the same fact on the row,
+ * so both read it without a second mechanism each.
+ *
+ * Written by the process that owns the run, from the signal it received. Cleared
+ * by `resumeWorkflowRun`, so a resumed-and-completed run does not go on claiming
+ * it was interrupted. Absent on runs that stopped before this key existed.
+ */
+export const RUN_STOP_REASON_METADATA_KEY = 'stop_reason';
+
+/** Typed view of the stop reason; undefined when the run carries none this build can read. */
+export function readRunStopReason(
+  metadata: Record<string, unknown> | undefined
+): RunStopReason | undefined {
+  const parsed = runStopReasonSchema.safeParse(metadata?.[RUN_STOP_REASON_METADATA_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Key under which a run records what its DISPATCHING surface resolved for it (#2454).
+ *
+ * A resume re-enters the executor with whatever the resuming surface happens to hold,
+ * and the in-process auto-resume after a child gate holds nothing at all. Re-resolving
+ * these from the environment then lets a run change what it is halfway through: the
+ * same `$BASE_BRANCH` reference answers a different branch after the gate than before
+ * it, and a bundled workflow starts reporting itself as custom. Written once when the
+ * run starts and read back on every continuation, so the run keeps the answers it
+ * began with. Absent on runs created before this key existed — those continue to
+ * re-resolve, which is the behavior they have always had.
+ */
+export const RUN_DISPATCH_METADATA_KEY = 'dispatch';
+
+export const runDispatchMetadataSchema = z.object({
+  /** The resolved `$BASE_BRANCH`. Empty string is a real outcome (folder projects, and
+   *  repos where auto-detection failed), which is why absence is carried by the key. */
+  base_branch: z.string(),
+  /** Discovery source, for run attribution and telemetry categorization. */
+  source: workflowSourceSchema.optional(),
+});
+
+export type RunDispatchMetadata = z.infer<typeof runDispatchMetadataSchema>;
+
+/** Typed view of the dispatch stamp; undefined when the run carries none this build can read. */
+export function readRunDispatchMetadata(
+  metadata: Record<string, unknown> | undefined
+): RunDispatchMetadata | undefined {
+  const parsed = runDispatchMetadataSchema.safeParse(metadata?.[RUN_DISPATCH_METADATA_KEY]);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**

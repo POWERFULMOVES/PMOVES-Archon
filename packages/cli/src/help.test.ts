@@ -55,12 +55,12 @@ describe('CLI help output', () => {
     expect(help).toContain('Use <name> --full for one exact description');
   });
 
-  it('distinguishes active cancel from state-only abandon', () => {
+  it('describes cancel and abandon', () => {
     expect(help).toContain(
-      'workflow cancel <run-id>   Stop a running workflow started with --detach'
+      'workflow cancel <run-id>   Stop a running workflow (stops an owning process first)'
     );
     expect(help).toContain(
-      'workflow abandon <run-id>  Mark a run cancelled without stopping host work'
+      'workflow abandon <run-id>  Mark a run cancelled, stopping a live owner first'
     );
   });
 
@@ -184,8 +184,8 @@ Commands:
   workflow logs <run-id>     Print or follow a run's JSONL transcript
   workflow wait <run-id>     Block until the run ends or needs a human decision
   workflow resume <run-id>   Resume a failed or paused run from completed nodes
-  workflow cancel <run-id>   Stop a running workflow started with --detach
-  workflow abandon <run-id>  Mark a run cancelled without stopping host work
+  workflow cancel <run-id>   Stop a running workflow (stops an owning process first)
+  workflow abandon <run-id>  Mark a run cancelled, stopping a live owner first
   workflow respond <run-id> <decision> [text]
                              Resolve a paused gate with any of its declared decisions
                              ('approve'/'reject' are sugar for the dedicated commands)
@@ -200,10 +200,16 @@ Commands:
                              scratch worktree of HEAD
   isolation list             List all active worktrees/environments
   isolation cleanup [days]   Remove stale environments (default: 7 days)
-  isolation cleanup --merged Remove environments with branches merged into main
+  isolation cleanup --merged Remove environments with branches merged into the base branch
   complete <branch> [...]    Complete branch lifecycle (remove worktree + branches)
   serve                      Start the web UI server (binary installs download it on first run)
   skill install [path]       Install archon-cli into .claude/skills and .agents/skills
+  plugin install <owner/repo[/path][@tag]>
+                             Install a plugin from GitHub (default: forge plugins the latest release, workflow packs the default branch)
+  plugin update <id>[@tag]   Reinstall an installed plugin at a tag, or its latest release or default branch
+  plugin remove <id>         Delete the files an installed plugin wrote
+  plugin copy <id>           Copy an installed workflow pack into this project's .archon/workflows/
+  plugin list                Show installed plugins with tag and commit
   doctor [--full]            Verify your Archon setup (Claude/Codex binaries, gh auth, DB, adapters; --full also probes the OpenCode runtime SDK)
   auth github                Connect your GitHub identity via device flow (multi-user installs)
   ai key set <provider>      Connect an AI provider API key (multi-user installs; key read from prompt/stdin)
@@ -216,6 +222,8 @@ Commands:
   ai alias set <@n> <p> <m>  Set a @custom model alias [--effort <e>] [--scope user|install]
   ai alias list [--json]     Show configured @custom aliases (install + yours)
   ai alias unset <@name>     Remove a @custom alias [--scope user|install]
+  ai capacity [--json]       Show provider attempts holding concurrency.providers capacity
+  ai capacity release <id>   Release a held attempt whose owner process you verified is gone
   ai default <p> [<model>]   Set the default assistant (+ chat model) [--scope user|install]
   telemetry status           Show anonymous telemetry state (enabled, reason, ID, host)
   telemetry reset            Rotate the anonymous install UUID
@@ -283,6 +291,7 @@ Examples:
   archon workflow run archon-smart-pr-review --adopt <run-id> "Review the changes"
   archon skill install
   archon skill install /path/to/project
+  archon plugin install coleam00/Archon/plugins/forge-github
   archon workflow search "pr review"
   archon workflow install archon-piv-loop
 

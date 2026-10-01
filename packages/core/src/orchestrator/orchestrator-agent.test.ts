@@ -269,6 +269,7 @@ const CAPTURED_SOURCE_ROOTS: WorkflowExecutor.WorkflowSourceRoots = {
   globalScripts: '/capture/global/scripts',
   bundledWorkflows: '/capture/bundled/workflows',
   bundledCommands: '/capture/bundled/commands/defaults',
+  installed: { kind: 'captured', captureRoot: '/capture' },
   kind: 'captured',
   anchor: {
     root: '/capture',
@@ -2506,6 +2507,7 @@ describe('workflow dispatch routing — interactive flag', () => {
           globalScripts: '/capture-branch/global/scripts',
           bundledWorkflows: '/capture-branch/bundled/workflows',
           bundledCommands: '/capture-branch/bundled/commands/defaults',
+          installed: { kind: 'captured', captureRoot: '/capture-branch' },
           kind: 'captured',
           anchor: {
             root: '/capture-branch',
@@ -4109,7 +4111,8 @@ describe('paused approval gate routing', () => {
 
     expect(mockGetPausedWorkflowRun).not.toHaveBeenCalled();
     expect(mockCreateWorkflowEvent).not.toHaveBeenCalled();
-    expect(mockHandleCommand).toHaveBeenCalledWith(conversation, '   /status');
+    // The platform rides along so command suggestions use its spelling.
+    expect(mockHandleCommand).toHaveBeenCalledWith(conversation, '   /status', platform);
     expect(platform.sendMessage).toHaveBeenCalledWith('conv-1', 'status ok');
   });
 
@@ -5868,6 +5871,59 @@ describe('chat turn telemetry', () => {
       })
     );
   });
+
+  test('a routed turn whose workflow dispatch throws is not a failed chat turn', async () => {
+    const codebase = makeNamedCodebase('my-project');
+    mockGetOrCreateConversation.mockReturnValueOnce(
+      Promise.resolve(makeConversation({ codebase_id: null }))
+    );
+    mockListCodebases.mockImplementation(() => Promise.resolve([codebase]));
+    mockDiscoverWorkflowsWithConfig.mockImplementation(() =>
+      Promise.resolve({
+        workflows: [makeTestWorkflowWithSource({ name: 'assist' })],
+        errors: [],
+      })
+    );
+    mockSendQuery.mockImplementation(async function* () {
+      yield { type: 'assistant', content: '/invoke-workflow assist --project my-project' };
+      yield { type: 'result', sessionId: 'session-1' };
+    });
+    mockUpdateConversation.mockImplementationOnce(() =>
+      Promise.reject(new Error('database is locked'))
+    );
+
+    const platform = makePlatform();
+    await handleMessage(platform, 'conv-1', 'run assist on my project');
+
+    // Positive control: dispatch reached the write that failed.
+    expect(mockUpdateConversation).toHaveBeenCalledWith('conv-1-db', {
+      codebase_id: 'id-my-project',
+    });
+    expect(mockCaptureChatTurn).not.toHaveBeenCalled();
+  });
+
+  for (const mode of ['stream', 'batch'] as const) {
+    test(`captures exactly one failed chat turn when the provider throws mid-turn (${mode})`, async () => {
+      mockGetOrCreateConversation.mockReturnValueOnce(
+        Promise.resolve(makeConversation({ codebase_id: null }))
+      );
+      mockSendQuery.mockImplementation(async function* () {
+        yield { type: 'assistant', content: 'partial' };
+        throw new Error('provider subprocess exited');
+      });
+      const platform = makePlatform();
+      platform.getStreamingMode.mockImplementation(() => mode);
+
+      await handleMessage(platform, 'conv-1', 'hello');
+
+      expect(mockCaptureChatTurn).toHaveBeenCalledTimes(1);
+      expect(mockCaptureChatTurn).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: 'web', provider: 'claude', outcome: 'failed' })
+      );
+      // The user still hears about it from the outer handler.
+      expect(platform.sendMessage).toHaveBeenCalled();
+    });
+  }
 });
 
 // ─── Per-user AI prefs + tier-fallback nudge (Phase 3) ──────────────────────
@@ -6777,5 +6833,53 @@ describe('continueResolvedGateRun — chat gate continuation source (#2646)', ()
 
     expect(messages.some(m => m.includes('final status could not be saved'))).toBe(true);
     expect(messages.some(m => m.includes('retry with `/workflow resume'))).toBe(false);
+  });
+
+  describe('recovery commands use the surface spelling', () => {
+    // Mirrors the Slack adapter: its registered slash command is `/archon-workflow`.
+    function makeSlackPlatform(): ReturnType<typeof makePlatform> &
+      Pick<IPlatformAdapter, 'formatWorkflowCommand'> {
+      return {
+        ...makePlatform(),
+        formatWorkflowCommand: (command: string) => `/archon-workflow ${command}`,
+      };
+    }
+
+    function expectSlackSpelling(messages: string[]): void {
+      const text = messages.join('\n');
+      expect(text).toContain('/archon-workflow ');
+      expect(text.replaceAll('/archon-workflow ', '')).not.toContain('/workflow ');
+    }
+
+    test('an ordinary resume failure', async () => {
+      const messages = await continueWithRejection(makeSlackPlatform(), new Error('resume boom'));
+      expect(messages.some(m => m.includes('`/archon-workflow resume run-gated`'))).toBe(true);
+      expectSlackSpelling(messages);
+    });
+
+    test('a rejected terminal write', async () => {
+      const messages = await continueWithRejection(
+        makeSlackPlatform(),
+        new TerminalStatusWriteError(new Error('db is gone'))
+      );
+      expect(messages.some(m => m.includes('`/archon-workflow status run-gated`'))).toBe(true);
+      expectSlackSpelling(messages);
+    });
+
+    test('no project attached', async () => {
+      const platform = makeSlackPlatform();
+      await continueResolvedGateRun(
+        platform,
+        'conv-1',
+        makeConversation(),
+        null,
+        makeGateRun(),
+        'approve'
+      );
+      const messages = (platform.sendMessage as ReturnType<typeof mock>).mock.calls.map(
+        c => (c as unknown[])[1] as string
+      );
+      expectSlackSpelling(messages);
+    });
   });
 });

@@ -66,6 +66,7 @@ registerCommunityProviders();
 getVendorCatalog();
 
 import { OpenAPIHono, z } from '@hono/zod-openapi';
+import { serveWebUi } from './static-cache';
 import { validationErrorHook } from './routes/openapi-defaults';
 import {
   TelegramAdapter,
@@ -194,7 +195,7 @@ function createMessageErrorHandler(
   return async (error: unknown): Promise<void> => {
     getLog().error({ err: error, platform, conversationId }, 'message_processing_failed');
     try {
-      const userMessage = classifyAndFormatError(error as Error);
+      const userMessage = classifyAndFormatError(error as Error, adapter);
       await adapter.sendMessage(conversationId, userMessage);
     } catch (sendError) {
       getLog().error({ err: sendError, platform, conversationId }, 'error_message_send_failed');
@@ -209,7 +210,8 @@ function createMessageErrorHandler(
  * ("Operation aborted" when the PostToolUse hook writes to a closed pipe after
  * a DAG node abort). Those are logged at error level but do not exit the process.
  * All other unhandled rejections are unexpected bugs — they are logged at fatal
- * level and the process exits immediately (Fail Fast principle).
+ * level and the process exits as soon as queued telemetry flushes (bounded, so
+ * still Fail Fast).
  */
 export function handleUnhandledRejection(reason: unknown): void {
   const message = (reason instanceof Error ? reason.message : String(reason)).toLowerCase();
@@ -222,7 +224,16 @@ export function handleUnhandledRejection(reason: unknown): void {
   // All other unhandled rejections are unexpected — crash loudly so they are
   // not silently swallowed (CLAUDE.md: "Fail Fast + Explicit Errors").
   getLog().fatal({ reason }, 'unhandled_rejection.fatal');
-  process.exit(1);
+  void exitAfterTelemetryFlush(1);
+}
+
+/**
+ * Exit after flushing queued telemetry. Boot failures after `archon_started`
+ * otherwise drop that event, since `process.exit` skips pending async work.
+ */
+export async function exitAfterTelemetryFlush(code: number): Promise<never> {
+  await shutdownTelemetry();
+  process.exit(code);
 }
 
 export interface ServerOptions {
@@ -305,7 +316,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       },
       'no_ai_credentials'
     );
-    process.exit(1);
+    await exitAfterTelemetryFlush(1);
   }
 
   if (!hasClaudeCredentials) {
@@ -327,7 +338,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     getLog().info('database_connected');
   } catch (error) {
     getLog().fatal({ err: error }, 'database_connection_failed');
-    process.exit(1);
+    await exitAfterTelemetryFlush(1);
   }
 
   const config = await loadConfig();
@@ -883,7 +894,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Serve web UI static files in production
   if (process.env.NODE_ENV === 'production' || !process.env.WEB_UI_DEV) {
-    const { serveStatic } = await import('hono/bun');
     // Without an explicit path this is a source checkout or the Docker image,
     // where the web UI is whatever `bun run build:web` produced. The resolved
     // path is absolute because CWD varies with `bun --filter`.
@@ -893,10 +903,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       getLog().warn({ webDistPath }, 'web_dist_not_found');
     }
 
-    app.use('/assets/*', serveStatic({ root: webDistPath }));
-    app.use('/favicon.png', serveStatic({ root: webDistPath, path: 'favicon.png' }));
-    // SPA fallback - serve index.html for unmatched routes (after all API routes)
-    app.get('*', serveStatic({ root: webDistPath, path: 'index.html' }));
+    serveWebUi(app, webDistPath);
   }
 
   const hostname = process.env.HOST || '0.0.0.0';
@@ -1118,8 +1125,8 @@ async function checkGhAuth(): Promise<void> {
 
 // Run the application when executed directly (not imported as a library)
 if (import.meta.main) {
-  startServer().catch(error => {
+  startServer().catch(async (error: unknown) => {
     getLog().fatal({ err: error }, 'startup_failed');
-    process.exit(1);
+    await exitAfterTelemetryFlush(1);
   });
 }

@@ -16,8 +16,7 @@ import '@archon/paths/strip-cwd-env-boot';
 import { loadArchonEnv } from '@archon/paths/env-loader';
 import {
   captureDetachedInstallContext,
-  getArchonConfigPath,
-  getArchonHome,
+  getPluginsPath,
   restoreDetachedInstallContext,
   setLogDestination,
 } from '@archon/paths';
@@ -30,15 +29,13 @@ const hasDetachedRunConfigHandoff = process.argv
 const inheritedInstallContext = hasDetachedRunConfigHandoff
   ? captureDetachedInstallContext()
   : undefined;
-let forgeConfigPath = '';
 let forgeTrustedEnv: NodeJS.ProcessEnv = {};
 loadArchonEnv(process.cwd(), {
   afterUserLoad: () => {
-    forgeConfigPath = getArchonConfigPath();
-    // Discovery receives this snapshot only through its constrained process
-    // boundary. Resolve ARCHON_HOME so Docker and HOME-based installs keep the
-    // same user-scoped plugin location after repo env loads.
-    forgeTrustedEnv = { ...process.env, ARCHON_HOME: getArchonHome() };
+    // Forge plugin processes run with the environment as the user scope left it, so
+    // the repository's `.archon/.env` can supply a credential (passed separately) but
+    // cannot change the environment an executable plugin runs in.
+    forgeTrustedEnv = { ...process.env };
   },
 });
 // The detached parent sealed this payload with its effective install key. Repo
@@ -74,6 +71,7 @@ installPipeSafeConsole();
 
 import { parseArgs } from 'util';
 import { cliArgOptions } from './args';
+import { shouldReportCliStart } from './utils/cli-start-telemetry';
 import { renderHelp } from './help';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
@@ -213,12 +211,12 @@ function isVersionRequest(args: string[]): boolean {
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
 
-  // Anonymous once-per-invocation startup event (self-gates on opt-out).
-  // Emitted before any early return so EVERY invocation — including bare
-  // `archon`, `--help`, and `--version` — is counted, matching the
-  // "once per CLI invocation" contract. Each early-return path below flushes
-  // via shutdownTelemetry(); the main command path flushes in its finally.
-  captureArchonStarted({ surface: 'cli' });
+  // Anonymous startup event (self-gates on opt-out). Emitted before any early
+  // return so every invocation — including bare `archon`, `--help`, and
+  // `--version` — is counted once; `serve` and detached run owners are counted
+  // by another process (see shouldReportCliStart). Each early-return path below
+  // flushes via shutdownTelemetry(); the main command path flushes in its finally.
+  if (shouldReportCliStart(args, process.env)) captureArchonStarted({ surface: 'cli' });
 
   // Handle no arguments - show help and exit successfully
   if (args.length === 0) {
@@ -360,7 +358,7 @@ async function main(): Promise<number> {
       const { forgeCommand } = await loadRoute(() => import('./commands/forge'));
       return await forgeCommand(subcommand, {
         data: typeof values.data === 'string' ? values.data : undefined,
-        configPath: forgeConfigPath,
+        dataFile: typeof values['data-file'] === 'string' ? values['data-file'] : undefined,
         trustedEnv: forgeTrustedEnv,
       });
     }
@@ -379,6 +377,17 @@ async function main(): Promise<number> {
           'Use: archon workflow run <name> --adopt <run-id> <input>\n' +
           'Find a prior run id with: archon workflow runs --open (or workflow get <run-id>)'
       );
+    }
+    if (command === 'plugin') {
+      const { pluginCommand } = await loadRoute(() => import('./commands/plugin'));
+      const { getArchonVersion } = await loadRoute(() => import('./commands/version'));
+      return await pluginCommand(subcommand, positionals.slice(2), {
+        // The trusted plugins directory forge and workflow-pack discovery read, so repo
+        // env cannot redirect where an install lands.
+        pluginsDir: getPluginsPath(),
+        archonVersion: await getArchonVersion(),
+        projectDir: cwd,
+      });
     }
     // Note: orphaned run cleanup moved to `workflow cleanup` command only.
     // Running it on every CLI startup killed parallel workflow runs (all
@@ -577,7 +586,13 @@ async function main(): Promise<number> {
           providers: true,
           database: true,
         });
-        await setupCommand({ spawn: spawnFlag, repoPath, scope, force: forceFlag });
+        const setupExitCode = await setupCommand({
+          spawn: spawnFlag,
+          repoPath,
+          scope,
+          force: forceFlag,
+        });
+        if (setupExitCode !== 0) return setupExitCode;
         break;
       }
 
@@ -1184,6 +1199,8 @@ async function main(): Promise<number> {
           aiAliasListCommand,
           aiAliasUnsetCommand,
           aiDefaultCommand,
+          aiCapacityListCommand,
+          aiCapacityReleaseCommand,
         } = await loadRoute(() => import('./commands/ai'), {
           providers: true,
           database: true,
@@ -1248,6 +1265,16 @@ async function main(): Promise<number> {
                 );
             }
           }
+          case 'capacity': {
+            const action = positionals[2];
+            if (action === undefined || action === 'list')
+              return await aiCapacityListCommand(jsonFlag);
+            if (action === 'release') return await aiCapacityReleaseCommand(positionals[3]);
+            return await fail(
+              jsonFlag,
+              'Usage: archon ai capacity [list] [--json] | capacity release <attempt-id>'
+            );
+          }
           case 'default':
             return await aiDefaultCommand(
               positionals[2],
@@ -1261,7 +1288,7 @@ async function main(): Promise<number> {
                 : `Unknown ai subcommand: ${subcommand}`;
             return await fail(
               jsonFlag,
-              `${problem}\nAvailable: key set <provider>, login <provider>, list, logout <provider>, tier set|list|unset, alias set|list|unset, default <provider> [<model>]`
+              `${problem}\nAvailable: key set <provider>, login <provider>, list, logout <provider>, tier set|list|unset, alias set|list|unset, capacity [list]|release <attempt-id>, default <provider> [<model>]`
             );
           }
         }

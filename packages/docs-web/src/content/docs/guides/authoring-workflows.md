@@ -830,9 +830,9 @@ When a `nodes:` (DAG) workflow fails, the prior run stays in the database as a c
 
 **Crashed servers / orphaned runs**: Archon does **not** auto-fail `running` rows on server startup — that would kill workflows actively executing in another process (CLI, adapter). If a server crash leaves a row stuck as `running`, it remains visible in the console run list. Transition it to a terminal status explicitly:
 
-- **Web UI**: open a live run and use **Cancel** in the run detail action bar.
+- **Web UI**: open the run and use **Cancel** in the run detail action bar. When no owner answers, Cancel refuses, shows what the run recorded, and offers **Abandon**; use it after verifying the owner is gone.
 - **CLI orphan cleanup**: after verifying the owner is gone, use `archon workflow abandon <run-id>`.
-- **Live detached CLI run**: use `archon workflow cancel <run-id>` to terminate the exact run's host process tree before marking it `cancelled`.
+- **Live detached CLI run**: use `archon workflow cancel <run-id>` (or Cancel on any surface) to terminate the exact run's host process tree before marking it `cancelled`.
 
 Once the row reaches a terminal status, you can resume it explicitly via the paths above. Plain `archon workflow run` never resumes implicitly.
 
@@ -1080,6 +1080,9 @@ blob id of its content, its mode, and its type. Retries and the turns of a `loop
 their invocation's first observation; the next invocation (for example, the next iteration
 of an enclosing `loop_group`) records a new one. A resumed run reads the same recorded
 value. Observation never changes the checkout: no stash, no index write, no `git add`.
+The recorded commit is the one `git status` reported comparing the worktree against; if
+HEAD keeps moving while the checkout is read, the observation is `unavailable` rather than a
+guess.
 
 The reference is valid only as the whole value of a `command:` or `script:` binding, and
 only for a producer that executes against the checkout. Anything else is a load error.
@@ -1844,7 +1847,11 @@ provider itself reported. JSONL `node_complete.cost_usd` and persisted
 successful run's totals as `cost_usd` and `tokens`; a DAG-owned terminal `workflow_error`
 carries the same aggregate when work reported usage before failure. These match run metadata
 `total_cost_usd` and `total_tokens_*`. An absent `cost_usd` means the provider reported no
-cost — Codex reports none — while `0` means it reported zero. A run that spent nothing on AI,
+cost — Codex reports none — while `0` means it reported zero. Claude reports a session's
+running total, so Archon subtracts the total it last saw for the session a node resumes or
+forks. When that session was created by an earlier Archon process, for example before
+`archon workflow resume` or across `persist_session` invocations, the earlier total is
+unknown and the node's `cost_usd` is absent rather than over-counted. A run that spent nothing on AI,
 such as a bash-only workflow, carries no `cost_usd` rather than `0`. Successful loop nodes and
 governance nodes do not yet have complete terminal transcript-row coverage, so read usage from
 the rows that exist rather than treating an absent row as zero spend.

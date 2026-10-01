@@ -261,6 +261,7 @@ const mockPrepareWorkflowSource = mock<typeof WorkflowExecutor.prepareWorkflowSo
         globalScripts: '/capture/global/scripts',
         bundledWorkflows: '/capture/bundled/workflows',
         bundledCommands: '/capture/bundled/commands/defaults',
+        installed: { kind: 'captured', captureRoot: '/capture' },
         kind: 'captured',
         anchor: {
           root: '/capture',
@@ -715,7 +716,9 @@ describe('dispatchBackgroundWorkflow', () => {
     await dispatchBackgroundWorkflow(makeRoutingCtx(), workflow);
     await flushBackgroundExecution();
 
-    expect(mockFailWorkflowRun).toHaveBeenCalledWith('run-1', 'invalid run config provider');
+    expect(mockFailWorkflowRun).toHaveBeenCalledWith('run-1', 'invalid run config provider', {
+      exitReason: 'unhandled_error',
+    });
   });
 
   test('default policy still resolves isolation for the worker', async () => {

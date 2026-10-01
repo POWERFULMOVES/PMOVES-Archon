@@ -46,7 +46,12 @@ import {
   resolveFolderBackend,
   classifyIsolationError,
 } from '@archon/isolation';
-import type { ExecutionContext, ContainerBackend, ContainerBackendConfig } from '@archon/isolation';
+import type {
+  ExecutionContext,
+  ContainerBackend,
+  ContainerBackendConfig,
+  IsolatedEnvironment,
+} from '@archon/isolation';
 import type { TaskBranchSelection } from '@archon/isolation';
 import {
   createLogger,
@@ -69,7 +74,6 @@ import { createWorkflowDeps } from '@archon/core/workflows/store-adapter';
 import { toHydratedTimestamp } from '@archon/core/db/timestamps';
 import { createChildWorktreeResolver } from '@archon/core/workflows/child-isolation-resolver';
 import { findCodebaseForCheckoutPath } from '@archon/core/services/codebase-checkout-resolver';
-import { reclaimContainerEnv } from '@archon/core/services/cleanup-service';
 import { waitForRunAttention } from '@archon/core/services/run-attention-watch';
 import type { RunWaitResult } from '@archon/core/services/run-attention-watch';
 import {
@@ -127,6 +131,7 @@ import {
   isWorkflowWaitContext,
   workflowWaitStepName,
   isScheduledWorkflowResume,
+  readRunStopReason,
   skipCauseSchema,
   SUBRUN_METADATA_KEYS,
   CONTINUATION_METADATA_KEY,
@@ -147,6 +152,11 @@ import {
   respondToWorkflow,
   resumeWorkflow as resumeWorkflowOp,
   abandonWorkflow,
+  cancelWorkflow,
+  CancelRefusedError,
+  ChildRunRedirectError,
+  type CancelWorkflowResult,
+  describeAbandonOwner,
   getWorkflowStatus,
   resetWorkflowNodeSessions,
   assertApprovable,
@@ -165,6 +175,8 @@ import type { WorkflowEventRow } from '@archon/core/db/workflow-events';
 import * as userDb from '@archon/core/db/users';
 import * as git from '@archon/git';
 import { CLIAdapter } from '../adapters/cli-adapter';
+import { spellWorkflowCommand } from '@archon/workflows/deps';
+import { CLI_WORKFLOW_SURFACE } from '../utils/workflow-surface';
 import { writeJsonLine, writeStderr, writeStdout } from '../utils/stdout';
 import { registerOwnedRunTermination } from '../utils/owned-run-termination';
 import { DETACHED_RUN_FAILED_EXIT_CODE, WorkflowRunFailedError } from '../utils/workflow-exit-code';
@@ -176,7 +188,6 @@ export {
 import {
   assertDetachedRunProcessOwner,
   DETACHED_RUN_OWNER_ENV,
-  requestDetachedRunStop,
 } from '../utils/detached-run-control';
 import { resolveCliUserId } from './auth';
 import { RESUME_RUN_CONFIG_CONFLICT } from '../dispatch-guards';
@@ -1174,7 +1185,7 @@ function countWorkflowSources(
       counts[entry.source] += 1;
       return counts;
     },
-    { bundled: 0, global: 0, project: 0 }
+    { bundled: 0, global: 0, project: 0, installed: 0 }
   );
 }
 
@@ -1724,7 +1735,7 @@ async function runWorkflowWithOwnedSource(
     console.log(
       `Discovery: root=${effectiveDiscoveryCwd} workflows=${String(workflowEntries.length)} ` +
         `bundled=${String(sourceCounts.bundled)} global=${String(sourceCounts.global)} ` +
-        `project=${String(sourceCounts.project)}`
+        `project=${String(sourceCounts.project)} installed=${String(sourceCounts.installed)}`
     );
   }
 
@@ -2394,7 +2405,9 @@ async function runWorkflowWithOwnedSource(
       // records why instead of leaving a `pending` row nobody can explain.
       if (launchedRunId !== undefined) {
         await workflowDb
-          .failWorkflowRun(launchedRunId, `Detached launch failed: ${(error as Error).message}`)
+          .failWorkflowRun(launchedRunId, `Detached launch failed: ${(error as Error).message}`, {
+            exitReason: 'launch_failed',
+          })
           .catch((dbError: Error) => {
             getLog().error(
               { err: dbError, workflowRunId: launchedRunId },
@@ -2888,31 +2901,41 @@ async function runWorkflowWithOwnedSource(
         'worktree_creating'
       );
 
-      const isolatedEnv = await provider.create({
-        workflowType: 'task',
-        identifier: branchIdentifier,
-        taskBranch: adoptedTaskBranch
-          ? adoptedTaskBranch
-          : options.branchName
-            ? {
-                kind: 'new',
-                branch: git.toBranchName(options.branchName),
-                ...(options.fromBranch?.trim()
-                  ? { fromBranch: git.toBranchName(options.fromBranch.trim()) }
-                  : {}),
-              }
-            : options.fromBranch?.trim()
-              ? { kind: 'new', fromBranch: git.toBranchName(options.fromBranch.trim()) }
-              : undefined,
-        baseBranch: codebaseDefaultBranch ? git.toBranchName(codebaseDefaultBranch) : undefined,
-        baseOverride: flagBase ? git.toBranchName(flagBase) : undefined,
-        codebaseId: codebase.id,
-        // owner/repo name lets resolveOwnerRepo use the registered identity
-        // instead of the _local/<basename> path fallback (#2022, #2227)
-        codebaseName: codebase.name,
-        canonicalRepoPath: git.toRepoPath(codebase.default_cwd),
-        description: `CLI workflow: ${workflowName}`,
-      });
+      let isolatedEnv: IsolatedEnvironment;
+      try {
+        isolatedEnv = await provider.create({
+          workflowType: 'task',
+          identifier: branchIdentifier,
+          taskBranch: adoptedTaskBranch
+            ? adoptedTaskBranch
+            : options.branchName
+              ? {
+                  kind: 'new',
+                  branch: git.toBranchName(options.branchName),
+                  ...(options.fromBranch?.trim()
+                    ? { fromBranch: git.toBranchName(options.fromBranch.trim()) }
+                    : {}),
+                }
+              : options.fromBranch?.trim()
+                ? { kind: 'new', fromBranch: git.toBranchName(options.fromBranch.trim()) }
+                : undefined,
+          baseBranch: codebaseDefaultBranch ? git.toBranchName(codebaseDefaultBranch) : undefined,
+          baseOverride: flagBase ? git.toBranchName(flagBase) : undefined,
+          codebaseId: codebase.id,
+          // owner/repo name lets resolveOwnerRepo use the registered identity
+          // instead of the _local/<basename> path fallback (#2022, #2227)
+          codebaseName: codebase.name,
+          canonicalRepoPath: git.toRepoPath(codebase.default_cwd),
+          description: `CLI workflow: ${workflowName}`,
+        });
+      } catch (createError) {
+        // Same translation the container branches above apply. The classified
+        // message also carries the note a failed cleanup records outside
+        // `err.message`, which the raw error would drop on this path.
+        const err = createError as Error;
+        getLog().error({ err, branch: branchIdentifier }, 'worktree.create_failed');
+        throw new Error(classifyIsolationError(err), { cause: err });
+      }
 
       // Track in database
       const envRecord = await isolationDb.create({
@@ -3641,7 +3664,8 @@ async function recordDetachedChildStartupFailure(
     if (status !== 'pending') return;
     await workflowDb.failWorkflowRun(
       detachedRunId,
-      `Detached run failed to start: ${error.message}`
+      `Detached run failed to start: ${error.message}`,
+      { exitReason: 'launch_failed' }
     );
   } catch (dbError) {
     getLog().error(
@@ -3687,6 +3711,8 @@ export interface NodeSummary {
   durationMs?: number;
   outputPreview?: string;
   error?: string;
+  /** Set when the failure is "a live child run blocks this node"; abandoning it unblocks. */
+  blockedOnChildRunId?: string;
   cause?: SkipCause;
   execution?: NodeExecutionMetadata;
 }
@@ -3778,6 +3804,9 @@ export function buildNodeSummaries(events: WorkflowEventRow[]): NodeSummary[] {
           durationMs:
             execution?.timing.durationMs ?? (started !== undefined ? endTime - started : undefined),
           error: record.data.error ?? 'Unknown error',
+          ...(record.data.blocked_on_child_run_id === undefined
+            ? {}
+            : { blockedOnChildRunId: record.data.blocked_on_child_run_id }),
           ...(execution === undefined ? {} : { execution }),
         });
         break;
@@ -3860,6 +3889,13 @@ function printVerboseNodes(events: WorkflowEventRow[]): void {
     }
     if (node.error !== undefined) {
       console.log(`        Error:  ${node.error}`);
+    }
+    if (node.blockedOnChildRunId !== undefined) {
+      const abandon = spellWorkflowCommand(
+        CLI_WORKFLOW_SURFACE,
+        `abandon ${node.blockedOnChildRunId}`
+      );
+      console.log(`        Abandon: ${abandon}`);
     }
   }
 }
@@ -4244,6 +4280,27 @@ export function describeCheckoutBaseline(baseline: WorkflowRun['checkout_baselin
 }
 
 /**
+ * The `Stopped:` line for a run a signal ended, or null for every other stop reason.
+ *
+ * Only `process_terminated` gets prose here: it is the one stop reason whose whole
+ * point is that the run did not break, so an operator reading `failed` needs to be
+ * told. The rest are execution failures the `Error:` line already describes, and
+ * inventing operator wording for them is nobody's validated language.
+ *
+ * SIGINT reaching a foreground process is the terminal's interrupt character, so
+ * naming the operator there is a fact. A SIGTERM's sender is genuinely unknown —
+ * a supervisor, a shell, a `kill` — and the stop reason is never inferred, so it
+ * gets neutral wording and lets the signal do the disambiguating.
+ */
+function describeRunStopReason(metadata: Record<string, unknown>): string | null {
+  const stopReason = readRunStopReason(metadata);
+  if (stopReason?.reason !== 'process_terminated') return null;
+  const who = stopReason.signal === 'SIGINT' ? 'the operator' : 'a signal';
+  const signal = stopReason.signal === undefined ? '' : ` (${stopReason.signal})`;
+  return `interrupted by ${who}${signal}`;
+}
+
+/**
  * Show detail for a single workflow run by ID (any status).
  *
  * Unlike `status` (active runs only), this resolves one run regardless of
@@ -4395,6 +4452,13 @@ export async function workflowGetCommand(
       `  Resume: scheduled for ${scheduledResume.resumeAt} (attempt ${String(scheduledResume.attempt)}/${String(scheduledResume.maxAttempts)})`
     );
   }
+  // Only a failed run's stop reason describes how it ended. A run can leave 'failed'
+  // with the key still set (cancelWorkflowRun abandons a failed run without touching
+  // metadata), and the console's runStatusLabel applies the same rule.
+  const stopped = run.status === 'failed' ? describeRunStopReason(run.metadata) : null;
+  if (stopped) {
+    console.log(`  Stopped: ${stopped}`);
+  }
   const runError = typeof run.metadata.error === 'string' ? run.metadata.error : undefined;
   if (runError) {
     console.log(`  Error:  ${runError}`);
@@ -4430,6 +4494,16 @@ export async function workflowGetCommand(
       for (const f of leaveBehind.artifactFiles.slice(0, 20)) console.log(`      - ${f}`);
       if (leaveBehind.artifactFiles.length > 20) console.log('      …');
     }
+    const omitted = leaveBehind.artifactFilesOmitted;
+    if (omitted.internalFiles > 0) {
+      console.log(
+        `    Engine-internal artifact files (not listed): ${String(omitted.internalFiles)}`
+      );
+    }
+    if (omitted.truncated) console.log('    Artifact list truncated at the display cap');
+    for (const path of omitted.unreadable) {
+      console.log(`    Unreadable artifact directory: ${path === '' ? '$ARTIFACTS_DIR' : path}`);
+    }
   }
   if (verbose) {
     const parseWarnings = readParseWarningEvents(events);
@@ -4463,6 +4537,20 @@ interface LeaveBehind {
   adopted_from?: string;
   adopted_by: string[];
   artifactFiles: string[];
+  artifactFilesOmitted: ArtifactOmissions;
+}
+
+/**
+ * What the artifact walk left out of `artifactFiles`, so a reader is never
+ * quietly handed a partial list (#3450).
+ */
+interface ArtifactOmissions {
+  /** Files under the engine's own artifacts child, summarized rather than listed. */
+  internalFiles: number;
+  /** The display cap stopped the listing before the run's files ran out. */
+  truncated: boolean;
+  /** Directories the walk could not read, relative to `$ARTIFACTS_DIR`. */
+  unreadable: string[];
 }
 
 async function resolveRunTranscriptPath(run: WorkflowRun): Promise<string | null> {
@@ -4474,7 +4562,11 @@ async function resolveRunTranscriptPath(run: WorkflowRun): Promise<string | null
 async function buildLeaveBehind(run: WorkflowRun): Promise<LeaveBehind> {
   const codebase = run.codebase_id ? await codebaseDb.getCodebase(run.codebase_id) : null;
 
-  const leaveBehind: LeaveBehind = { adopted_by: [], artifactFiles: [] };
+  const leaveBehind: LeaveBehind = {
+    adopted_by: [],
+    artifactFiles: [],
+    artifactFilesOmitted: { internalFiles: 0, truncated: false, unreadable: [] },
+  };
 
   if (run.working_path) {
     leaveBehind.worktree = run.working_path;
@@ -4494,7 +4586,7 @@ async function buildLeaveBehind(run: WorkflowRun): Promise<LeaveBehind> {
     }
   }
 
-  // Artifact file list — capped walk so `get` stays cheap on big runs.
+  // Artifact file list — operator-facing files, capped for display.
   // #3097: route the persisted `output_root` through the shared resolver so
   // the same `ARCHON_HOME` containment check every other persisted-root
   // reader in this file already enforces applies here. An unresolvable root
@@ -4504,7 +4596,9 @@ async function buildLeaveBehind(run: WorkflowRun): Promise<LeaveBehind> {
   if (artifactsRoot) {
     try {
       const artifactsDir = archonPaths.getRunArtifactsDirForRoot(artifactsRoot, run.id);
-      leaveBehind.artifactFiles = listArtifactFiles(artifactsDir);
+      const listing = listArtifactFiles(artifactsDir);
+      leaveBehind.artifactFiles = listing.files;
+      leaveBehind.artifactFilesOmitted = listing.omitted;
     } catch (error) {
       getLog().debug({ err: error as Error }, 'cli.workflow_get_artifact_walk_failed');
     }
@@ -4512,26 +4606,57 @@ async function buildLeaveBehind(run: WorkflowRun): Promise<LeaveBehind> {
   return leaveBehind;
 }
 
-/** Relative paths under `dir`, shallow-walked with a hard cap (#2747 display). */
-function listArtifactFiles(dir: string, maxFiles = 200): string[] {
-  const out: string[] = [];
-  const walk = (current: string, prefix: string): void => {
-    if (out.length >= maxFiles) return;
+/**
+ * The operator-facing files under `dir`, relative and capped for display (#2747).
+ *
+ * The engine writes its own bookkeeping under `RUN_ARTIFACTS_ENGINE_SUBDIR` —
+ * one typed-artifact listing per node invocation, node-output spills — which on
+ * a pack run outnumbers the reports a person reads and used to consume the whole
+ * cap. Those files are counted rather than listed (#3450); their content is
+ * already reachable through the engine's own `nodes/` sidecars.
+ *
+ * The walk stays exhaustive so the counts are true: it is the same tree the
+ * console's artifacts route already walks in full on every run page. Each
+ * directory yields its own files before its subdirectories, sorted, so the cap
+ * and the human preview fall on nested content rather than on whichever entries
+ * `readdir` happened to return first — a run's reports sit at the top level.
+ */
+function listArtifactFiles(dir: string, maxFiles = 200): ArtifactListing {
+  const files: string[] = [];
+  const omitted: ArtifactOmissions = { internalFiles: 0, truncated: false, unreadable: [] };
+  const walk = (current: string, prefix: string, internal: boolean): void => {
     let entries: Dirent[];
     try {
       entries = readdirSync(current, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      // A directory that is simply gone dropped nothing an operator could open.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') omitted.unreadable.push(prefix);
       return;
     }
+    // Order only matters where entries reach the list; inside the engine's child
+    // they are counted, and a pack run leaves hundreds of them there.
+    if (!internal) entries.sort((left, right) => left.name.localeCompare(right.name));
+    const relative = (entry: Dirent): string => (prefix ? `${prefix}/${entry.name}` : entry.name);
+    const isEngineOwned = (entry: Dirent): boolean =>
+      internal || archonPaths.isRunArtifactsEngineEntry(prefix, entry.name);
     for (const entry of entries) {
-      if (out.length >= maxFiles) return;
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) walk(join(current, entry.name), rel);
-      else out.push(rel);
+      if (entry.isDirectory()) continue;
+      if (isEngineOwned(entry)) omitted.internalFiles++;
+      else if (files.length >= maxFiles) omitted.truncated = true;
+      else files.push(relative(entry));
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      walk(join(current, entry.name), relative(entry), isEngineOwned(entry));
     }
   };
-  walk(dir, '');
-  return out;
+  walk(dir, '', false);
+  return { files, omitted };
+}
+
+interface ArtifactListing {
+  files: string[];
+  omitted: ArtifactOmissions;
 }
 
 function readParseWarningEvents(events: readonly WorkflowEventRow[]): string[] {
@@ -4683,12 +4808,40 @@ export async function workflowRunsCommand(
 }
 
 /**
+ * How this surface states a refusal. Core keeps a child-run redirect free of any command
+ * spelling, so the command is written here, where `archon workflow …` is what the operator
+ * can actually type.
+ */
+function cliRefusalText(error: unknown): string {
+  return error instanceof ChildRunRedirectError
+    ? error.messageFor(CLI_WORKFLOW_SURFACE)
+    : (error as Error).message;
+}
+
+/**
+ * Run a gate operation, re-throwing a child-run redirect with this surface's spelling.
+ * The human path reports an error by propagating it, so the spelling has to be attached
+ * before it leaves. Every other error passes through untouched, keeping the type the exit
+ * code is derived from.
+ */
+async function spelledForCli<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (error) {
+    if (error instanceof ChildRunRedirectError) {
+      throw new Error(cliRefusalText(error), { cause: error });
+    }
+    throw error;
+  }
+}
+
+/**
  * Emit the standard `{ ok: false }` error line for a `--json` write command
  * (approve/reject/abandon/resume). Centralizes the envelope so all four stay in
  * lockstep; never throws — in --json mode the JSON line IS the error surface.
  */
 function printJsonWriteError(runId: string, action: string, error: unknown): Promise<void> {
-  return writeJsonLine({ ok: false, runId, action, error: (error as Error).message });
+  return writeJsonLine({ ok: false, runId, action, error: cliRefusalText(error) });
 }
 
 /**
@@ -4776,7 +4929,7 @@ async function runDetachedControlCommand(
   precheck: () => Promise<WorkflowRun>
 ): Promise<void> {
   try {
-    const run = await precheck();
+    const run = await spelledForCli(precheck);
     // The caller's --cwd, already resolved by cli.ts — NOT process.cwd(). The
     // appended --cwd is last-wins on the child's argv, so discarding it here
     // strands the child in the parent's directory (possibly outside any git
@@ -4978,19 +5131,30 @@ export async function workflowAbandonCommand(
   json?: boolean,
   cwd?: string
 ): Promise<void> {
-  // The container reclaim (M2) now lives in the shared `abandonWorkflow` op, so EVERY
-  // surface reclaims — the CLI just reports the cancellation. Keeps `--json` a clean
-  // one-line contract (no reclaim text before the payload).
+  // The container reclaim (M2) and the live-owner stop both live in the shared
+  // `abandonWorkflow` op, so EVERY surface does them — the CLI reports the outcome.
+  // Keeps `--json` a clean one-line contract (no reclaim text before the payload).
   if (json) {
     try {
       const resolvedId = await resolveRunIdArg(runId, cwd);
-      const { run, cascadeFailures, blockedParentRunId } = await abandonWorkflow(resolvedId);
+      const { run, cascadeFailures, blockedParentRunId, owner } = await abandonWorkflow(resolvedId);
       await writeJsonLine({
         ok: true,
         runId: resolvedId,
         action: 'abandon',
         status: 'cancelled',
         workflowName: run.workflow_name,
+        owner:
+          owner.kind === 'stopped'
+            ? { outcome: 'stopped', pid: owner.pid }
+            : {
+                outcome: 'no_owner_answered',
+                thisHost: owner.thisHost,
+                recordedHost: owner.recordedOwner?.host ?? null,
+                recordedPid: owner.recordedOwner?.pid ?? null,
+                recordedUid: owner.recordedOwner?.uid ?? null,
+                lastActivityAt: owner.lastActivityAt?.toISOString() ?? null,
+              },
         ...(cascadeFailures > 0 ? { cascadeFailures } : {}),
         ...(blockedParentRunId ? { blockedParentRunId } : {}),
       });
@@ -5001,7 +5165,8 @@ export async function workflowAbandonCommand(
   }
 
   const resolvedId = await resolveRunIdArg(runId, cwd);
-  const { run, cascadeFailures, blockedParentRunId } = await abandonWorkflow(resolvedId);
+  const { run, cascadeFailures, blockedParentRunId, owner } = await abandonWorkflow(resolvedId);
+  for (const line of describeAbandonOwner(owner)) console.log(line);
   console.log(`Abandoned workflow run: ${resolvedId}`);
   console.log(`Workflow: ${run.workflow_name}`);
   printRunTreeCancellationWarnings(cascadeFailures, blockedParentRunId);
@@ -5027,94 +5192,51 @@ function printRunTreeCancellationWarnings(
 }
 
 /**
- * Actively cancel a run owned by a detached CLI child.
+ * Cancel a running run through the shared `cancelWorkflow` op.
  *
  * Ordering is the contract: prove the live exact-run owner, terminate its process
  * tree, then record `cancelled`. An unreachable owner never falls back to a DB-only
- * transition — operators use `abandon` separately after verifying an orphan.
+ * transition — the refusal points at `abandon` for an orphan the operator has verified.
  */
 export async function workflowCancelCommand(
   runId: string,
   json?: boolean,
   cwd?: string
 ): Promise<void> {
-  const cancel = async (): Promise<{
-    resolvedId: string;
-    workflowName: string;
-    cascadeFailures: number;
-    blockedParentRunId: string | null;
-  }> => {
+  const cancel = async (): Promise<{ resolvedId: string; result: CancelWorkflowResult }> => {
     const resolvedId = await resolveRunIdArg(runId, cwd);
-    const current = await workflowDb.getWorkflowRun(resolvedId);
-    if (!current) throw new Error(`Workflow run not found: ${resolvedId}`);
-    if (current.status !== 'running') {
-      throw new Error(
-        `Cannot actively cancel run with status '${current.status}'. Only a running detached CLI run has live work to stop.`
-      );
-    }
-
-    let containerEnvId: string | undefined;
-    if (current.metadata?.isolation === 'container') {
-      const isolationEnvId = current.metadata.isolation_env_id;
-      if (typeof isolationEnvId !== 'string' || isolationEnvId.trim().length === 0) {
-        throw new Error(
-          `Cannot confirm the isolation container owned by run ${resolvedId}. ` +
-            'The run was not changed; its container tracking ID is missing.'
-        );
+    try {
+      const result = await cancelWorkflow(resolvedId);
+      if (result.kind === 'cooperative' && !result.cancelled) {
+        throw new Error(`Workflow run ${resolvedId} already finished; nothing to cancel.`);
       }
-      containerEnvId = isolationEnvId;
-      const containerEnv = await isolationDb.getById(containerEnvId);
-      if (containerEnv?.provider !== 'container') {
-        throw new Error(
-          `Cannot confirm the isolation container owned by run ${resolvedId}. ` +
-            'The run was not changed; inspect the managed containers before retrying or abandoning it.'
-        );
+      return { resolvedId, result };
+    } catch (error) {
+      if (error instanceof CancelRefusedError && error.reason === 'no_owner_answered') {
+        throw new Error(`${error.message}\nAbandon it: archon workflow abandon ${resolvedId}`, {
+          cause: error,
+        });
       }
+      throw error;
     }
-
-    const target = await requestDetachedRunStop(resolvedId);
-    await target.stop();
-
-    if (containerEnvId) {
-      try {
-        await reclaimContainerEnv(containerEnvId);
-      } catch (error) {
-        throw new Error(
-          'Detached owner process stopped, but the isolation container could not be confirmed stopped. ' +
-            `Run state was not changed. ${(error as Error).message}`
-        );
-      }
-    }
-
-    const { run, cancelled, cascadeFailures, blockedParentRunId } =
-      await abandonWorkflow(resolvedId);
-    if (!cancelled) {
-      const latest = await workflowDb.getWorkflowRun(resolvedId);
-      throw new Error(
-        'Detached work stopped, but cancellation did not win the run state transition. ' +
-          `The run status is ${latest?.status ?? 'unknown'}; it was not reported as cancelled.`
-      );
-    }
-    return {
-      resolvedId,
-      workflowName: run.workflow_name,
-      cascadeFailures,
-      blockedParentRunId,
-    };
   };
 
   if (json) {
     try {
-      const result = await cancel();
+      const { resolvedId, result } = await cancel();
       await writeJsonLine({
         ok: true,
-        runId: result.resolvedId,
+        runId: resolvedId,
         action: 'cancel',
         status: 'cancelled',
-        processStopped: true,
-        workflowName: result.workflowName,
-        ...(result.cascadeFailures > 0 ? { cascadeFailures: result.cascadeFailures } : {}),
-        ...(result.blockedParentRunId ? { blockedParentRunId: result.blockedParentRunId } : {}),
+        processStopped: result.kind === 'stopped',
+        workflowName: result.run.workflow_name,
+        ...(result.kind === 'stopped' && result.cascadeFailures > 0
+          ? { cascadeFailures: result.cascadeFailures }
+          : {}),
+        ...(result.kind === 'stopped' && result.blockedParentRunId
+          ? { blockedParentRunId: result.blockedParentRunId }
+          : {}),
       });
     } catch (error) {
       await printJsonWriteError(runId, 'cancel', error);
@@ -5122,9 +5244,15 @@ export async function workflowCancelCommand(
     return;
   }
 
-  const result = await cancel();
-  console.log(`Cancelled detached workflow run: ${result.resolvedId}`);
-  console.log(`Workflow: ${result.workflowName}`);
+  const { resolvedId, result } = await cancel();
+  if (result.kind === 'cooperative') {
+    console.log(`Cancelled workflow run: ${resolvedId}`);
+    console.log(`Workflow: ${result.run.workflow_name}`);
+    console.log("It runs inside its parent run's process and stops at its next status check.");
+    return;
+  }
+  console.log(`Cancelled detached workflow run: ${resolvedId}`);
+  console.log(`Workflow: ${result.run.workflow_name}`);
   console.log('Host process tree stopped before run state was changed.');
   printRunTreeCancellationWarnings(result.cascadeFailures, result.blockedParentRunId);
 }
@@ -5199,7 +5327,7 @@ export async function workflowApproveCommand(
   }
 
   const resolvedId = await resolveRunIdArg(runId, cwd);
-  const result = await approveWorkflow(resolvedId, comment);
+  const result = await spelledForCli(() => approveWorkflow(resolvedId, comment));
 
   // CLI auto-resumes after approval, as chat does since #2565. `--json` (handled
   // above) is the one surface that records the decision without continuing.
@@ -5325,7 +5453,7 @@ export async function workflowRejectCommand(
   }
 
   const resolvedId = await resolveRunIdArg(runId, cwd);
-  const result = await rejectWorkflow(resolvedId, rejectText);
+  const result = await spelledForCli(() => rejectWorkflow(resolvedId, rejectText));
 
   if (result.cancelled) {
     const suffix = result.maxAttemptsReached ? ' (max attempts reached)' : '';
@@ -5465,7 +5593,7 @@ export async function workflowRespondCommand(
   }
 
   const resolvedId = await resolveRunIdArg(runId, cwd);
-  const result = await respondToWorkflow(resolvedId, decision, text);
+  const result = await spelledForCli(() => respondToWorkflow(resolvedId, decision, text));
 
   if (!result.workingPath) {
     throw new Error(

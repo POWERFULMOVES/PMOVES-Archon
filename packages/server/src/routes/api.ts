@@ -64,7 +64,7 @@ import {
   setUserDefault,
 } from '@archon/core';
 import type { UserTiersPatch, UserAliasesPatch, AliasesPatch } from '@archon/core';
-import { parseWorkflowRunConfig } from '@archon/core/config';
+import { InvalidConfigError, parseWorkflowRunConfig } from '@archon/core/config';
 import type { WorkflowRunConfigInput } from '@archon/workflows/schemas/run-config';
 import type { EffortLevel } from '@archon/workflows/schemas/effort';
 import { findRepoRoot, removeWorktree, toRepoPath, toWorktreePath } from '@archon/git';
@@ -78,6 +78,7 @@ import {
   getHomeCommandsPath,
   getHomeWorkflowsPath,
   getRunArtifactsDirForRoot,
+  isRunArtifactsEngineEntry,
   resolveRunStorageRoot,
   isInsideArchonHome,
   isInsideArchonWorkspaces,
@@ -96,6 +97,7 @@ import {
 } from '@archon/workflows/workflow-discovery';
 import { FIXTURES_DIR } from '@archon/workflows/fixture-layout';
 import { parseWorkflow } from '@archon/workflows/loader';
+import { resolveWorkflowName } from '@archon/workflows/router';
 import { isValidCommandName, isValidWorkflowName } from '@archon/workflows/command-validation';
 import { BUNDLED_WORKFLOWS, BUNDLED_COMMANDS, isBinaryBuild } from '@archon/workflows/defaults';
 import {
@@ -275,6 +277,10 @@ import * as messageDb from '@archon/core/db/messages';
 import * as userDb from '@archon/core/db/users';
 import {
   abandonWorkflow,
+  AbandonOwnerNotStoppedError,
+  cancelWorkflow,
+  CancelRefusedError,
+  describeAbandonOwner,
   approveWorkflow,
   rejectWorkflow,
   respondToWorkflow,
@@ -307,6 +313,7 @@ import {
   resetWorkflowNodeSessionsQuerySchema,
   resetWorkflowNodeSessionsResponseSchema,
   listArtifactsResponseSchema,
+  workflowSourceSchema,
 } from './schemas/workflow.schemas';
 import {
   conversationListResponseSchema,
@@ -408,7 +415,7 @@ if (BUNDLED_IS_BINARY) {
   }
 }
 
-type WorkflowSource = 'project' | 'bundled' | 'global';
+type WorkflowSource = z.infer<typeof workflowSourceSchema>;
 
 /**
  * Resolve the on-disk artifact directory for a run, for EVERY project kind
@@ -441,6 +448,23 @@ function jsonError(description: string): {
   description: string;
 } {
   return { content: { 'application/json': { schema: errorSchema } }, description };
+}
+
+/**
+ * A paused-gate refusal. `childRunId` is present when the answer is "act on the child run
+ * instead", so a client reads the run to act on instead of parsing it out of the message.
+ */
+const gateRefusalSchema = errorSchema
+  .extend({ childRunId: z.string().optional() })
+  .openapi('GateRefusal');
+type GateRefusal = z.infer<typeof gateRefusalSchema>;
+
+/** Helper to build the gate routes' 400 response entry for createRoute configs. */
+function jsonGateRefusal(description: string): {
+  content: { 'application/json': { schema: typeof gateRefusalSchema } };
+  description: string;
+} {
+  return { content: { 'application/json': { schema: gateRefusalSchema } }, description };
 }
 
 const cwdQuerySchema = z.object({ cwd: z.string().optional() });
@@ -870,7 +894,9 @@ const listRunArtifactsRoute = createRoute({
   summary: "List a run's artifact files",
   description:
     "Walks the run's artifact directory and returns relative file paths with size + " +
-    'mtime. Drives the console Artifacts tab. Resolves for every project kind — ' +
+    "mtime. Drives the console Artifacts tab. Leaves out only the engine's own " +
+    '`.archon` child at the root, the same rule `archon workflow get` applies; a ' +
+    "workflow's own dotfiles are listed. Resolves for every project kind — " +
     "`owner/repo`, `_local/<basename>`, and `_folder/<slug>` — preferring the run's " +
     'persisted `output_root` and re-deriving from the codebase when it is absent or ' +
     'no longer inside ARCHON_HOME. Returns `{ files: [] }` only when the location ' +
@@ -949,6 +975,9 @@ const cancelWorkflowRunRoute = createRoute({
     },
     400: jsonError('Bad request'),
     404: jsonError('Not found'),
+    409: jsonError(
+      'No live owner answered, or the owner could not be stopped; the run was not changed'
+    ),
     500: jsonError('Server error'),
   },
 });
@@ -1016,6 +1045,7 @@ const abandonWorkflowRunRoute = createRoute({
     },
     400: jsonError('Bad request'),
     404: jsonError('Not found'),
+    409: jsonError('A live owner answered but could not be stopped; the run was not changed'),
     500: jsonError('Server error'),
   },
 });
@@ -1034,7 +1064,7 @@ const approveWorkflowRunRoute = createRoute({
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
       description: 'Approved',
     },
-    400: jsonError('Bad request'),
+    400: jsonGateRefusal('Bad request'),
     404: jsonError('Not found'),
     500: jsonError('Server error'),
   },
@@ -1054,7 +1084,7 @@ const rejectWorkflowRunRoute = createRoute({
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
       description: 'Rejected',
     },
-    400: jsonError('Bad request'),
+    400: jsonGateRefusal('Bad request'),
     404: jsonError('Not found'),
     500: jsonError('Server error'),
   },
@@ -1074,7 +1104,7 @@ const respondWorkflowRunRoute = createRoute({
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
       description: 'Responded',
     },
-    400: jsonError('Bad request'),
+    400: jsonGateRefusal('Bad request'),
     404: jsonError('Not found'),
     500: jsonError('Server error'),
   },
@@ -1171,7 +1201,7 @@ const patchAssistantConfigRoute = createRoute({
       content: { 'application/json': { schema: updateAssistantConfigResponseSchema } },
       description: 'Updated configuration',
     },
-    400: jsonError('Invalid request body'),
+    400: jsonError('Invalid request body, or the resulting config is invalid'),
     500: jsonError('Server error'),
   },
 });
@@ -1195,7 +1225,7 @@ const patchTiersConfigRoute = createRoute({
       content: { 'application/json': { schema: configResponseSchema } },
       description: 'Updated configuration',
     },
-    400: jsonError('Invalid request body'),
+    400: jsonError('Invalid request body, or the resulting config is invalid'),
     500: jsonError('Server error'),
   },
 });
@@ -1219,7 +1249,9 @@ const patchAliasesConfigRoute = createRoute({
       content: { 'application/json': { schema: configResponseSchema } },
       description: 'Updated configuration',
     },
-    400: jsonError('Invalid alias name, unknown provider, or invalid effort'),
+    400: jsonError(
+      'Invalid alias name, unknown provider, invalid effort, or the resulting config is invalid'
+    ),
     500: jsonError('Server error'),
   },
 });
@@ -1601,7 +1633,7 @@ export function registerApiRoutes(
 
   function apiError(
     c: Context,
-    status: 400 | 401 | 404 | 422 | 500 | 503,
+    status: 400 | 401 | 404 | 409 | 422 | 500 | 503,
     message: string,
     detail?: string
   ): Response {
@@ -3657,26 +3689,38 @@ export function registerApiRoutes(
     }
   });
 
-  // POST /api/workflows/runs/:runId/cancel - Cancel a workflow run
+  // POST /api/workflows/runs/:runId/cancel - Cancel a workflow run through the shared
+  // owner-checked cancel: cooperative for a run this server executes, an owner stop for
+  // one another process owns, and a 409 refusal when no owner answers.
   registerOpenApiRoute(cancelWorkflowRunRoute, async c => {
+    const runId = c.req.param('runId') ?? '';
     try {
-      const runId = c.req.param('runId') ?? '';
       const run = await workflowDb.getWorkflowRun(runId);
       if (!run) {
         return apiError(c, 404, 'Workflow run not found');
       }
-      if (run.status !== 'running' && run.status !== 'pending' && run.status !== 'paused') {
-        return apiError(c, 400, `Cannot cancel workflow in '${run.status}' status`);
+      const result = await cancelWorkflow(runId);
+      if (result.kind === 'cooperative') {
+        return c.json({
+          success: true,
+          message: result.cancelled
+            ? `Cancelled workflow: ${run.workflow_name}`
+            : `Workflow ${run.workflow_name} already finished — nothing to cancel.`,
+        });
       }
-      const { cancelled } = await workflowDb.cancelWorkflowRun(runId);
-      return c.json({
-        success: true,
-        message: cancelled
-          ? `Cancelled workflow: ${run.workflow_name}`
-          : `Workflow ${run.workflow_name} already finished — nothing to cancel.`,
-      });
+      let message = `Stopped the run's live owner process (pid ${String(result.pid)}), then cancelled workflow: ${run.workflow_name}`;
+      if (result.cascadeFailures > 0) {
+        message += ` — warning: ${String(result.cascadeFailures)} sub-run(s) could not be cancelled and may still be running`;
+      }
+      if (result.blockedParentRunId) {
+        message += ` — parent run ${result.blockedParentRunId} was blocked on this sub-run and stays paused; resume it to fail the node cleanly or abandon it too`;
+      }
+      return c.json({ success: true, message });
     } catch (error) {
-      getLog().error({ err: error }, 'cancel_workflow_run_api_failed');
+      if (error instanceof CancelRefusedError) {
+        return apiError(c, error.reason === 'not_running' ? 400 : 409, error.message);
+      }
+      getLog().error({ err: error, runId }, 'cancel_workflow_run_api_failed');
       return apiError(c, 500, 'Failed to cancel workflow run');
     }
   });
@@ -3796,8 +3840,8 @@ export function registerApiRoutes(
       // Delegate to the SHARED op — a raw cancelWorkflowRun here previously skipped
       // the sub-run cascade cancel AND the container reclaim (M2), so a web abandon
       // orphaned children that CLI/chat abandons cleaned up.
-      const { cascadeFailures, blockedParentRunId } = await abandonWorkflow(runId);
-      let message = `Abandoned workflow: ${run.workflow_name}`;
+      const { cascadeFailures, blockedParentRunId, owner } = await abandonWorkflow(runId);
+      let message = `${describeAbandonOwner(owner).join(' ')} Abandoned workflow: ${run.workflow_name}`;
       if (cascadeFailures > 0) {
         message += ` — warning: ${String(cascadeFailures)} sub-run(s) could not be cancelled and may still be running`;
       }
@@ -3806,6 +3850,9 @@ export function registerApiRoutes(
       }
       return c.json({ success: true, message });
     } catch (error) {
+      if (error instanceof AbandonOwnerNotStoppedError) {
+        return apiError(c, 409, error.message);
+      }
       getLog().error({ err: error, runId }, 'api.workflow_run_abandon_failed');
       return apiError(c, 500, 'Failed to abandon workflow run');
     }
@@ -3828,33 +3875,47 @@ export function registerApiRoutes(
     run: WorkflowRun,
     childRedirectAdvice: string,
     requireReadableGate: boolean
-  ): string | null {
+  ): GateRefusal | null {
     const attention = runAttention(run);
     const approvalRaw = run.metadata.approval;
     const approval = isApprovalContext(approvalRaw) ? approvalRaw : undefined;
     switch (attention?.kind) {
       case 'action_required':
-        return 'Run is paused for an outside action. Complete it, then resume the run; abandon it if it should not continue.';
+        return {
+          error:
+            'Run is paused for an outside action. Complete it, then resume the run; abandon it if it should not continue.',
+        };
       case 'blocked_on_child':
         // Not an approvable gate — the parent resumes automatically when the child
         // completes. Send the caller to the run where the decision actually lives.
-        return `Run is paused waiting on sub-run ${attention.childRunId}. ${childRedirectAdvice}`;
+        return {
+          error: `Run is paused waiting on sub-run ${attention.childRunId}. ${childRedirectAdvice}`,
+          childRunId: attention.childRunId,
+        };
       case 'unreadable':
         if (attention.reason === 'malformed_gate') {
-          return requireReadableGate ? 'Workflow run is paused but missing approval context' : null;
+          return requireReadableGate
+            ? { error: 'Workflow run is paused but missing approval context' }
+            : null;
         }
         if (attention.reason === 'unrecognized_gate_type') {
-          return `Workflow run has an unrecognized gate type '${String(approval?.type)}' — this Archon build cannot resolve it`;
+          return {
+            error: `Workflow run has an unrecognized gate type '${String(approval?.type)}' — this Archon build cannot resolve it`,
+          };
         }
-        return `Workflow run cannot be resolved: ${attention.detail}`;
+        return { error: `Workflow run cannot be resolved: ${attention.detail}` };
       case undefined:
         // Post-#2075 the run stays 'paused' after a resolution, so status alone no
         // longer distinguishes "awaiting a response" from "awaiting resume".
         if (approval && isGateResolved(approval)) {
-          return `Workflow run was already ${String(approval.resolved)} — resume in progress`;
+          return {
+            error: `Workflow run was already ${String(approval.resolved)} — resume in progress`,
+          };
         }
         // Paused with no gate at all — a durable `wait:`. There is nothing to approve.
-        return requireReadableGate ? 'Workflow run is paused but missing approval context' : null;
+        return requireReadableGate
+          ? { error: 'Workflow run is paused but missing approval context' }
+          : null;
       case 'awaiting_response':
         // The gate is open and this route may go on to resolve it.
         return null;
@@ -3889,7 +3950,7 @@ export function registerApiRoutes(
         true
       );
       if (approveBlocker) {
-        return apiError(c, 400, approveBlocker);
+        return c.json(approveBlocker, 400);
       }
       // Distinguish "no body sent" (legitimate bare approve) from "body sent but
       // unparseable" (client bug). Since #2074 a bare approve FINALIZES a
@@ -3956,7 +4017,7 @@ export function registerApiRoutes(
         false
       );
       if (rejectBlocker) {
-        return apiError(c, 400, rejectBlocker);
+        return c.json(rejectBlocker, 400);
       }
       // Mirror of the approve route's malformed-body guard: a swallowed parse
       // failure would silently drop the reviewer's reason.
@@ -4033,7 +4094,7 @@ export function registerApiRoutes(
         false
       );
       if (respondBlocker) {
-        return apiError(c, 400, respondBlocker);
+        return c.json(respondBlocker, 400);
       }
       const rawBody = await c.req.text();
       let body: { decision?: string; text?: string } = {};
@@ -4311,6 +4372,26 @@ export function registerApiRoutes(
       } else {
         const codebases = await codebaseDb.listCodebases();
         if (codebases.length > 0) workingDir = codebases[0].default_cwd;
+      }
+
+      // An installed workflow (`owner/plugin:entrypoint`) has no file under a project or
+      // home tree to find by name; it resolves through the catalog, by the same rule the
+      // CLI and chat use for a qualified name. Any other name, including a legacy file
+      // whose name contains `:`, continues to the file lookups below.
+      if (name.includes(':')) {
+        const { workflows } = await discoverWorkflowsWithConfig(workingDir ?? null, loadConfig);
+        const hit = resolveWorkflowName(
+          name,
+          workflows.filter(entry => entry.source === 'installed').map(entry => entry.workflow)
+        );
+        const entry = hit && workflows.find(candidate => candidate.workflow === hit);
+        if (entry) {
+          return c.json({
+            workflow: Object.assign({}, entry.workflow, entry.declared),
+            filename: entry.workflow.name,
+            source: entry.source,
+          });
+        }
       }
 
       // 1. Try user-defined workflow in cwd.
@@ -4698,8 +4779,9 @@ export function registerApiRoutes(
         throw err;
       }
       for (const entry of entries) {
-        // Skip dotfiles — they're workflow-internal scratch (.pr-number, etc.)
-        if (entry.name.startsWith('.')) continue;
+        // The engine's own store is left out by the rule the CLI's listing shares;
+        // a workflow's own dotfiles are its output and stay listed.
+        if (isRunArtifactsEngineEntry(rel, entry.name)) continue;
         const child = join(dir, entry.name);
         const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
         if (entry.isDirectory()) {
@@ -4875,6 +4957,23 @@ export function registerApiRoutes(
     }
   });
 
+  /**
+   * A write the config validators refused is the caller's to fix: return it as a
+   * 400 with the refused key. Anything else is a server fault and stays opaque.
+   */
+  function configUpdateFailed(
+    c: Context,
+    error: unknown,
+    logEvent: string,
+    message: string
+  ): Response {
+    if (error instanceof InvalidConfigError) {
+      return apiError(c, 400, error.summary);
+    }
+    getLog().error({ err: error }, logEvent);
+    return apiError(c, 500, message);
+  }
+
   // PATCH /api/config/assistants - Update assistant configuration
   registerOpenApiRoute(patchAssistantConfigRoute, async c => {
     try {
@@ -4917,8 +5016,12 @@ export function registerApiRoutes(
         database: getDatabaseType(),
       });
     } catch (error) {
-      getLog().error({ err: error }, 'config.assistants_update_failed');
-      return apiError(c, 500, 'Failed to update assistant configuration');
+      return configUpdateFailed(
+        c,
+        error,
+        'config.assistants_update_failed',
+        'Failed to update assistant configuration'
+      );
     }
   });
 
@@ -4949,8 +5052,12 @@ export function registerApiRoutes(
         database: getDatabaseType(),
       });
     } catch (error) {
-      getLog().error({ err: error }, 'config.tiers_update_failed');
-      return apiError(c, 500, 'Failed to update tier configuration');
+      return configUpdateFailed(
+        c,
+        error,
+        'config.tiers_update_failed',
+        'Failed to update tier configuration'
+      );
     }
   });
 
@@ -4979,8 +5086,12 @@ export function registerApiRoutes(
         database: getDatabaseType(),
       });
     } catch (error) {
-      getLog().error({ err: error }, 'config.aliases_update_failed');
-      return apiError(c, 500, 'Failed to update alias configuration');
+      return configUpdateFailed(
+        c,
+        error,
+        'config.aliases_update_failed',
+        'Failed to update alias configuration'
+      );
     }
   });
 

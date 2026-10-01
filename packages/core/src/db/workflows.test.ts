@@ -1135,7 +1135,7 @@ describe('workflows database', () => {
         maxAttempts: 2,
       };
 
-      await failWorkflowRun('workflow-run-123', 'Quota exhausted', scheduled);
+      await failWorkflowRun('workflow-run-123', 'Quota exhausted', { scheduledResume: scheduled });
 
       const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
       expect(query).toContain("SET status = 'failed'");
@@ -1160,17 +1160,56 @@ describe('workflows database', () => {
       });
     });
 
+    test('records the stop reason and its signal on the run row', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([], 1));
+      mockTerminalSnapshot('failed');
+
+      await failWorkflowRun('workflow-run-123', 'Process terminated (SIGINT)', {
+        exitReason: 'process_terminated',
+        signal: 'SIGINT',
+      });
+
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(JSON.parse(params[1] as string)).toEqual({
+        error: 'Process terminated (SIGINT)',
+        stop_reason: { reason: 'process_terminated', signal: 'SIGINT' },
+      });
+      // Written wholesale: a previous failure's copy is removed before the merge, so
+      // SQLite's recursive json_patch cannot leave its signal under a new reason.
+      expect(query).toContain("metadata - 'scheduled_resume' - 'stop_reason'");
+      // The terminal event's bare `exit_reason` string is a shipped persisted value the
+      // telemetry reader parses; the row's structured copy does not replace it.
+      const [eventQuery, eventParams] = mockQuery.mock.calls[3] as [string, unknown[]];
+      expect(eventQuery).toContain('INSERT INTO remote_agent_workflow_events');
+      expect(eventParams[2]).toBe('workflow_failed');
+      expect(JSON.parse(eventParams[5] as string)).toMatchObject({
+        exit_reason: 'process_terminated',
+      });
+    });
+
+    test('omits the stop reason when the caller gave no exit reason', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([], 1));
+      mockTerminalSnapshot('failed');
+
+      await failWorkflowRun('workflow-run-123', 'Bash node failed');
+
+      const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(JSON.parse(params[1] as string)).toEqual({ error: 'Bash node failed' });
+    });
+
     test('does not complete the quota transition when its audit insert fails', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([], 1));
       mockQuery.mockRejectedValueOnce(new Error('audit unavailable'));
 
       await expect(
         failWorkflowRun('workflow-run-123', 'Quota exhausted', {
-          reason: 'quota',
-          resumeAt: '2026-08-25T10:00:00.000Z',
-          deadlineAt: '2026-08-26T10:00:00.000Z',
-          attempt: 1,
-          maxAttempts: 2,
+          scheduledResume: {
+            reason: 'quota',
+            resumeAt: '2026-08-25T10:00:00.000Z',
+            deadlineAt: '2026-08-26T10:00:00.000Z',
+            attempt: 1,
+            maxAttempts: 2,
+          },
         })
       ).rejects.toThrow('audit unavailable');
     });
@@ -1178,11 +1217,13 @@ describe('workflows database', () => {
     test('rejects an invalid quota continuation before writing the failed row', async () => {
       await expect(
         failWorkflowRun('workflow-run-123', 'Quota exhausted', {
-          reason: 'quota',
-          resumeAt: '2026-08-27T10:00:00.000Z',
-          deadlineAt: '2026-08-26T10:00:00.000Z',
-          attempt: 3,
-          maxAttempts: 2,
+          scheduledResume: {
+            reason: 'quota',
+            resumeAt: '2026-08-27T10:00:00.000Z',
+            deadlineAt: '2026-08-26T10:00:00.000Z',
+            attempt: 3,
+            maxAttempts: 2,
+          },
         })
       ).rejects.toThrow();
       expect(mockQuery).not.toHaveBeenCalled();
@@ -1802,7 +1843,7 @@ describe('workflows database', () => {
       expect(updateParams).toEqual([
         'workflow-run-123',
         1,
-        JSON.stringify({ error: null, continuation_retry_at: null }),
+        JSON.stringify({ error: null, stop_reason: null, continuation_retry_at: null }),
       ]);
       // Third call: SELECT
       const [selectQuery, selectParams] = mockQuery.mock.calls[2] as [string, unknown[]];
@@ -1849,7 +1890,7 @@ describe('workflows database', () => {
       expect(updateParams).toEqual([
         'workflow-run-123',
         1,
-        JSON.stringify({ error: null, continuation_retry_at: null }),
+        JSON.stringify({ error: null, stop_reason: null, continuation_retry_at: null }),
       ]);
     });
 

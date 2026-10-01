@@ -46,6 +46,8 @@ export {
   resolveRunStorageRoot,
   getRunArtifactsDirForKey,
   getRunArtifactsDirForRoot,
+  RUN_ARTIFACTS_ENGINE_SUBDIR,
+  isRunArtifactsEngineEntry,
   getRunLogPathForRoot,
   getRunWorkflowSourceDirForRoot,
   slugifyFolderName,
@@ -72,7 +74,7 @@ export {
 export type { DetachedInstallContext, DetachedInstallContextKey } from './detached-install-context';
 
 // Env loader
-export { loadArchonEnv, isVerboseBoot } from './env-loader';
+export { loadArchonEnv, isVerboseBoot, getPluginsPath } from './env-loader';
 
 // Logger
 export { createLogger, setLogLevel, getLogLevel, setLogDestination, rootLogger } from './logger';
@@ -111,7 +113,7 @@ export {
   captureChatTurn,
   captureApprovalResolved,
   captureCodebaseRegistered,
-  captureWorkflowCompleted,
+  captureWorkflowTerminal,
   classifyWorkflowForTelemetry,
   TELEMETRY_SCHEMA_VERSION,
   shutdownTelemetry,
@@ -124,7 +126,11 @@ export type {
   ArchonStartedProperties,
   ChatTurnProperties,
   DeploymentShapeProperties,
-  WorkflowCompletedProperties,
+  WorkflowTerminalProperties,
+  WorkflowShapeProperties,
+  WorkflowAncestryProperties,
+  PromptCharsBucket,
+  WorkflowCancelReason,
   WorkflowExitReason,
   WorkflowErrorClass,
   WorkflowNodeType,
