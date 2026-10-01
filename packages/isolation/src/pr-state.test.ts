@@ -186,3 +186,34 @@ describe('getPrState', () => {
     expect(result).toEqual({ state: 'UNAVAILABLE' });
   });
 });
+
+// The GitHub check parses the remote's host; it must not substring-match
+// 'github.com' (c1c3b22b, CodeQL js/incomplete-url-substring-sanitization).
+// gh is mocked to answer MERGED, so a substring check would return MERGED here
+// instead of NONE, and would also call gh.
+describe('getPrState GitHub remote detection', () => {
+  test.each([
+    'https://github.com.evil.example/x',
+    'git@evil.example:github.com/x',
+    'https://evil.example/github.com/owner/repo.git',
+    'https://notgithub.com/owner/repo.git',
+    'git@github.com.evil.example:owner/repo.git',
+  ])('treats %s as not GitHub', async remoteUrl => {
+    setupGhResponse(remoteUrl, '[{"state":"MERGED","headRefOid":"abc123"}]');
+    const result = await getPrState(BRANCH, REPO);
+    expect(result).toEqual({ state: 'NONE' });
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('gh', expect.anything(), expect.anything());
+  });
+
+  test.each([
+    'https://github.com/owner/repo.git',
+    'https://GitHub.com/owner/repo',
+    'git@github.com:owner/repo.git',
+    'ssh://git@github.com/owner/repo.git',
+  ])('treats %s as GitHub', async remoteUrl => {
+    setupGhResponse(remoteUrl, '[{"state":"MERGED","headRefOid":"abc123"}]');
+    const result = await getPrState(BRANCH, REPO);
+    expect(result).toEqual({ state: 'MERGED', headSha: 'abc123' });
+    expect(mockExecFileAsync).toHaveBeenCalledWith('gh', expect.any(Array), expect.any(Object));
+  });
+});
