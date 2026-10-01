@@ -219,32 +219,6 @@ CREATE TABLE IF NOT EXISTS remote_agent_workflow_events (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_workflow_events_run_id
-  ON remote_agent_workflow_events(workflow_run_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_events_type
-  ON remote_agent_workflow_events(event_type);
--- Global created_at index for the dashboard event poller's cross-run tail
--- (WHERE created_at >= $1 ORDER BY created_at ASC).
-CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at
-  ON remote_agent_workflow_events(created_at);
--- event_order is declared in the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS
--- is a no-op on an EXISTING table, so on any upgrade from a pre-event_order schema
--- the column is still absent at this point. Add it (idempotently) BEFORE the unique
--- index that references it — otherwise the index fails with 42703
--- "column event_order does not exist" and the whole schema-init transaction rolls
--- back, crash-looping the container on boot with no retry able to recover it.
--- Mirrors the SQLite ordering fix (#2418). The equivalent ADD COLUMN/sequence/default
--- block later in this file is now a redundant no-op, kept as the documented upgrade path.
-ALTER TABLE remote_agent_workflow_events
-  ADD COLUMN IF NOT EXISTS event_order BIGINT;
-CREATE SEQUENCE IF NOT EXISTS remote_agent_workflow_events_event_order_seq
-  OWNED BY remote_agent_workflow_events.event_order;
-ALTER TABLE remote_agent_workflow_events
-  ALTER COLUMN event_order SET DEFAULT nextval('remote_agent_workflow_events_event_order_seq');
-CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_run_order
-  ON remote_agent_workflow_events(workflow_run_id, event_order)
-  WHERE event_order IS NOT NULL;
-
 COMMENT ON TABLE remote_agent_workflow_events IS
   'Lean UI-relevant workflow events for observability (step transitions, artifacts, errors)';
 
@@ -382,11 +356,6 @@ ALTER TABLE remote_agent_workflow_runs
 ALTER TABLE remote_agent_isolation_environments
   ADD COLUMN IF NOT EXISTS created_by_user_id UUID
     REFERENCES remote_agent_users(id) ON DELETE SET NULL;
-
-CREATE INDEX IF NOT EXISTS idx_conversations_user_id
-  ON remote_agent_conversations(user_id) WHERE user_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_id
-  ON remote_agent_workflow_runs(user_id) WHERE user_id IS NOT NULL;
 
 -- Run-tree parent (#2121 Phase 2): a `workflow:` sub-run links back to the run
 -- that spawned it. Self-referential FK, ON DELETE SET NULL so deleting a parent
@@ -596,9 +565,13 @@ CREATE TABLE IF NOT EXISTS remote_agent_resource_slots (
 
 CREATE TABLE IF NOT EXISTS remote_agent_resource_slot_holders (
   resource_key TEXT NOT NULL REFERENCES remote_agent_resource_slots(resource_key),
-  holder_kind VARCHAR(10) NOT NULL CHECK (holder_kind IN ('run')),
+  holder_kind VARCHAR(10) NOT NULL CHECK (holder_kind IN ('run', 'attempt')),
   holder_id TEXT NOT NULL,
   acquired_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  -- The owner process of an 'attempt' holder; NULL for 'run' holders.
+  owner_host TEXT,
+  owner_pid INTEGER,
+  owner_instance TEXT,
   PRIMARY KEY (resource_key, holder_kind, holder_id)
 );
 
@@ -619,6 +592,21 @@ CREATE TABLE IF NOT EXISTS remote_agent_resource_start_requests (
   FOREIGN KEY (receipt_id, binding_id) REFERENCES remote_agent_start_receipt_bindings(receipt_id, binding_id) ON DELETE SET NULL
 );
 
+-- Provider-attempt holders on the shared resource slot (#2816): owner process
+-- columns, and the holder-kind CHECK widened from ('run'). Unreleased dev databases
+-- created the narrow CHECK; re-adding the named constraint converges them. Every
+-- existing row is a 'run' holder, so the new constraint always validates.
+ALTER TABLE remote_agent_resource_slot_holders
+  ADD COLUMN IF NOT EXISTS owner_host TEXT;
+ALTER TABLE remote_agent_resource_slot_holders
+  ADD COLUMN IF NOT EXISTS owner_pid INTEGER;
+ALTER TABLE remote_agent_resource_slot_holders
+  ADD COLUMN IF NOT EXISTS owner_instance TEXT;
+ALTER TABLE remote_agent_resource_slot_holders
+  DROP CONSTRAINT IF EXISTS remote_agent_resource_slot_holders_holder_kind_check;
+ALTER TABLE remote_agent_resource_slot_holders
+  ADD CONSTRAINT remote_agent_resource_slot_holders_holder_kind_check
+    CHECK (holder_kind IN ('run', 'attempt'));
 
 COMMENT ON TABLE remote_agent_schema_version IS
   'Diagnostic schema vintage: the Archon build that created this database and the one that last applied schema to it.';

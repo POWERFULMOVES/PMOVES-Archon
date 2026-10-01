@@ -6,6 +6,7 @@ import type { IPlatformAdapter, MessageMetadata } from '@archon/core';
 import { toPersistedMessageMetadata } from '@archon/core/types';
 import { createLogger } from '@archon/paths';
 import * as messageDb from '@archon/core/db/messages';
+import { CLI_WORKFLOW_SURFACE } from '../utils/workflow-surface';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -76,6 +77,10 @@ export class CLIAdapter implements IPlatformAdapter {
 
   getPlatformType(): string {
     return 'cli';
+  }
+
+  formatWorkflowCommand(command: string): string {
+    return CLI_WORKFLOW_SURFACE.formatWorkflowCommand(command);
   }
 
   async start(): Promise<void> {

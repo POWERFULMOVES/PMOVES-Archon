@@ -5,12 +5,14 @@ import { RUN_GRAPH_METADATA_KEY, runGraphSchema } from './schemas/terminal-recor
 import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
+import { hostname } from 'os';
 import { dirname, join } from 'path';
-import { MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS } from './deps';
+import { MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS, spellWorkflowCommand } from './deps';
 import type { IWorkflowPlatform, WorkflowMessageMetadata } from './deps';
 import type { WorkflowDeps } from './deps';
 import * as archonPaths from '@archon/paths';
-import { createLogger, captureWorkflowInvoked, captureWorkflowCompleted } from '@archon/paths';
+import { createLogger, captureWorkflowInvoked, captureWorkflowTerminal } from '@archon/paths';
+import { workflowTelemetryShape } from './telemetry-shape';
 import { recordCheckoutSample, sampleCheckout, type CheckoutSample } from './checkout-observation';
 import { getDefaultBranch, toRepoPath } from '@archon/git';
 import type {
@@ -40,9 +42,14 @@ import {
   readIdentityUnresolved,
   CONTINUATION_METADATA_KEY,
   readContinuationMode,
+  RUN_DISPATCH_METADATA_KEY,
+  readRunDispatchMetadata,
   WORKFLOW_SOURCE_METADATA_KEY,
   readWorkflowSourceState,
+  EXECUTION_OWNER_METADATA_KEY,
   type ContinuationMode,
+  type ExecutionOwnerRecord,
+  type RunDispatchMetadata,
   type WorkflowSourceMetadata,
 } from './schemas';
 import {
@@ -52,6 +59,8 @@ import {
   recordSelectedWorkflow,
   resolveRunSourceCapture,
   resolveChildDiscoveryRoot,
+  resolveChildInstalledPacks,
+  type InstalledPacksRoot,
   workflowSourceConfigFrom,
   type WorkflowSourceManifest,
   type WorkflowSourceAnchor,
@@ -69,7 +78,7 @@ import { maybeWarnLegacyStatePath, maybeWarnLegacyArtifactsPath } from './state-
 import { formatDeprecationNotice } from './deprecation';
 import { resolveWorkflowName } from './router';
 import { resolveDeclaredInputs, defaultRunInputs } from './workflow-inputs';
-import { logWorkflowStart, logWorkflowError } from './logger';
+import { logWorkflowStart, logWorkflowResume, logWorkflowError } from './logger';
 import { formatDuration, parseDbTimestamp } from './utils/duration';
 import { keepAwake } from './utils/keep-awake';
 import { getWorkflowEventEmitter } from './event-emitter';
@@ -94,7 +103,6 @@ export type {
 } from './child-isolation';
 import {
   classifyError,
-  toTelemetryErrorClass,
   safeSendMessage,
   runWithAdoptedRunDir,
   type SendMessageContext,
@@ -1019,6 +1027,8 @@ export async function prepareWorkflowSource(
      * whose parent created the row (#2872) — so the capture and the row still agree.
      */
     runId?: string;
+    /** Installed packs to freeze instead of the live installs; see `captureWorkflowSource`. */
+    installedFrom?: InstalledPacksRoot;
   }
 ): Promise<PreparedWorkflowSource> {
   // Read the SOURCE's command policy, not the target's. A repo may point `commands.folder`
@@ -1048,6 +1058,7 @@ export async function prepareWorkflowSource(
     captureRoot: join(archonPaths.getArchonHome(), 'staged-source', runId),
     commandFolder: sourceConfig.command_folder,
     sourceConfig,
+    ...(opts.installedFrom !== undefined ? { installedFrom: opts.installedFrom } : {}),
   });
   return {
     runId,
@@ -1238,12 +1249,17 @@ async function runChildWorkflow(
   // workflow — removing a gate, say — and have a resumed parent pick the fix up; and
   // discovering from the capture rather than from the live directory is what stops the
   // child executing one moment's YAML against another moment's scripts.
+  // Installed packs are the exception: the child takes them from the parent's capture.
   const parentSourceRoot = await resolveChildDiscoveryRoot(parentRun.metadata);
+  const installedFrom = await resolveChildInstalledPacks(parentRun.metadata);
   // Refusals and recursive execution share one owner until adoption or disposal.
   return withCapturedSource(async owner => {
     let childSource: PreparedWorkflowSource | undefined;
     try {
-      childSource = await prepareWorkflowSource(deps, { sourceRoot: parentSourceRoot ?? cwd });
+      childSource = await prepareWorkflowSource(deps, {
+        sourceRoot: parentSourceRoot ?? cwd,
+        ...(installedFrom !== undefined ? { installedFrom } : {}),
+      });
       owner.hold(childSource);
     } catch (err) {
       return failOutcome(
@@ -1564,10 +1580,13 @@ async function runChildWorkflow(
       // failWorkflowRun, whose `WHERE status='running'` would miss the 'pending' case)
       // flips any non-terminal child to 'cancelled' and no-ops on a child that reached
       // completed/cancelled on its own. childRunId is always assigned once step 3 ran.
-      await requireTerminalStatusWrite(deps.store.cancelWorkflowRun(childRunId), {
-        workflowRunId: childRunId,
-        site: 'executor.child_setup_cancel',
-      });
+      await requireTerminalStatusWrite(
+        deps.store.cancelWorkflowRun(childRunId, { cancel_reason: 'precondition_failed' }),
+        {
+          workflowRunId: childRunId,
+          site: 'executor.child_setup_cancel',
+        }
+      );
       return failOutcome(
         `Sub-run '${childWorkflowName}' errored: ${(err as Error).message}`,
         childRunId
@@ -1625,7 +1644,7 @@ async function maybeResumeParentRun(
       conversationId,
       `⚠️ Sub-run \`${childRun.id.slice(0, 8)}\` finished, but its parent run ` +
         `\`${parentRunId.slice(0, 8)}\` couldn't auto-resume (${reason}). ` +
-        `Resume it manually: \`/workflow resume ${parentRunId}\``
+        `Resume it manually: \`${spellWorkflowCommand(platform, `resume ${parentRunId}`)}\``
     );
   };
 
@@ -1774,6 +1793,11 @@ async function maybeResumeParentRun(
       { workflowRunId: parentRunId, site: 'workflow.parent_auto_resume_fail_mark_failed' }
     );
   }
+}
+
+/** Spell a workflow action the way the surface rendering the message accepts it. */
+function formatRunCommand(platform: IWorkflowPlatform, action: string, shortId?: string): string {
+  return spellWorkflowCommand(platform, shortId ? `${action} ${shortId}` : action);
 }
 
 /**
@@ -1961,16 +1985,38 @@ export async function executeWorkflow(
   }
   const configuredCommandFolder = config.commands.folder;
 
-  // Resolve base branch: the per-dispatch override takes priority, then repo
-  // config, then the caller-provided codebase default, then git auto-detection.
+  // What the run recorded when it started (#2454). A continuation re-enters with whatever
+  // the resuming surface happens to hold — and the in-process auto-resume after a child
+  // gate holds nothing — so without the record the run's second half resolves against the
+  // environment it is being resumed in rather than the one it started in.
+  const recordedDispatch = isContinuation
+    ? readRunDispatchMetadata(preCreatedRun.metadata)
+    : undefined;
+  if (isContinuation && recordedDispatch === undefined) {
+    // Started before this build recorded it, died before the stamp landed, or carries a
+    // record this build cannot read. Re-resolving is the behavior such a run has always
+    // had; say so rather than let a re-derived value pass for a restored one.
+    getLog().warn(
+      { workflowRunId: preCreatedRun.id },
+      'workflow.dispatch_not_recorded_resolving_live'
+    );
+  }
+
+  // Resolve base branch: the per-dispatch override takes priority, then what this run
+  // recorded at its start, then repo config, then the caller-provided codebase default,
+  // then git auto-detection.
   // The override must outrank config so `--base` reports the same branch the
-  // worktree was cut from (WorktreeProvider applies the same order).
+  // worktree was cut from (WorktreeProvider applies the same order); it also outranks the
+  // record, because re-passing `--base` to a resume is a deliberate retarget of THIS
+  // continuation (the CLI warns that only that half of it applies).
   // If detection fails, leave empty — substituteWorkflowVariables throws only if $BASE_BRANCH is referenced.
   const overrideBaseBranch = callerBaseOverride?.trim();
   const fallbackBaseBranch = callerBaseBranch?.trim();
   let baseBranch: string;
   if (overrideBaseBranch) {
     baseBranch = overrideBaseBranch;
+  } else if (recordedDispatch) {
+    baseBranch = recordedDispatch.base_branch;
   } else if (config.baseBranch) {
     baseBranch = config.baseBranch;
   } else if (fallbackBaseBranch) {
@@ -1993,6 +2039,18 @@ export async function executeWorkflow(
       baseBranch = '';
     }
   }
+
+  /**
+   * Discovery source of the workflow this run started from — telemetry attribution.
+   * A record is authoritative even when it holds no source: that dispatch never knew one,
+   * and a source the resuming surface resolves now would be a guess passed off as the
+   * original. Only a run with no record at all (warned above) takes the live value.
+   */
+  const runSource = recordedDispatch ? recordedDispatch.source : source;
+  const dispatchMetadata: RunDispatchMetadata = {
+    base_branch: baseBranch,
+    ...(runSource ? { source: runSource } : {}),
+  };
 
   const docsDir = config.docsPath ?? 'docs/';
 
@@ -2167,6 +2225,15 @@ export async function executeWorkflow(
   const dagPriorCompletedNodes = priorCompletedNodes;
   const dagPriorUsage = priorUsage;
   let workflowRun: WorkflowRun | undefined = preCreatedRun;
+  // This process is the one executing the run, whether it created the row, claimed a
+  // row a launcher pre-created, or resumed one. `abandon` shows this record when no
+  // owner answers (#2325).
+  const uid = process.getuid?.();
+  const executionOwner: ExecutionOwnerRecord = {
+    host: hostname(),
+    pid: process.pid,
+    ...(uid === undefined ? {} : { uid }),
+  };
 
   if (preCreatedRun && priorCompletedNodes !== undefined) {
     const resumeMsg =
@@ -2209,7 +2276,9 @@ export async function executeWorkflow(
             ? { [CONTINUATION_METADATA_KEY]: { mode: continuationMode ?? 'adopt' } }
             : {}),
           [RUN_MODEL_BINDINGS_METADATA_KEY]: modelBindingsMetadata,
+          [RUN_DISPATCH_METADATA_KEY]: dispatchMetadata,
           ...(runConfigMetadata ? { [WORKFLOW_RUN_CONFIG_METADATA_KEY]: runConfigMetadata } : {}),
+          [EXECUTION_OWNER_METADATA_KEY]: executionOwner,
         },
         parent_conversation_id: parentConversationId,
         user_id: userId,
@@ -2221,6 +2290,14 @@ export async function executeWorkflow(
         { err, workflowName: workflow.name, conversationId },
         'db_create_workflow_run_failed'
       );
+      // No row, so no store transition will report this run: count it here, the one
+      // terminal telemetry capture outside the run store.
+      captureWorkflowTerminal({
+        outcome: 'failed',
+        workflowName: workflow.name,
+        workflowSource: runSource,
+        exitReason: 'run_not_created',
+      });
       await sendCriticalMessage(
         platform,
         conversationId,
@@ -2272,22 +2349,30 @@ export async function executeWorkflow(
     checkoutBaselineSample = await sampleCheckout(cwd, execContext);
   }
 
-  if (preCreatedRun && !isContinuation) {
+  if (preCreatedRun) {
     // The stamps a fresh row would have received at creation, for a row someone
     // else created. `isolation` + `isolation_env_id` are what a later resume reads
     // to rediscover a container (see the creation branch above), and `working_path`
     // is null on a row created before its checkout existed (#2872, `run --detach`)
     // — write-once in the store, so re-running this can never repoint a live run.
+    // A continuation keeps what its first execution recorded and restamps only the
+    // execution owner, which is now this process.
     const invocationMetadata: Record<string, unknown> = {
-      [RUN_MODEL_BINDINGS_METADATA_KEY]: modelBindingsMetadata,
-      ...(runConfigMetadata ? { [WORKFLOW_RUN_CONFIG_METADATA_KEY]: runConfigMetadata } : {}),
-      ...(execContext.kind === 'container' ? { isolation: 'container' } : {}),
-      ...(containerCtx ? { isolation_env_id: containerCtx.envId } : {}),
+      ...(isContinuation
+        ? {}
+        : {
+            [RUN_MODEL_BINDINGS_METADATA_KEY]: modelBindingsMetadata,
+            [RUN_DISPATCH_METADATA_KEY]: dispatchMetadata,
+            ...(runConfigMetadata ? { [WORKFLOW_RUN_CONFIG_METADATA_KEY]: runConfigMetadata } : {}),
+            ...(execContext.kind === 'container' ? { isolation: 'container' } : {}),
+            ...(containerCtx ? { isolation_env_id: containerCtx.envId } : {}),
+          }),
+      [EXECUTION_OWNER_METADATA_KEY]: executionOwner,
     };
     try {
       await deps.store.updateWorkflowRun(preCreatedRun.id, {
         metadata: invocationMetadata,
-        ...(preCreatedRun.working_path === null ? { working_path: cwd } : {}),
+        ...(!isContinuation && preCreatedRun.working_path === null ? { working_path: cwd } : {}),
       });
     } catch (error) {
       const err = error as Error;
@@ -2320,7 +2405,7 @@ export async function executeWorkflow(
     }
     workflowRun = {
       ...preCreatedRun,
-      working_path: preCreatedRun.working_path ?? cwd,
+      working_path: preCreatedRun.working_path ?? (isContinuation ? null : cwd),
       metadata: {
         ...preCreatedRun.metadata,
         ...invocationMetadata,
@@ -2397,16 +2482,23 @@ export async function executeWorkflow(
         if (activeWorkflow.status === 'paused') {
           stateLine = `paused waiting for user input (${duration} since started, run \`${shortId}\`)`;
           actionLines =
-            `• Approve it: \`/workflow approve ${shortId}\`\n` +
-            `• Reject it: \`/workflow reject ${shortId}\`\n` +
-            `• Cancel it: \`/workflow cancel ${shortId}\`\n` +
+            `• Approve it: \`${formatRunCommand(platform, 'approve', shortId)}\`\n` +
+            `• Reject it: \`${formatRunCommand(platform, 'reject', shortId)}\`\n` +
+            // Cancel stops live work, and a paused run has none: abandon discards it.
+            `• Discard it: \`${formatRunCommand(platform, 'abandon', shortId)}\`\n` +
             '• Use a different branch: `--branch <other>`';
         } else {
           const verb = activeWorkflow.status === 'pending' ? 'starting' : 'running';
           stateLine = `${verb} ${duration}, run \`${shortId}\``;
+          // Cancel only accepts a running run; a pending one has nothing executing yet.
+          const cancelLine =
+            activeWorkflow.status === 'running'
+              ? `• Cancel it: \`${formatRunCommand(platform, 'cancel', shortId)}\`\n`
+              : '';
           actionLines =
-            '• Wait for it to finish: `/workflow status`\n' +
-            `• Cancel it: \`/workflow cancel ${shortId}\`\n` +
+            `• Wait for it to finish: \`${formatRunCommand(platform, 'status')}\`\n` +
+            cancelLine +
+            `• If its process is gone: \`${formatRunCommand(platform, 'abandon', shortId)}\`\n` +
             '• Use a different branch: `--branch <other>`';
         }
         await sendCriticalMessage(
@@ -2417,10 +2509,13 @@ export async function executeWorkflow(
         );
         // The notification explains the block; it does not prove cleanup succeeded.
         // Release our lock token, preserving a rejected write instead of returning.
-        await requireTerminalStatusWrite(deps.store.cancelWorkflowRun(workflowRun.id), {
-          workflowRunId: workflowRun.id,
-          site: 'executor.guard_self_cancel',
-        });
+        await requireTerminalStatusWrite(
+          deps.store.cancelWorkflowRun(workflowRun.id, { cancel_reason: 'precondition_failed' }),
+          {
+            workflowRunId: workflowRun.id,
+            site: 'executor.guard_self_cancel',
+          }
+        );
 
         return {
           success: false,
@@ -2441,10 +2536,13 @@ export async function executeWorkflow(
       );
       // Even if notification delivery failed, release this run's lock token.
       // A rejected cleanup must escape rather than become an ordinary guard result.
-      await requireTerminalStatusWrite(deps.store.cancelWorkflowRun(workflowRun.id), {
-        workflowRunId: workflowRun.id,
-        site: 'executor.guard_query_failure_cleanup',
-      });
+      await requireTerminalStatusWrite(
+        deps.store.cancelWorkflowRun(workflowRun.id, { cancel_reason: 'precondition_failed' }),
+        {
+          workflowRunId: workflowRun.id,
+          site: 'executor.guard_query_failure_cleanup',
+        }
+      );
       return { success: false, error: 'Database error checking for active workflow' };
     }
   }
@@ -2730,10 +2828,13 @@ export async function executeWorkflow(
   const failRunOnSource = async (message: string): Promise<WorkflowExecutionResult> => {
     getLog().error({ workflowRunId: workflowRun.id, message }, 'workflow.source_unavailable');
     await sendCriticalMessage(platform, conversationId, `❌ **Workflow failed**: ${message}`);
-    await requireTerminalStatusWrite(deps.store.failWorkflowRun(workflowRun.id, message), {
-      workflowRunId: workflowRun.id,
-      site: 'workflow.source_fail_db_record_failed',
-    });
+    await requireTerminalStatusWrite(
+      deps.store.failWorkflowRun(workflowRun.id, message, { exitReason: 'source_unavailable' }),
+      {
+        workflowRunId: workflowRun.id,
+        site: 'workflow.source_fail_db_record_failed',
+      }
+    );
     return { success: false, workflowRunId: workflowRun.id, error: message };
   };
 
@@ -2952,7 +3053,13 @@ export async function executeWorkflow(
       },
       'workflow_starting'
     );
-    await logWorkflowStart(logDir, workflowRun.id, workflow.name, userMessage);
+    // `isContinuation`, not `priorCompletedNodes`: a failed child re-entered without a
+    // resumable snapshot is still a resume of an existing run.
+    if (isContinuation) {
+      await logWorkflowResume(logDir, workflowRun.id, workflow.name);
+    } else {
+      await logWorkflowStart(logDir, workflowRun.id, workflow.name, userMessage);
+    }
 
     // Register run with emitter and emit workflow_started
     const emitter = getWorkflowEventEmitter();
@@ -2972,8 +3079,10 @@ export async function executeWorkflow(
     // along as super-properties. Opt out: ARCHON_TELEMETRY_DISABLED=1 / DO_NOT_TRACK=1.
     const telemetryNodes = workflow.nodes;
     captureWorkflowInvoked({
+      runId: workflowRun.id,
+      isChild: workflowRun.parent_run_id != null,
       workflowName: workflow.name,
-      workflowSource: source,
+      workflowSource: runSource,
       platform: platform.getPlatformType(),
       provider: resolvedProvider,
       model: resolvedModel,
@@ -2992,7 +3101,8 @@ export async function executeWorkflow(
       usesFreshContext: telemetryNodes.some(n => isLoopNode(n) && n.loop.fresh_context),
       interactive: workflow.interactive ?? false,
       usedIsolation: isolationContext !== undefined,
-      isResume: dagPriorCompletedNodes !== undefined,
+      isResume: isContinuation,
+      ...workflowTelemetryShape(workflow, runSource),
     });
 
     let isolationMode: 'container' | 'worktree' | 'in-place' = 'in-place';
@@ -3193,7 +3303,6 @@ export async function executeWorkflow(
         configuredCommandFolder,
         issueContext,
         priorCompletedNodes: dagPriorCompletedNodes,
-        source,
         aiProfile,
         workflowPreset,
         scopeArtifactsDir,
@@ -3272,7 +3381,8 @@ export async function executeWorkflow(
     // Everything below is independent of the terminal write and used to run whether
     // or not it succeeded (it was try/caught here before #2910). The write moved to
     // the end of this block so a rejection cannot silence the log file, the live
-    // event, telemetry, or the user's failure notification.
+    // event, or the user's failure notification. Terminal telemetry is reported by
+    // the run store after the write commits.
     //
     // Log to file (separate from database - non-blocking)
     try {
@@ -3291,19 +3401,6 @@ export async function executeWorkflow(
       runId: workflowRun.id,
       workflowName: workflow.name,
       error: err.message,
-    });
-    // Anonymous telemetry for the unhandled-throw failure path. The DAG-internal
-    // failure paths (no/partial completion) fire their own captureWorkflowCompleted
-    // and return without throwing, so this only covers genuine unhandled errors —
-    // no double-count. Duration/node-counts are not in scope here.
-    captureWorkflowCompleted({
-      outcome: 'failed',
-      workflowName: workflow.name,
-      workflowSource: source,
-      provider: resolvedProvider,
-      exitReason: 'unhandled_error',
-      // Categorical class only (fatal/transient/unknown) — err.message never leaves.
-      errorClass: toTelemetryErrorClass(classifyError(err)),
     });
     emitter.unregisterRun(workflowRun.id);
 
@@ -3325,10 +3422,13 @@ export async function executeWorkflow(
     // failed so the finally-block backstop below does not fire a second write over a
     // write channel that just proved unreliable — that write would mask this error.
     try {
-      await requireTerminalStatusWrite(deps.store.failWorkflowRun(workflowRun.id, err.message), {
-        workflowRunId: workflowRun.id,
-        site: 'db_record_failure_failed',
-      });
+      await requireTerminalStatusWrite(
+        deps.store.failWorkflowRun(workflowRun.id, err.message, { exitReason: 'unhandled_error' }),
+        {
+          workflowRunId: workflowRun.id,
+          site: 'db_record_failure_failed',
+        }
+      );
     } catch (writeError) {
       terminalStatusWriteFailed = true;
       throw writeError;
@@ -3353,7 +3453,9 @@ export async function executeWorkflow(
       if (backstopStatus === 'running') {
         getLog().warn({ workflowRunId: runId }, 'executor.backstop_triggered');
         await requireTerminalStatusWrite(
-          deps.store.failWorkflowRun(runId, 'Workflow exited without finalizing — see logs'),
+          deps.store.failWorkflowRun(runId, 'Workflow exited without finalizing — see logs', {
+            exitReason: 'not_finalized',
+          }),
           { workflowRunId: runId, site: 'executor.backstop_fail_failed' }
         );
       }

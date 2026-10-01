@@ -1,6 +1,6 @@
 {
   "name": "@archon/adapters",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -46,6 +46,7 @@
       "src/community/chat/",
       "src/community/forge/gitlab/auth.test.ts",
       "src/forge/github/auth.test.ts",
+      "src/forge/github/api.test.ts",
       "src/utils/"
     ],
     [
@@ -77,6 +78,9 @@
     ],
     [
       "src/forge/github/operations.test.ts"
+    ],
+    [
+      "src/forge/github/lifecycle.test.ts"
     ]
   ]
 }

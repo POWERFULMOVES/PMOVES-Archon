@@ -1,6 +1,6 @@
 {
   "name": "@archon/forge",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -9,6 +9,7 @@
     "./conformance": "./src/conformance.ts",
     "./operations": "./src/operations.ts",
     "./dispatch": "./src/dispatch.ts",
+    "./discovery": "./src/discovery.ts",
     "./plugin-config": "./src/plugin-config.ts"
   },
   "scripts": {

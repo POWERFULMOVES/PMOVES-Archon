@@ -40,8 +40,11 @@ if (cloneIndex >= 0) {
     process.exit(1);
   }
 
-  const url = argv[cloneIndex + 1];
-  const targetPath = argv[cloneIndex + 2];
+  // cloneRepository passes '--' before the URL (end-of-options barrier), so
+  // the positionals start after it when present, as they do for real git.
+  const urlIndex = argv[cloneIndex + 1] === '--' ? cloneIndex + 2 : cloneIndex + 1;
+  const url = argv[urlIndex];
+  const targetPath = argv[urlIndex + 1];
   const gitDir = join(targetPath, '.git');
   mkdirSync(gitDir, { recursive: true });
   writeFileSync(

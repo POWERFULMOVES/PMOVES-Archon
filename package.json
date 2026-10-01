@@ -1,6 +1,6 @@
 {
   "name": "archon",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "private": true,
   "workspaces": [
     "packages/*"
@@ -78,7 +78,7 @@
     "sharp": "^0.35.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.282",
     "@opencode-ai/sdk": "^1.17.3"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@archon/core",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -53,6 +53,12 @@
   "testGroups": [
     [
       "src/db/resource-starts.integration.test.ts"
+    ],
+    [
+      "src/services/provider-admission.integration.test.ts"
+    ],
+    [
+      "src/db/provider-attempts.postgres.integration.test.ts"
     ],
     [
       "src/handlers/command-handler.test.ts"
@@ -123,6 +129,9 @@
       "src/db/workflows.resume-cas.integration.test.ts"
     ],
     [
+      "src/db/workflow-terminal-telemetry.integration.test.ts"
+    ],
+    [
       "src/db/workflow-events.since.integration.test.ts"
     ],
     [
@@ -141,6 +150,9 @@
       "src/db/resource-slots.postgres.integration.test.ts"
     ],
     [
+      "src/db/workflows.metadata-merge.postgres.integration.test.ts"
+    ],
+    [
       "src/db/workflows.adoption-timestamp.integration.test.ts"
     ],
     [
@@ -154,6 +166,10 @@
     ],
     [
       "src/services/run-live-owner.test.ts"
+    ],
+    [
+      "src/services/run-owner-stop.test.ts",
+      "src/services/windows-process-tree.test.ts"
     ],
     [
       "src/services/run-attention-watch.test.ts"

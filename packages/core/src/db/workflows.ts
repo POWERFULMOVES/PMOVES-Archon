@@ -2,6 +2,7 @@
  * Database operations for workflow runs
  */
 import type { ResourceStartDisposition } from '@archon/workflows/schemas/resource-start';
+import type { RunExitReason, RunStopSignal } from '@archon/workflows/schemas/run-terminal-reason';
 import type { CheckoutObservation } from '@archon/workflows/schemas/checkout-observation';
 
 import { pool, getDialect, getDatabaseType, getDatabase } from './connection';
@@ -13,6 +14,7 @@ import {
 } from './resource-slots';
 import { insertWorkflowEvent, listActiveWorkflowNodeIds } from './workflow-events';
 import { insertTerminalWorkflowEvent } from './workflow-terminal-event';
+import { reportRunTerminal } from './workflow-terminal-telemetry';
 import { normalizeWorkflowRun } from './workflow-run-normalization';
 import type { IDatabase, SqlDialect } from './adapters/types';
 import type {
@@ -31,6 +33,7 @@ import {
   workflowWaitStepName,
   workflowWaitContextSchema,
   TERMINAL_WORKFLOW_STATUSES,
+  RUN_STOP_REASON_METADATA_KEY,
 } from '@archon/workflows/schemas/workflow-run';
 import type {
   DashboardWorkflowRun,
@@ -311,8 +314,9 @@ export async function resolveAndCancelApprovalGate(
   cancellation: WorkflowCancellationEventDetails
 ): Promise<{ resolved: boolean }> {
   const dialect = getDialect();
+  let outcome: { resolved: boolean };
   try {
-    return await getDatabase().withTransaction(async query => {
+    outcome = await getDatabase().withTransaction(async query => {
       const result = await query(
         `UPDATE remote_agent_workflow_runs
          SET status = 'cancelled',
@@ -329,7 +333,10 @@ export async function resolveAndCancelApprovalGate(
           workflow_run_id: id,
           event_type: 'workflow_cancelled',
           step_name: cancellation.step_name,
-          data: cancellation.reason === undefined ? undefined : { reason: cancellation.reason },
+          data: {
+            cancel_reason: 'approval_rejected',
+            ...(cancellation.reason === undefined ? {} : { reason: cancellation.reason }),
+          },
         });
       }
       return { resolved };
@@ -339,6 +346,8 @@ export async function resolveAndCancelApprovalGate(
     getLog().error({ err, workflowRunId: id }, 'db.workflow_run_resolve_cancel_gate_failed');
     throw new Error(`Failed to resolve and cancel approval gate: ${err.message}`);
   }
+  if (outcome.resolved) await reportRunTerminal(id);
+  return outcome;
 }
 
 /**
@@ -655,8 +664,9 @@ export async function cancelResumableRunsForConversation(
   conversationId: string
 ): Promise<WorkflowRun[]> {
   const dialect = getDialect();
+  let cancelledRuns: WorkflowRun[];
   try {
-    return await getDatabase().withTransaction(async query => {
+    cancelledRuns = await getDatabase().withTransaction(async query => {
       const snapshot = await query<WorkflowRun>(
         `SELECT * FROM remote_agent_workflow_runs
          WHERE conversation_id = $1 OR parent_conversation_id = $2
@@ -684,6 +694,7 @@ export async function cancelResumableRunsForConversation(
         await insertTerminalWorkflowEvent(query, {
           workflow_run_id: run.id,
           event_type: 'workflow_cancelled',
+          data: { cancel_reason: 'conversation_reset' },
         });
       }
       return resumable.map(run => normalizeWorkflowRun(run));
@@ -693,6 +704,8 @@ export async function cancelResumableRunsForConversation(
     getLog().error({ err, conversationId }, 'db.workflow_run_cancel_resumable_for_conv_failed');
     throw new Error(`Failed to cancel resumable runs for conversation: ${err.message}`);
   }
+  for (const run of cancelledRuns) await reportRunTerminal(run.id);
+  return cancelledRuns;
 }
 
 /**
@@ -980,11 +993,14 @@ export async function resumeWorkflowRun(
     // the same run to 'running' and double-claim the worktree. The day param is
     // bound at $2 (ORPHAN_RESUME_STALE_DAYS), matching findResumableRun's bind.
     //
-    // The CAS also clears `metadata.error` so a run that fails, is resumed, and
-    // then completes doesn't keep rendering its old failure (#2329). Because
+    // The CAS also clears `metadata.error` and `metadata.stop_reason` so a run that
+    // fails, is resumed, and then completes doesn't keep rendering its old failure
+    // (#2329) or claiming an operator interrupted it (#3479). Because
     // legacy runs may carry their only failure record in metadata (#2348), the error being
     // cleared is first preserved as a `workflow_resumed` event, in the SAME
-    // transaction as the clear, so the audit trail can never lose it. The read,
+    // transaction as the clear, so the audit trail can never lose it. The stop reason
+    // needs no such preservation: `failWorkflowRun` wrote the same category onto the
+    // terminal `workflow_failed` event, which a resume never touches. The read,
     // the CAS and the event INSERT are one transaction (mirroring
     // resolveApprovalGate, #2146): the row is pinned by rowLockClause() so the
     // value read is the value cleared, and the event is written ONLY by the
@@ -1055,6 +1071,7 @@ export async function resumeWorkflowRun(
       const triggeredAt = scheduled?.triggeredAt === undefined ? new Date().toISOString() : null;
       const metadataPatch = {
         error: null,
+        [RUN_STOP_REASON_METADATA_KEY]: null,
         continuation_retry_at: null,
         ...(scheduled !== null && triggeredAt !== null
           ? { scheduled_resume: { ...scheduled, triggeredAt } }
@@ -1345,6 +1362,7 @@ export async function completeWorkflowRun(
     getLog().warn({ workflowRunId: id }, 'db.workflow_run_complete_no_match');
     throw new Error(`Workflow run not found or not in running state (id: ${id})`);
   }
+  await reportRunTerminal(id);
 }
 
 /**
@@ -1356,33 +1374,56 @@ export async function completeWorkflowRun(
  * forever: no terminal state, no error recorded, and nothing to tell the operator the run
  * is dead. Both are non-terminal states owned by this process, so failing either is the
  * same decision. Terminal rows still never transition.
+ *
+ * `exitReason` is the run's categorical cause, recorded on the terminal event and — with
+ * `signal`, when a signal arriving at the owning process is what stopped the run — on the
+ * run row as `metadata.stop_reason` for the operator surfaces to read (#3479).
  */
 export async function failWorkflowRun(
   id: string,
   error: string,
-  scheduledResume?: ScheduledWorkflowResume
+  options: {
+    scheduledResume?: ScheduledWorkflowResume;
+    exitReason?: RunExitReason;
+    signal?: RunStopSignal;
+  } = {}
 ): Promise<void> {
+  const { scheduledResume, exitReason, signal } = options;
   const dialect = getDialect();
   const parsedSchedule =
     scheduledResume === undefined
       ? undefined
       : scheduledWorkflowResumeSchema.parse(scheduledResume);
-  const metadataWithoutScheduledResume =
+  // Both keys belong to ONE failure and are written wholesale below, so a previous
+  // failure's copy is removed before the merge rather than merged into. Postgres `||`
+  // replaces a nested object while SQLite's json_patch recurses into it, and a run can
+  // reach 'running' again carrying a stale stop reason (resume, or a fan-out cancel
+  // recovery) — under json_patch alone that would leave a previous signal attached to
+  // a new reason, the #2673 defect through the same mechanism.
+  const metadataWithoutPriorFailure =
     getDatabaseType() === 'postgresql'
-      ? "metadata - 'scheduled_resume'"
-      : "json_remove(metadata, '$.scheduled_resume')";
+      ? `metadata - 'scheduled_resume' - '${RUN_STOP_REASON_METADATA_KEY}'`
+      : `json_remove(metadata, '$.scheduled_resume', '$.${RUN_STOP_REASON_METADATA_KEY}')`;
   let result: Awaited<ReturnType<IDatabase['query']>>;
   try {
     result = await getDatabase().withTransaction(async query => {
       const update = await query(
         `UPDATE remote_agent_workflow_runs
-         SET status = 'failed', completed_at = ${dialect.now()}, metadata = ${dialect.jsonMerge(metadataWithoutScheduledResume, 2)}
+         SET status = 'failed', completed_at = ${dialect.now()}, metadata = ${dialect.jsonMerge(metadataWithoutPriorFailure, 2)}
          WHERE id = $1 AND status IN ('running', 'pending')`,
         [
           id,
           JSON.stringify({
             error,
             ...(parsedSchedule !== undefined ? { scheduled_resume: parsedSchedule } : {}),
+            ...(exitReason !== undefined
+              ? {
+                  [RUN_STOP_REASON_METADATA_KEY]: {
+                    reason: exitReason,
+                    ...(signal !== undefined ? { signal } : {}),
+                  },
+                }
+              : {}),
           }),
         ]
       );
@@ -1402,7 +1443,7 @@ export async function failWorkflowRun(
         await insertTerminalWorkflowEvent(query, {
           workflow_run_id: id,
           event_type: 'workflow_failed',
-          data: { error },
+          data: { error, ...(exitReason !== undefined ? { exit_reason: exitReason } : {}) },
         });
       }
       return update;
@@ -1416,6 +1457,7 @@ export async function failWorkflowRun(
     getLog().warn({ workflowRunId: id }, 'db.workflow_run_fail_no_match');
     throw new Error(`Workflow run not found or already terminal (id: ${id})`);
   }
+  await reportRunTerminal(id);
 }
 
 export async function cancelWorkflowRun(
@@ -1444,7 +1486,10 @@ export async function cancelWorkflowRun(
           workflow_run_id: id,
           event_type: 'workflow_cancelled',
           step_name: event?.step_name,
-          data: event?.reason === undefined ? undefined : { reason: event.reason },
+          data: {
+            ...(event?.reason === undefined ? {} : { reason: event.reason }),
+            ...(event?.cancel_reason === undefined ? {} : { cancel_reason: event.cancel_reason }),
+          },
         });
       }
       return update;
@@ -1460,6 +1505,8 @@ export async function cancelWorkflowRun(
     // report "nothing to cancel" instead of a false "Cancelled" (see #1830 I1).
     // Same info level as the resume CAS-miss signal for consistency (S2).
     getLog().info({ workflowRunId: id }, 'db.workflow_run_cancel_noop');
+  } else {
+    await reportRunTerminal(id);
   }
   return { cancelled };
 }
@@ -1484,7 +1531,7 @@ export async function cancelFanOutRun(
         await insertTerminalWorkflowEvent(query, {
           workflow_run_id: id,
           event_type: 'workflow_cancelled',
-          data: { reason },
+          data: { reason, cancel_reason: 'fan_out' },
         });
       }
       return update;
@@ -1497,6 +1544,8 @@ export async function cancelFanOutRun(
   const cancelled = (result.rowCount ?? 0) > 0;
   if (!cancelled) {
     getLog().info({ workflowRunId: id, reason }, 'db.workflow_run_fan_out_cancel_noop');
+  } else {
+    await reportRunTerminal(id);
   }
   return { cancelled };
 }
@@ -1622,8 +1671,9 @@ export async function failPausedAttentionWait(
     ? "metadata - 'scheduled_resume'"
     : "json_remove(metadata, '$.scheduled_resume')";
 
+  let outcome: { failed: boolean };
   try {
-    return await getDatabase().withTransaction(async query => {
+    outcome = await getDatabase().withTransaction(async query => {
       const result = await query(
         `UPDATE remote_agent_workflow_runs
          SET status = 'failed', completed_at = ${dialect.now()}, metadata = ${dialect.jsonMerge(metadataWithoutScheduledResume, 2)}
@@ -1650,6 +1700,8 @@ export async function failPausedAttentionWait(
     getLog().error({ err, workflowRunId: id }, 'db.workflow_attention_notification_fail_error');
     throw new Error(`Failed to fail paused attention wait: ${err.message}`);
   }
+  if (outcome.failed) await reportRunTerminal(id);
+  return outcome;
 }
 
 /** Atomically consume one exact wait cursor and persist its completed node snapshot. */
@@ -1989,9 +2041,9 @@ export async function claimWriteback(id: string): Promise<{ claimed: boolean }> 
 
 /**
  * Release a previously-claimed write-back apply (R2-F4) after the apply FAILED, so a
- * subsequent `workflow resume` can re-claim and retry. Explicit-null so SQLite's
- * json_patch removes the key (Postgres `||` sets JSON null); `claimWriteback`'s
- * `IS NULL` check treats both as unclaimed. Best-effort — a failure here leaves the
+ * subsequent `workflow resume` can re-claim and retry. The explicit null removes the
+ * key on both dialects (see jsonMerge), so `claimWriteback`'s `IS NULL` check sees an
+ * unclaimed run. Best-effort — a failure here leaves the
  * claim set (the volume is preserved regardless; the operator reconciles manually).
  */
 export async function releaseWritebackClaim(id: string): Promise<void> {

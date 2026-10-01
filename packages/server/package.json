@@ -1,6 +1,6 @@
 {
   "name": "@archon/server",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
@@ -87,6 +87,9 @@
       "src/adapters/web/workflow-bridge.test.ts"
     ],
     [
+      "src/exit-after-telemetry-flush.test.ts"
+    ],
+    [
       "src/resolve-user-id.test.ts"
     ],
     [
@@ -121,6 +124,9 @@
     ],
     [
       "src/host-command.test.ts"
+    ],
+    [
+      "src/static-cache.test.ts"
     ]
   ]
 }

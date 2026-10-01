@@ -1664,6 +1664,15 @@ export interface paths {
             'application/json': components['schemas']['Error'];
           };
         };
+        /** @description No live owner answered, or the owner could not be stopped; the run was not changed */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
         /** @description Server error */
         500: {
           headers: {
@@ -1868,6 +1877,15 @@ export interface paths {
             'application/json': components['schemas']['Error'];
           };
         };
+        /** @description A live owner answered but could not be stopped; the run was not changed */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
         /** @description Server error */
         500: {
           headers: {
@@ -1925,7 +1943,7 @@ export interface paths {
             [name: string]: unknown;
           };
           content: {
-            'application/json': components['schemas']['Error'];
+            'application/json': components['schemas']['GateRefusal'];
           };
         };
         /** @description Not found */
@@ -1994,7 +2012,7 @@ export interface paths {
             [name: string]: unknown;
           };
           content: {
-            'application/json': components['schemas']['Error'];
+            'application/json': components['schemas']['GateRefusal'];
           };
         };
         /** @description Not found */
@@ -2063,7 +2081,7 @@ export interface paths {
             [name: string]: unknown;
           };
           content: {
-            'application/json': components['schemas']['Error'];
+            'application/json': components['schemas']['GateRefusal'];
           };
         };
         /** @description Not found */
@@ -2654,7 +2672,7 @@ export interface paths {
     };
     /**
      * List a run's artifact files
-     * @description Walks the run's artifact directory and returns relative file paths with size + mtime. Drives the console Artifacts tab. Resolves for every project kind — `owner/repo`, `_local/<basename>`, and `_folder/<slug>` — preferring the run's persisted `output_root` and re-deriving from the codebase when it is absent or no longer inside ARCHON_HOME. Returns `{ files: [] }` only when the location resolved and the run genuinely wrote nothing; returns 404 when the output location cannot be resolved at all.
+     * @description Walks the run's artifact directory and returns relative file paths with size + mtime. Drives the console Artifacts tab. Leaves out only the engine's own `.archon` child at the root, the same rule `archon workflow get` applies; a workflow's own dotfiles are listed. Resolves for every project kind — `owner/repo`, `_local/<basename>`, and `_folder/<slug>` — preferring the run's persisted `output_root` and re-deriving from the codebase when it is absent or no longer inside ARCHON_HOME. Returns `{ files: [] }` only when the location resolved and the run genuinely wrote nothing; returns 404 when the output location cannot be resolved at all.
      */
     get: {
       parameters: {
@@ -2794,7 +2812,7 @@ export interface paths {
             'application/json': components['schemas']['ConfigResponse'];
           };
         };
-        /** @description Invalid request body */
+        /** @description Invalid request body, or the resulting config is invalid */
         400: {
           headers: {
             [name: string]: unknown;
@@ -2855,7 +2873,7 @@ export interface paths {
             'application/json': components['schemas']['ConfigResponse'];
           };
         };
-        /** @description Invalid request body */
+        /** @description Invalid request body, or the resulting config is invalid */
         400: {
           headers: {
             [name: string]: unknown;
@@ -2916,7 +2934,7 @@ export interface paths {
             'application/json': components['schemas']['ConfigResponse'];
           };
         };
-        /** @description Invalid alias name, unknown provider, or invalid effort */
+        /** @description Invalid alias name, unknown provider, invalid effort, or the resulting config is invalid */
         400: {
           headers: {
             [name: string]: unknown;
@@ -3488,6 +3506,18 @@ export interface components {
               error: string;
               /** @enum {boolean} */
               retryable?: false;
+              /** @enum {string} */
+              failureKind?:
+                | 'fatal'
+                | 'transient'
+                | 'unknown'
+                | 'timeout'
+                | 'exec_failed'
+                | 'output_contract'
+                | 'max_iterations'
+                | 'child_failed'
+                | 'cancelled'
+                | 'config';
             }
           | {
               /** @enum {string} */
@@ -4198,7 +4228,7 @@ export interface components {
       with?: unknown;
     };
     /** @enum {string} */
-    WorkflowSource: 'project' | 'bundled' | 'global';
+    WorkflowSource: 'project' | 'bundled' | 'global' | 'installed';
     WorkflowLoadError: {
       filename: string;
       error: string;
@@ -4302,6 +4332,7 @@ export interface components {
     };
     WorkflowRunMetadata: {
       wait?: components['schemas']['WorkflowWaitContext'];
+      stop_reason?: components['schemas']['RunStopReason'];
     } & {
       [key: string]: unknown;
     };
@@ -4390,6 +4421,21 @@ export interface components {
           waitingSince: string;
           message: string;
         };
+    RunStopReason: {
+      /** @enum {string} */
+      reason:
+        | 'no_nodes_completed'
+        | 'node_error'
+        | 'unhandled_error'
+        | 'evidence_missing'
+        | 'source_unavailable'
+        | 'not_finalized'
+        | 'process_terminated'
+        | 'launch_failed'
+        | 'run_not_created';
+      /** @enum {string} */
+      signal?: 'SIGINT' | 'SIGTERM';
+    };
     CancelWorkflowRunResponse: {
       success: boolean;
       message: string;
@@ -4397,6 +4443,9 @@ export interface components {
     WorkflowRunActionResponse: {
       success: boolean;
       message: string;
+    };
+    GateRefusal: components['schemas']['Error'] & {
+      childRunId?: string;
     };
     ApproveWorkflowRunBody: {
       comment?: string;
